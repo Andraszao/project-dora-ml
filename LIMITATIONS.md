@@ -28,7 +28,7 @@ This document provides transparent information about Project Dora's limitations,
 - **Reality check:** Plan for an hour of initial training time on first run
 - **Mitigation:** Weights are saved and only trained once - subsequent runs load instantly. Coffee break during first training, then it's done forever.
 - **When it matters:** If you need to retrain frequently or experiment with architecture changes
-- **Alternative:** Reduce `training_samples` to 500 for faster experimentation, or use PyTorch/TensorFlow for rapid iteration
+- **Alternative:** Reduce `training_samples` to 500 for faster experimentation
 
 **Limitation:** Single-threaded batch processing
 - **Impact:** Can't utilize all CPU cores during training
@@ -134,6 +134,7 @@ This document provides transparent information about Project Dora's limitations,
 - Training accuracy: 92-96% with default settings
 - User drawing accuracy: 85-92% (depends on drawing quality)
 - Best possible (this architecture): ~97-98%
+- State-of-art (CNN): >99%
 
 **Why the gap?**
 - Fully-connected architecture vs convolutional
@@ -231,3 +232,4 @@ This project prioritizes **clarity over performance** and **education over optim
 **Questions or concerns about limitations?** Open an issue on GitHub: https://github.com/Andraszao/project-dora-ml/issues
 
 **Want to contribute improvements?** Pull requests welcome, especially for addressing the "High Impact, Moderate Effort" items above.
+
