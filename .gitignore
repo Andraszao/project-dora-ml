@@ -1,0 +1,22 @@
+# Godot generated files
+.godot/
+*.import
+
+# Trained model files
+# dora_trained_weights.dat
+# dora_milestone_weights.dat
+# dora_training_session.dat
+# dora_training_journey.json
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+
+# Backup files
+*.bak
+*~
+
