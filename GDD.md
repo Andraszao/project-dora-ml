@@ -12,10 +12,12 @@ This document proposes a modern artificial-life game in the spirit of *Creatures
 
 | Field | Value |
 |---|---|
-| **Working title** | *[Placeholder]* — codename **DORA-Life** internally |
+| **Working title** | *Project GAIA* (successor to Project Dora) — codename **DORA-Life** internally |
 | **Genre** | Artificial Life Simulation / God Game / Ecosystem Sandbox |
 | **Platform target** | Desktop first (Godot 4.4+), the same engine Dora runs on |
 | **Player count** | Single-player; optional shared-world / lineage-export later |
+| **Session shape** | Long-running persistent worlds; a "save file" is an ecosystem *with history* |
+| **Comparable titles** | *Creatures* (1996) · *Species: Artificial Life, Real Evolution* |
 
 **Player fantasy:**
 
