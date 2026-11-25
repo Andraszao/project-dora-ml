@@ -1,0 +1,22 @@
+{
+  "comment": [
+    "Gate 24 (perf-budget). Set 2026-11-25, before the gate first ran, from `dora-bio bench` on a 4-core cloud container.",
+    "budgets: about 2.5x the medians measured after brick 23 (denoise 0.271 / 0.298 s, training steps 0.12-0.14 s), so a",
+    "slower CI runner still passes but a catastrophic regression fails anywhere.",
+    "speedups: the blocked kernels against the reference kernels, timed in the same run, so the check doesn't depend on",
+    "the machine. Measured 2.11x (denoise) and 1.54x (Noise2Void step); the minimums leave room for run-to-run noise but",
+    "fail if brick 23's gain is lost."
+  ],
+  "budgets": [
+    {"name": "denoise", "architecture": "dilated", "max_median_seconds": 0.70},
+    {"name": "denoise", "architecture": "unet", "max_median_seconds": 0.75},
+    {"name": "train-step-n2v", "architecture": "dilated", "max_median_seconds": 0.35},
+    {"name": "train-step-supervised", "architecture": "dilated", "max_median_seconds": 0.35},
+    {"name": "train-step-n2v", "architecture": "unet", "max_median_seconds": 0.35},
+    {"name": "train-step-supervised", "architecture": "unet", "max_median_seconds": 0.35}
+  ],
+  "speedups": [
+    {"name": "denoise", "architecture": "dilated", "min_speedup_over_reference": 1.5},
+    {"name": "train-step-n2v", "architecture": "dilated", "min_speedup_over_reference": 1.25}
+  ]
+}

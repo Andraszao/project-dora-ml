@@ -422,21 +422,21 @@ public static class Program
 
     /// <summary>
     /// <c>bench</c>: <see cref="PerformanceBench.Run"/>, printed as a table and optionally written as JSON
-    /// (schema 1, checked by tools/ci/check_bench.py; gate 24 compares it with tools/ci/perf_budget.json).
+    /// (schema 2, checked by tools/ci/check_bench.py; gate 24 compares it with tools/ci/perf_budget.json).
     /// </summary>
     private static int Bench(Options o)
     {
         bool quick = o.Has("quick");
         var timings = PerformanceBench.Run(quick);
-        Console.WriteLine($"{"operation",-22} {"architecture",-12} {"detail",-20} {"median s",9} {"min s",9}");
+        Console.WriteLine($"{"operation",-22} {"architecture",-12} {"kernels",-10} {"detail",-20} {"median s",9} {"min s",9}");
         foreach (var t in timings)
-            Console.WriteLine($"{t.Name,-22} {t.Architecture,-12} {t.Detail,-20} {t.MedianSeconds,9:0.0000} {t.MinSeconds,9:0.0000}");
+            Console.WriteLine($"{t.Name,-22} {t.Architecture,-12} {t.Kernels,-10} {t.Detail,-20} {t.MedianSeconds,9:0.0000} {t.MinSeconds,9:0.0000}");
 
         if (o.StringOrNull("json") is { } path)
         {
             var report = new Dictionary<string, object>
             {
-                ["schema"] = 1,
+                ["schema"] = 2,
                 ["model_version"] = WeightsFile.ModelVersion,
                 ["quick"] = quick,
                 ["machine"] = new Dictionary<string, object>
@@ -450,7 +450,7 @@ public static class Program
                 ["timings"] = timings.Select(t => new Dictionary<string, object>
                 {
                     ["name"] = t.Name, ["architecture"] = t.Architecture, ["detail"] = t.Detail,
-                    ["median_seconds"] = t.MedianSeconds, ["min_seconds"] = t.MinSeconds, ["runs"] = t.Runs,
+                    ["median_seconds"] = t.MedianSeconds, ["min_seconds"] = t.MinSeconds, ["runs"] = t.Runs, ["kernels"] = t.Kernels,
                 }).ToList(),
             };
             File.WriteAllText(path, System.Text.Json.JsonSerializer.Serialize(report, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));

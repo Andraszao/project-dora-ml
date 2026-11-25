@@ -300,6 +300,7 @@ MUTATIONS=(
   '21|src/DoraBio.Core/Nn/DenoisingNet.cs|public static NetConfig Default => new(24, [1, 2, 4, 8, 4, 2, 1]);|public static NetConfig Default => UNet();'
   '22|src/DoraBio.Core/PerformanceBench.cs|? "unet" : "dilated";|? "u-net" : "dilated";'
   '23|src/DoraBio.Core/Nn/ConvLayer.Blocked.cs|a7 += new Vector<float>(Unsafe.Add(ref weights, t + 7 * ic9)) * v;|a7 += new Vector<float>(Unsafe.Add(ref weights, t + 6 * ic9)) * v;'
+  '24|src/DoraBio.Core/Nn/DenoisingNet.cs|    internal bool ReferenceKernels { get; set; }|    internal bool ReferenceKernels { get; set; } = true;'
 )
 
 self_test() {
