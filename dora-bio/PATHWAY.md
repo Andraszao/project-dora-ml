@@ -12,8 +12,8 @@ settled first, and so every phase builds only on phases that are already green.
 | **P0** | Foundation | "does any of it work?" | ✅ done (`41e2c6f`): bricks 0–8 green, docs enforced |
 | **P1** | Continuous gates (CI) | regressions slipping in between sessions | ✅ done: bricks 9–10, [CI run #1](https://github.com/Andraszao/project-dora-ml/actions/runs/45617118232) green |
 | **P2** | Real-data truth (FMD) | performance on real microscopes is unmeasured | ✅ done: bricks 11–13, [results](docs/RESULTS.md) on 48 held-out FMD images |
-| **P3** | Noise-model fidelity | **Noise2Void's assumptions failing on real cameras** (measured in P2 on widefield) | 🚧 in progress: bricks 14–15 done ([results](docs/RESULTS.md#p3-correlated-noise-and-structured-blind-spots)), 16–17 next |
-| **P4** | Model capacity (U-Net) | the small CNN being the ceiling | planned |
+| **P3** | Noise-model fidelity | Noise2Void's assumptions failing on real cameras (measured in P2 on widefield) | ✅ done: bricks 14–17, [results](docs/RESULTS.md#p3-correlated-noise-and-structured-blind-spots) |
+| **P4** | Model capacity (U-Net) | **the small CNN being the ceiling** | ⏭ next |
 | **P5** | Performance | slowness on large frames and stacks | planned |
 | **P6** | Stacks, time-lapse, batch | single 2-D frames only | planned |
 | **P7** | Analysis UX | can see but can't measure or export | planned |
@@ -103,7 +103,15 @@ at all five FMD noise levels, not only on raw frames.
 | 17 `calibration` | estimate the noise model from one image: variance = gain · intensity + intercept, which is all the transform needs | on synthetic frames with several camera settings: gain within 10%, and the predicted variance within 10% across the image's intensity range. *(Restated before building: one image can't separate the camera offset from read noise, since both only enter the intercept as read² − gain · offset. The original "gain, offset and read noise each within 10%" was not measurable.)* |
 
 **Exit:** FMD eval at every noise level with and without the structured mask and the transform recorded. Each
-becomes a default only if it wins on held-out data.
+becomes a default only if it wins on held-out data. *For the transform, "wins" was set before running it: compared
+with the same Noise2Void design without it (plain, and the routed pair), the all-48 test_mix PSNR must rise at raw
+and drop by no more than 0.2 dB at any lower noise level.*
+
+**Outcome:** done. The noise check matches ground truth on every FMD test image. Structured blind spots, as two
+networks routed by the check, met their bar (widefield +3.79 dB, confocal +0.32, two-photon +0.61) and bring
+Noise2Void within 0.8 dB of supervised training. They stay opt-in because they lose on cleaner inputs. The
+transform missed its bar (−0.25 to −0.28 dB at raw): one-image calibration works on widefield but not on dim 8-bit
+confocal, so it stays opt-in too. P3 also found and fixed a validation set that covered one category only.
 
 ## P4: Model capacity (U-Net)
 

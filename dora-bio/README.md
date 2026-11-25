@@ -17,16 +17,18 @@ All numbers come from this repo, run on a 4-core cloud VM with no GPU.
 
 | Check | Result |
 |---|---|
-| Core unit tests (`dotnet test`) | 85 passing in ~5 s, including finite-difference gradient checks (mutation-tested) |
-| Brick gates (`./bricks.sh`) | all 14 green (gates 11–13 with the FMD data present); documentation of every public member is enforced by the build |
-| Gates can fail (`./bricks.sh --self-test`) | one planted bug per gate 0–7 and 11–13 (two for gate 0), all 12 caught (after a clean control copy passes) |
+| Core unit tests (`dotnet test`) | 124 passing in ~5 s, including finite-difference gradient checks (mutation-tested) |
+| Brick gates (`./bricks.sh`) | all 18 green (gates 11–15 with the FMD data and P3 weights present); documentation of every public member is enforced by the build |
+| Gates can fail (`./bricks.sh --self-test`) | one planted bug per gate 0–7 and 11–17 (two for gate 0), all 16 caught (after a clean control copy passes) |
 | CI (GitHub Actions) | all gates incl. headless Godot, on PRs into `main`, pushes to `main` and manual runs (docs-only changes skipped): [run #1](https://github.com/Andraszao/project-dora-ml/actions/runs/45617118232) green in 150 s of runner time, 0 billable minutes (public repo) |
 | Codecs vs. independent encoders | TIFF/PNG fixtures written by Pillow, ImageMagick and libtiff decode exactly |
 | Tiled vs. whole-image inference | identical (≤1e-5) for ragged tiles, tiles smaller than the receptive field, etc. |
 | Training reproducibility | two runs with the same seed produce bit-identical weights |
 | Bundled model training | Noise2Void on 10 synthetic 256 px frames, reached the 8 dB "mastery" target at epoch 25 in 5 min |
 | Held-out evaluation (4 unseen synthetic FOVs) | noisy **20.89 dB / SSIM 0.223** → bilateral **28.43 / 0.677** → DORA **30.21 / 0.809** |
-| **Real microscope data** (FMD, 48 held-out images, raw noise level; [details](docs/RESULTS.md)) | noisy **27.22 dB / 0.543** → bilateral **30.22 / 0.752** → DORA supervised **33.47 / 0.873**. Noise2Void (no ground truth) **31.63 / 0.771**; the bundled synthetic model **32.15 / 0.818** |
+| **Real microscope data** (FMD, 48 held-out images, raw noise level; [details](docs/RESULTS.md)) | noisy **27.22 dB / 0.543** → bilateral **30.22 / 0.752** → DORA supervised **33.75 / 0.880**. Without ground truth: Noise2Void routed by the noise check **32.97 / 0.844**, plain Noise2Void 31.68 / 0.774; the bundled synthetic model 32.15 / 0.818 |
+| Correlated-noise check (no ground truth) | same verdict as the ground-truth measurement on all 48 FMD test images; flags exactly the 228 widefield images among 912 training images |
+| Noise-model calibration (one image) | synthetic: gain within 5.1%, variance curve within 6.8%; real FMD: reliable on widefield only ([details](docs/RESULTS.md#variance-stabilization-and-calibration-bricks-1617)) |
 | Train/test leakage on FMD | `dora-bio fmd-check`: every test image is FOV 19 pixel for pixel, and FOV 19 never enters training |
 | Godot 4.5.1 .NET smoke test (headless) | loads model and sample, denoises off-thread, adapts, stays responsive; exit code 0 |
 | Speed | 512×384 frame in ~0.5 s (CLI and in-editor) |
@@ -140,9 +142,10 @@ The plan this rebuild started from had a few errors. Where the build differs fro
 
 ## Roadmap
 
-[`PATHWAY.md`](PATHWAY.md) lays out phases P0–P10: the foundation (P0), CI (P1) and validation on real FMD data (P2)
-are done. Next come noise-model fidelity (P3, now aimed at the correlated noise P2 found), a U-Net, performance,
-stacks, analysis tools, model management, more formats, and a release. Each phase is a set of gated bricks.
+[`PATHWAY.md`](PATHWAY.md) lays out phases P0–P10: the foundation (P0), CI (P1), validation on real FMD data (P2)
+and noise-model fidelity (P3: correlated-noise check, structured blind spots, variance stabilization) are done.
+Next come a U-Net (P4), performance, stacks, analysis tools, model management, more formats, and a release. Each
+phase is a set of gated bricks.
 
 ## Honesty notes and limitations
 
@@ -159,6 +162,9 @@ stacks, analysis tools, model management, more formats, and a release. Each phas
   opt-in: they lose on clean input, and mixed data needs two networks
   ([RESULTS.md](docs/RESULTS.md#p3-correlated-noise-and-structured-blind-spots)). **Adapt to sample** uses them
   automatically on flagged images. If you have averaged frames as ground truth, supervised training is still best.
+- **Variance stabilization (`--vst`) is opt-in and lost on FMD.** It works when the noise model is right, but
+  estimating that model from one dim 8-bit confocal frame isn't reliable, and overall Noise2Void scored 0.25–0.28 dB
+  lower with it. A model trained with `--vst` must also be applied with `--vst`.
 - **DORA can make clean images worse.** On FMD's 16-frame averages, every DORA model scored below the unprocessed
   input (the bundled model by 4.2 dB). It has no notion of "this image is already clean". Training on all noise
   levels reduces the harm a lot for supervised models ([RESULTS.md](docs/RESULTS.md#2-graded-noise-progressive-noise)).

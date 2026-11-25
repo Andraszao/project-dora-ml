@@ -46,8 +46,8 @@ godot/                         Godot 4.5 .NET project (open THIS folder in Godot
 ## Development pathway
 
 Work follows [`PATHWAY.md`](PATHWAY.md): phases **P0 → P10**, each a group of bricks with gates. P0 (bricks 0–8),
-P1 (bricks 9–10, CI) and P2 (bricks 11–13, real FMD data) are done. **The current phase is P3 (noise-model
-fidelity)**: bricks 14–17 are built; closing P3 needs the FMD evaluation with and without the transform. Pick up the next unfinished brick of the current phase,
+P1 (bricks 9–10, CI), P2 (bricks 11–13, real FMD data) and P3 (bricks 14–17, noise-model fidelity) are done.
+**The current phase is P4 (model capacity: a U-Net)**, starting with brick 18 (`pool-upsample`). Pick up the next unfinished brick of the current phase,
 follow the phase protocol there, and update its status table when a phase closes. Read `docs/RESULTS.md` before
 changing training or the model: it records what actually works on real data.
 
@@ -117,6 +117,7 @@ tools/fetch_fmd.sh                                        # FMD dataset, ~9 GB, 
 dotnet tools/DoraBio.Cli/bin/Release/net8.0/dora-bio.dll fmd-eval --weights W.bin --root data/fmd   # held-out test_mix
 tools/experiments/p2_fmd.sh                               # retrain + evaluate every P2 model (~45 min CPU)
 tools/experiments/p3_struct.sh                            # P3: plain vs structured blind spots (~50 min CPU)
+tools/experiments/p3_vst.sh                               # P3: with and without variance stabilization (~16 min CPU)
 dotnet tools/DoraBio.Cli/bin/Release/net8.0/dora-bio.dll fmd-noise --root data/fmd   # is the real noise pixel-independent?
 dotnet tools/DoraBio.Cli/bin/Release/net8.0/dora-bio.dll diagnose --in IMAGE          # the same question, without ground truth
 dotnet test DoraBio.sln                                   # all tests at once, ~5 s
@@ -150,9 +151,10 @@ cd godot && dotnet build && godot --headless --path . --import \
 8. **Validation is held out by FOV** (`ImagePair.GroupId`). Frames of one field of view never straddle the split.
 9. **Journey log lifecycle:** a session opens only when training starts. Every epoch is appended and saved.
    The session ends as `completed` or `failed: …`. Inference-only launches write nothing.
-10. **Structured blind spots are opt-in** (`--struct auto`): on FMD they win on noisy input and lose on clean input,
-    and one network trained on mixed data loses on the independent images (docs/RESULTS.md, P3). Don't make them a
-    default without new held-out evidence. Choose footprints on validation data, never on test_mix.
+10. **Structured blind spots and variance stabilization are opt-in** (`--struct auto`, `--vst`): on FMD the first
+    wins on noisy input and loses on clean input (and one network trained on mixed data loses on the independent
+    images), and the second lost overall (docs/RESULTS.md, P3). Don't make either a default without new held-out
+    evidence. Choose footprints and other settings on validation data, never on test_mix.
 11. **Never train on FMD's test FOV (19).** `FmdOptions.ExcludedFovs` defaults to it, the CLI doesn't expose it, and
     gate 12 proves test_mix is FOV 19 and absent from the training plan. Report results on test_mix only.
 12. **Don't commit FMD data, or weights trained on it, without a license decision.** The data is CC BY-SA 4.0;
