@@ -109,7 +109,11 @@ Rules:
    for `godot/scripts/*.cs` (gate 7). Beyond the tags, comment the *why* and the math: formulas for numeric
    code, file-format primers for codecs, invariants (exact tiling, reproducible gradient sums) where they're
    relied on. GDScript uses `##` doc comments on exports and functions.
-7. **CI is the shared gate, and it's spent thoughtfully.** The full gate set (Godot gate 8 mandatory) runs on
+7. **Alternate building and improving.** From brick 25 on, every other brick is a quality pass: the top item of the
+   quality backlog in `PATHWAY.md`, pre-registered there (candidate, bar, adoption rule) before anything is measured,
+   chosen on validation data, recorded in `docs/RESULTS.md`, and gated so the shipped defaults follow the evidence.
+   A missed bar still completes the pass; record it and move on.
+8. **CI is the shared gate, and it's spent thoughtfully.** The full gate set (Godot gate 8 mandatory) runs on
    GitHub Actions for PRs into `main`, pushes to `main` and manual "Run workflow", never for docs-only changes.
    Gate 9 enforces that policy. On working branches the local `./bricks.sh` is the gate, so run it (with
    `GODOT=…`) before every push and never push red. Don't trigger CI runs that a local run already answers.

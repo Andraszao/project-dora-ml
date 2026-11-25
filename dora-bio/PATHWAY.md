@@ -15,7 +15,7 @@ settled first, and so every phase builds only on phases that are already green.
 | **P3** | Noise-model fidelity | Noise2Void's assumptions failing on real cameras (measured in P2 on widefield) | ✅ done: bricks 14–17, [results](docs/RESULTS.md#p3-correlated-noise-and-structured-blind-spots) |
 | **P4** | Model capacity (U-Net) | the small CNN being the ceiling | ✅ done: bricks 18–21, [results](docs/RESULTS.md#p4-a-u-net-against-the-dilated-network) |
 | **P5** | Performance | slowness on large frames and stacks | ✅ done: bricks 22–24 (2.1× faster denoise, bit-identical) |
-| **P6** | Stacks, time-lapse, batch | **single 2-D frames only** | ⏭ next |
+| **P6** | Stacks, time-lapse, batch | **single 2-D frames only** | ⏭ next, opening with quality pass 25 (Q1) |
 | **P7** | Analysis UX | can see but can't measure or export | planned |
 | **P8** | Model and session management | adaptation lost on restart; no way back to a known-good model | planned |
 | **P9** | Format coverage | "my file won't open" (LZW, OME-TIFF, HDF5) | planned |
@@ -30,8 +30,24 @@ settled first, and so every phase builds only on phases that are already green.
 3. **Close:** full `./bricks.sh` green (with `GODOT=…`), README "What's verified" updated with **measured**
    numbers and the command that produced them, this table updated, then a commit `P<n> done: …`.
 4. **Never start P(n+1) while P(n) is red.** Lower phases may be reopened. A reopened phase re-runs every gate above it.
+5. **Alternate building and improving (from brick 25 on).** After every build brick, the next brick is a **quality
+   pass**: the most valuable open item in the [quality backlog](#quality-backlog-quality-passes), an improvement to
+   DORA's results or a revision of an earlier decision. So the pathway reads build, quality, build, quality, …
 
-Brick numbers below continue from P0's 0–8. They're indicative; renumber if a phase needs more or fewer bricks.
+### Quality-pass protocol
+
+1. **Pick** the highest-value open backlog item (re-rank first if the last brick taught something new).
+2. **Pre-register before measuring:** write the candidate change, the bar and the adoption rule into the item's row,
+   and commit them with the pass. The rule says what ships if the bar is met *and* if it isn't.
+3. **Measure honestly:** choose settings on validation data (held-out training FOVs), score test_mix once for the
+   final comparison, and say so when a design was revised after seeing test results.
+4. **Record** the numbers in `docs/RESULTS.md` as verbatim blocks. The pass's gate re-runs them when the data and
+   weights are present, and checks that the shipped defaults and the recorded verdict follow the rule.
+5. **A miss still completes the pass** ("measured, not adopted"), so the pathway never stalls on a hypothesis that
+   didn't pan out. Whatever was learned goes back into the backlog.
+
+Brick numbers below continue from P0's 0–8. Up to brick 24 they were fixed in advance. From P6 on, build bricks are
+numbered as they're laid, with quality passes between them.
 
 ---
 
@@ -159,48 +175,65 @@ wasn't kept).
 
 | Brick | Delivers | Gate |
 |---|---|---|
-| 25 `tiff-stack-write` | multi-page TIFF writer (the reader already handles pages) | round-trip 3-page stacks in every sample type |
-| 26 `cli-batch` | `denoise` over stacks and folders, streaming one frame at a time with bounded memory | gate 6 denoises a 3-page synthetic stack; peak memory checked |
-| 27 `ui-stack` | page/frame slider in the UI, denoising the current frame or the whole stack (cancellable) | smoke test loads a stack, steps pages, denoises one frame |
+| `tiff-stack-write` | multi-page TIFF writer (the reader already handles pages) | round-trip 3-page stacks in every sample type |
+| `cli-batch` | `denoise` over stacks and folders, streaming one frame at a time with bounded memory | gate 6 denoises a 3-page synthetic stack; peak memory checked |
+| `ui-stack` | page/frame slider in the UI, denoising the current frame or the whole stack (cancellable) | smoke test loads a stack, steps pages, denoises one frame |
 
 ## P7: Analysis UX
 
 | Brick | Delivers | Gate |
 |---|---|---|
-| 28 `sync-view` | synchronized zoom and pan across the three panels | smoke test: same view transform on all panels after a zoom |
-| 29 `measure` | line profile and ROI mean/σ on raw, baseline and DORA | profile values equal the image values exactly (test) |
-| 30 `export` | "Export denoised…" writes float32 TIFF in original units | the UI export is byte-identical to `dora-bio denoise` with the same model and input |
-| 31 `compare` | before/after wipe slider and colormaps (display only) | screenshot review recorded; data path untouched (gate 8) |
+| `sync-view` | synchronized zoom and pan across the three panels | smoke test: same view transform on all panels after a zoom |
+| `measure` | line profile and ROI mean/σ on raw, baseline and DORA | profile values equal the image values exactly (test) |
+| `export` | "Export denoised…" writes float32 TIFF in original units | the UI export is byte-identical to `dora-bio denoise` with the same model and input |
+| `compare` | before/after wipe slider and colormaps (display only) | screenshot review recorded; data path untouched (gate 8) |
 
 ## P8: Model and session management
 
 | Brick | Delivers | Gate |
 |---|---|---|
-| 32 `optimizer-checkpoint` | optional Adam-state block in weights files, so adaptation survives restarts | save → load → continue adapting is **bit-identical** to never stopping |
-| 33 `model-picker` | bundled / user / history models in the UI; reset to bundled; undo last adaptation | smoke test: adapt → undo restores the exact parameters |
-| 34 `journey-view` | journey log viewer (sessions, epochs, milestones) in the UI | renders a fixture journey file; malformed files fail with a message |
+| `optimizer-checkpoint` | optional Adam-state block in weights files, so adaptation survives restarts | save → load → continue adapting is **bit-identical** to never stopping |
+| `model-picker` | bundled / user / history models in the UI; reset to bundled; undo last adaptation | smoke test: adapt → undo restores the exact parameters |
+| `journey-view` | journey log viewer (sessions, epochs, milestones) in the UI | renders a fixture journey file; malformed files fail with a message |
 
 ## P9: Format coverage
 
 | Brick | Delivers | Gate |
 |---|---|---|
-| 35 `tiff-lzw` | LZW decode (the most common "won't open" case today) | libtiff/Pillow LZW fixtures decode exactly |
-| 36 `tiff-tiled-big` | tiled TIFF and BigTIFF | fixtures from libtiff |
-| 37 `ome-metadata` | OME-TIFF pixel size and channel names read, and carried into outputs | metadata round-trip test |
-| 38 `hdf5` | HDF5 reader as a **separate** optional project (`DoraBio.Hdf5`) so the core stays dependency-free | fixture test; gate 0 asserts the core still has zero `PackageReference`s |
+| `tiff-lzw` | LZW decode (the most common "won't open" case today) | libtiff/Pillow LZW fixtures decode exactly |
+| `tiff-tiled-big` | tiled TIFF and BigTIFF | fixtures from libtiff |
+| `ome-metadata` | OME-TIFF pixel size and channel names read, and carried into outputs | metadata round-trip test |
+| `hdf5` | HDF5 reader as a **separate** optional project (`DoraBio.Hdf5`) so the core stays dependency-free | fixture test; gate 0 asserts the core still has zero `PackageReference`s |
 
 ## P10: Release
 
 | Brick | Delivers | Gate |
 |---|---|---|
-| 39 `export-presets` | Godot .NET export presets for Linux, Windows and macOS | exported Linux build runs the smoke scenario headless in CI |
-| 40 `release-ci` | tag → CI builds, attaches binaries and the CLI to a **draft** GitHub release | draft release created on a test tag |
-| 41 `user-docs` | user guide (install, first denoise, adapt, train, evaluate), changelog, data and weights license notes | docs link-checked; README quick start verified on the exported build |
+| `export-presets` | Godot .NET export presets for Linux, Windows and macOS | exported Linux build runs the smoke scenario headless in CI |
+| `release-ci` | tag → CI builds, attaches binaries and the CLI to a **draft** GitHub release | draft release created on a test tag |
+| `user-docs` | user guide (install, first denoise, adapt, train, evaluate), changelog, data and weights license notes | docs link-checked; README quick start verified on the exported build |
 
 **Exit:** v2.0.0 tagged. **Needs your decisions:** app signing and notarization (Apple and Windows accounts) and
 the release license text.
 
 ---
+
+## Quality backlog (quality passes)
+
+Ranked by expected value. Each item names the evidence it comes from. When a pass picks an item, its candidate,
+bar and adoption rule are written here **before** it is measured.
+
+| # | Item | Evidence | Status |
+|---|---|---|---|
+| Q1 | **Best supervised recipe**: U-Net + all five FMD noise levels + a longer budget | U-Net +0.98 dB supervised and still improving at the 30-epoch cap (P4); all-level training +0.5 to +3.0 dB on cleaner inputs for supervised models (P2) | 🚧 brick 25. **Pre-registered:** candidate = U-Net (16→64, depth 2), supervised, all 5 levels (2 frames each), 60 epochs; ablation = the same at 30 epochs. Compared with the current best supervised model (U-Net, raw only, 30 epochs: 34.73 dB). **Bar:** all-48 test_mix PSNR at raw ≥ 34.63 dB (−0.1 at most), the mean over avg2–avg16 at least +0.5 dB higher, and no lower level more than 0.1 dB worse. **Rule:** if met, this becomes the documented supervised recipe for FMD-style data with averaged frames (`--fmd-levels` all, `--epochs 60`, `--arch unet`), and supervised FMD training defaults to all noise levels; if not, nothing ships and the measurements are recorded |
+| Q2 | **U-Net Noise2Void training**: its run stopped early (best epoch 4) and lost 0.47 dB | P4 | open |
+| Q3 | **"Do no harm" on clean inputs**: every model scores below the untouched image on 16-frame averages (bundled model −4.2 dB) | P2, P3, P4 level tables | open |
+| Q4 | **Per-mode default architecture** (U-Net when training with ground truth) | P4 rule kept the dilated default; **needs the owner's decision** | waiting for a decision |
+| Q5 | **Validation that can tell close models apart**: 48 patches ranked U-Net and dilated Noise2Void the wrong way round | P4 (25.56 vs 25.39 dB on validation, opposite on test) | open |
+| Q6 | **Seed variance**: every comparison is one run with one seed | all phases | open |
+| Q7 | **Structured blind spots on clean inputs**: the routed pair loses from avg4 up | P3 | open (overlaps Q3) |
+| Q8 | **A better synthetic generator for the bundled model** (correlated noise, more realistic structure), measured on FMD | the bundled model is synthetic-only by license; it scored 32.15 dB on real data and is the worst on clean inputs | open |
+| Q9 | **Calibration on dim 8-bit images** (curve-based variance stabilization) | P3: variance after the transform 0.41 on confocal | open, low priority |
 
 ## Parking lot (deliberately not on the path)
 
