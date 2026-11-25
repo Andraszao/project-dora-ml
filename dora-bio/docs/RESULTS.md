@@ -368,6 +368,29 @@ mean over avg2–avg16 at least 0.5 dB higher; no lower level more than 0.1 dB w
   raw-trained model for noisy images and the all-level model for clean ones, the way P3 routed by noise correlation.
   If the noise estimate is good enough, that could keep 34.73 at raw and gain the 2–5 dB on clean inputs.
 
+## Quality pass Q10: routing each image by its noise level
+
+The second quality pass (brick 27), pre-registered in `PATHWAY.md` (commit `9361f10`) before any of its code existed.
+Reproduce: `tools/experiments/q10_routing.sh`. **Idea:** keep Q1's gains on clean inputs without its cost on noisy ones,
+by sending noisy images to A (P4's U-Net trained on raw frames) and clean ones to B (Q1's all-level U-Net). The router is
+Immerkær's noise σ of the normalized image. **Its threshold was chosen on the 46 validation FOVs both models held out**
+(all five levels, 230 images), never on test_mix. **Bar:** at raw ≥ A − 0.1 dB (34.63); over avg2–avg16 ≥ B − 0.2 dB (37.46).
+
+| Validation, PSNR (dB) | raw | avg2 | avg4 | avg8 | avg16 | all 230 |
+|---|---|---|---|---|---|---|
+| A: raw-trained U-Net | **35.31** | 35.93 | 36.05 | 36.14 | 36.27 | 35.94 |
+| B: all-level U-Net | 34.97 | **36.30** | **37.63** | **39.02** | **40.86** | **37.76** |
+
+- **The best threshold on validation sends every image to B.** A is better only on raw frames there, by 0.34 dB, and
+  σ can't pick those images out, because how noisy an image looks depends on the sample as much as on the averaging.
+  Even a router that knew each image's true noise level would gain only 0.06 dB over "always B" on validation.
+- **On test_mix, routing scores 34.28 dB at raw** (8 of the 48 raw images went to A), against the 34.63 needed; the
+  lower levels match B (37.68 on average). **The bar is missed, so nothing ships:** `dora-bio denoise` doesn't get the
+  routing option; the evaluation tooling (`fmd-route`, `fmd-eval --weights-clean`) stays. <!-- q10-verdict: not-adopted -->
+- **What it teaches:** when the noise level of the data isn't known in advance, the all-level model alone is the better
+  single supervised model: it costs 0.3–0.5 dB on the noisiest frames and gains 1–5 dB on everything cleaner. Whether
+  that trade is worth taking is a choice about what DORA's users image, not something these bars can settle.
+
 ## What these results do and don't show
 
 - **One seed per configuration.** Differences of a few tenths of a dB may be run-to-run variation rather than real
@@ -385,7 +408,7 @@ mean over avg2–avg16 at least 0.5 dB higher; no lower level more than 0.1 dB w
 - **Weights trained on FMD are not published** (CC BY-SA terms for derived models are a separate decision). The
   bundled model stays the synthetic one.
 
-## Reproducibility checks (gates 13, 15, 21 and 25)
+## Reproducibility checks (gates 13, 15, 21, 25 and 27)
 
 The blocks marked `fmd-noise` above and the blocks below are verbatim program output. `bricks.sh` gate 13 re-runs
 the first two whenever the data is present and requires an exact match. The block below is
@@ -600,3 +623,63 @@ WideField   12   38.74 / 0.923   39.91 / 0.944   40.93 / 0.956
 all         48   39.70 / 0.949   40.57 / 0.964   40.15 / 0.961
 ```
 <!-- /q1-ablation -->
+
+Gate 27 applies Q10's rule to the routed block below (A's raw score from `p4-unet-sup`, B's lower levels from
+`q1-candidate`), checks the recorded verdict, and re-runs both blocks when the weights are present. Threshold choice on
+the validation FOVs, `fmd-route --weights runs/p4/unet_sup.bin --weights-clean runs/q1/unet_levels60.bin`:
+
+<!-- q10-validation -->
+```text
+validation FOVs held out by seed 2026: 46 FOVs × 5 levels = 230 images
+level    n  sigma median   PSNR A  PSNR B  routed  to B
+raw     46       0.03951    35.31   34.97   34.97    46
+avg2    46       0.03072    35.93   36.30   36.30    46
+avg4    46       0.02342    36.05   37.63   37.63    46
+avg8    46       0.01827    36.14   39.02   39.02    46
+avg16   46       0.01430    36.27   40.86   40.86    46
+all    230                  35.94   37.76   37.76   230
+chosen noise threshold: 0.07627
+```
+<!-- /q10-validation -->
+
+Routed on test_mix with that threshold:
+
+<!-- q10-routed -->
+```text
+test_mix level raw: mean PSNR (dB) / SSIM vs ground truth, 8-bit scale
+modality     n  noisy           bilateral       DORA           
+Confocal    20   29.13 / 0.701   31.74 / 0.872   35.31 / 0.924
+TwoPhoton   16   26.32 / 0.473   31.07 / 0.816   33.79 / 0.889
+WideField   12   25.23 / 0.374   26.53 / 0.466   33.21 / 0.861
+all         48   27.22 / 0.543   30.22 / 0.752   34.28 / 0.896
+routed by noise level (σ ≤ 0.07627): 40 of 48 images to the clean-input model
+test_mix level avg2: mean PSNR (dB) / SSIM vs ground truth, 8-bit scale
+modality     n  noisy           bilateral       DORA           
+Confocal    20   32.11 / 0.805   34.43 / 0.919   37.00 / 0.945
+TwoPhoton   16   28.95 / 0.627   32.22 / 0.868   33.66 / 0.902
+WideField   12   28.19 / 0.540   29.46 / 0.631   34.36 / 0.890
+all         48   30.08 / 0.680   32.45 / 0.830   35.23 / 0.917
+routed by noise level (σ ≤ 0.07627): 41 of 48 images to the clean-input model
+test_mix level avg4: mean PSNR (dB) / SSIM vs ground truth, 8-bit scale
+modality     n  noisy           bilateral       DORA           
+Confocal    20   34.86 / 0.882   36.66 / 0.947   38.59 / 0.958
+TwoPhoton   16   31.58 / 0.764   34.46 / 0.917   35.67 / 0.932
+WideField   12   31.23 / 0.702   32.45 / 0.773   36.19 / 0.918
+all         48   32.86 / 0.798   34.88 / 0.894   37.02 / 0.939
+routed by noise level (σ ≤ 0.07627): 48 of 48 images to the clean-input model
+test_mix level avg8: mean PSNR (dB) / SSIM vs ground truth, 8-bit scale
+modality     n  noisy           bilateral       DORA           
+Confocal    20   37.97 / 0.937   39.28 / 0.967   40.14 / 0.969
+TwoPhoton   16   34.53 / 0.871   36.06 / 0.938   36.24 / 0.941
+WideField   12   34.79 / 0.833   36.01 / 0.878   38.06 / 0.940
+all         48   36.03 / 0.889   37.39 / 0.935   38.32 / 0.952
+routed by noise level (σ ≤ 0.07627): 48 of 48 images to the clean-input model
+test_mix level avg16: mean PSNR (dB) / SSIM vs ground truth, 8-bit scale
+modality     n  noisy           bilateral       DORA           
+Confocal    20   41.08 / 0.970   41.66 / 0.979   40.97 / 0.975
+TwoPhoton   16   38.70 / 0.941   39.70 / 0.962   39.04 / 0.957
+WideField   12   38.74 / 0.923   39.91 / 0.944   40.27 / 0.957
+all         48   39.70 / 0.949   40.57 / 0.964   40.15 / 0.965
+routed by noise level (σ ≤ 0.07627): 48 of 48 images to the clean-input model
+```
+<!-- /q10-routed -->

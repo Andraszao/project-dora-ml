@@ -24,7 +24,7 @@ export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_SKIP_FIRST_TIME_EXPE
 
 NAMES=(scaffold nn data io inference training cli godot-build godot-smoke ci-core ci-godot fmd-fetch fmd-loader fmd-eval
        n2v-diagnostic structured-mask vst calibration pool-upsample unet unet-tiling arch-eval
-       bench blocked-conv perf-budget q1-recipe tiff-stack-write)
+       bench blocked-conv perf-budget q1-recipe tiff-stack-write q10-routing)
 CHECKS=(
   "solution builds (warnings are errors, missing XML docs included); every test class belongs to exactly one brick"
   "ConvLayer/DenoisingNet/Adam/Simd: finite-difference gradient checks, optimizer behavior"
@@ -53,6 +53,7 @@ CHECKS=(
   "dora-bio bench stays within the time budgets in tools/ci/perf_budget.json"
   "quality pass Q1: the recorded verdict follows the pre-registered rule; with data + weights the blocks reproduce"
   "multi-page TIFF stacks round-trip in every sample type; Pillow (an independent reader) reads a written stack exactly"
+  "quality pass Q10: router unit tests; the recorded verdict follows the pre-registered rule; with data + weights the blocks reproduce"
 )
 LAST=$((${#NAMES[@]} - 1))
 LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dora-bricks.XXXXXX")"
@@ -269,6 +270,34 @@ gate_26() (   # tiff-stack-write (subshell: set -e stops only this gate)
   python3 -I tools/ci/check_tiff_stack.py "$t/stack.tif" "$t/noisy"
 )
 
+gate_27() {   # q10-routing (quality pass Q10, pre-registered in PATHWAY.md before any of its code existed)
+  test_gate 27-q10-routing || return 1
+  # Rule: routed at raw >= A's raw (p4-unet-sup) - 0.1 dB, and routed mean over avg2..avg16 >= B's (q1-candidate) - 0.2 dB.
+  local a_raw expected recorded
+  a_raw="$(recorded_block p4-unet-sup | awk '$1 == "all" { print $9 }')"
+  [[ -n "$a_raw" && -n "$(recorded_block q1-candidate)" && -n "$(recorded_block q10-routed)" ]] \
+    || { echo ">> docs/RESULTS.md needs the p4-unet-sup, q1-candidate and q10-routed blocks"; return 1; }
+  expected="$( { echo "a raw $a_raw"; recorded_block q1-candidate | levels_all | sed 's/^/b /';
+                 recorded_block q10-routed | levels_all | sed 's/^/r /'; } | awk '
+    { v[$1 "," $2] = $3 }
+    END {
+      split("avg2 avg4 avg8 avg16", L, " "); rb = 0; bb = 0
+      for (i = 1; i <= 4; i++) { rb += v["r," L[i]] / 4; bb += v["b," L[i]] / 4 }
+      ok = v["r,raw"] >= v["a,raw"] - 0.1 - 1e-9 && rb >= bb - 0.2 - 1e-9
+      printf "%s raw %+.2f vs A, lower levels %+.2f vs B\n", ok ? "adopted" : "not-adopted", v["r,raw"] - v["a,raw"], rb - bb
+    }')"
+  recorded="$(sed -n 's/.*<!-- q10-verdict: \([a-z-]*\) -->.*/\1/p' docs/RESULTS.md)"
+  [[ "${expected%% *}" == "$recorded" ]] || { echo ">> Q10's rule gives '${expected%% *}' ($expected), but RESULTS.md records '$recorded'"; return 1; }
+  echo ">> Q10: $expected; recorded verdict agrees"
+  local a=runs/p4/unet_sup.bin b=runs/q1/unet_levels60.bin threshold
+  [[ -f "$FMD/test_mix/.complete" && -f $a && -f $b ]] \
+    || { echo "verdict checked on the recorded results; reproduction skipped (needs FMD data and the P4/Q1 weights)"; return 77; }
+  dotnet build tools/DoraBio.Cli -c Release >/dev/null || return 1
+  reproduces q10-validation fmd-route --weights $a --weights-clean $b --root "$FMD" --seed 2026 || return 1
+  threshold="$(recorded_block q10-validation | sed -n 's/^chosen noise threshold: //p')"
+  reproduces q10-routed fmd-eval --weights $a --weights-clean $b --noise-threshold "$threshold" --root "$FMD" --levels raw,avg2,avg4,avg8,avg16 || return 1
+}
+
 gate_21() {   # arch-eval
   test_gate 21-arch-eval || return 1
   # The rule was set before measuring (PATHWAY.md, P4): the U-Net becomes the default only if, at the same training
@@ -346,6 +375,7 @@ MUTATIONS=(
   '24|src/DoraBio.Core/Nn/DenoisingNet.cs|    internal bool ReferenceKernels { get; set; }|    internal bool ReferenceKernels { get; set; } = true;'
   '25|docs/RESULTS.md|<!-- q1-verdict: not-adopted -->|<!-- q1-verdict: adopted -->'
   '26|src/DoraBio.Core/IO/TiffCodec.cs|pointerAt = ifdOffset + ifd.Length - 4;|pointerAt = 4;'
+  '27|docs/RESULTS.md|<!-- q10-verdict: not-adopted -->|<!-- q10-verdict: adopted -->'
 )
 
 self_test() {

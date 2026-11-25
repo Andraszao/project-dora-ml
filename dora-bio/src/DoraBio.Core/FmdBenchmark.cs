@@ -72,10 +72,22 @@ public static class FmdBenchmark
     /// columns are unaffected.
     /// </param>
     public static List<FmdScore> Evaluate(Func<GrayImage, DenoisingNet> pickNet, string testMixDir, string level = "raw",
+        int tileCore = TiledInference.DefaultTileCore, bool stabilize = false) =>
+        EvaluatePlan(pickNet, FmdDataset.PlanTestMix(testMixDir, level), tileCore, stabilize);
+
+    /// <summary>
+    /// The same protocol on any planned pairs, e.g. <see cref="ValidationPlan"/>: per image, normalize, denoise with the
+    /// model <paramref name="pickNet"/> picks, map back to 8-bit units, and score against ground truth.
+    /// </summary>
+    /// <param name="pickNet">Given an image's noisy pixels (original units), returns the model that denoises it.</param>
+    /// <param name="plan">The pairs to score.</param>
+    /// <param name="tileCore">Tile core size for inference.</param>
+    /// <param name="stabilize">Denoise through the variance-stabilized domain (models trained with --vst).</param>
+    public static List<FmdScore> EvaluatePlan(Func<GrayImage, DenoisingNet> pickNet, IReadOnlyList<FmdDataset.PlannedPair> plan,
         int tileCore = TiledInference.DefaultTileCore, bool stabilize = false)
     {
         var scores = new List<FmdScore>();
-        foreach (var p in FmdDataset.PlanTestMix(testMixDir, level))
+        foreach (var p in plan)
         {
             var noisy = ImageLoader.Load(p.NoisyPath);
             var clean = ImageLoader.Load(p.CleanPath);
@@ -86,7 +98,8 @@ public static class FmdBenchmark
                 : ToSensorUnits(TiledInference.Denoise(pickNet(noisy), input, tileCore), map);
             var bilateral = ToSensorUnits(BilateralBaseline.FilterAuto(input), map);
 
-            scores.Add(new FmdScore(p.Name, p.GroupId, ModalityOf(p.GroupId),
+            string category = p.GroupId.Split('/')[0];
+            scores.Add(new FmdScore(p.Name, category, ModalityOf(category),
                 Metrics.Psnr(noisy.Pixels, clean.Pixels, DataRange), Metrics.Ssim(noisy, clean, DataRange),
                 Metrics.Psnr(bilateral.Pixels, clean.Pixels, DataRange), Metrics.Ssim(bilateral, clean, DataRange),
                 Metrics.Psnr(dora.Pixels, clean.Pixels, DataRange), Metrics.Ssim(dora, clean, DataRange)));
@@ -174,6 +187,28 @@ public static class FmdBenchmark
         ByModality(stats, s => s.Modality).Select(g => (g.Group, g.Items.Count, new NoiseStats(g.Group, g.Group,
             g.Items.Average(s => s.Right1), g.Items.Average(s => s.Down1), g.Items.Average(s => s.Right2),
             g.Items.Average(s => s.NoiseSd)))).ToList();
+
+    /// <summary>
+    /// The FOVs a training run held out for validation, at the given noise levels: exactly the groups
+    /// <see cref="Training.Trainer"/> withholds for <paramref name="seed"/> and <paramref name="fraction"/> (the split depends
+    /// only on the set of FOVs, not on how many frames or levels were loaded). For choosing settings without touching
+    /// test_mix. FOV 19 is never among them.
+    /// </summary>
+    /// <param name="root">The FMD root.</param>
+    /// <param name="seed">The training run's seed.</param>
+    /// <param name="levels">Noise levels to include for each held-out FOV.</param>
+    /// <param name="framesPerFov">Frames per FOV and level.</param>
+    /// <param name="fraction">The training run's validation fraction.</param>
+    public static List<FmdDataset.PlannedPair> ValidationPlan(string root, int seed, IReadOnlyList<string> levels,
+        int framesPerFov = 1, double fraction = 0.2)
+    {
+        var groups = FmdDataset.PlanTraining(root, new FmdOptions()).Select(p => p.GroupId).Distinct().ToList();
+        var placeholder = new GrayImage(1, 1);
+        var (_, held) = DatasetSplit.Split(groups.Select(g => new ImagePair(placeholder, null, g, g)).ToList(), fraction, seed);
+        var heldOut = held.Select(p => p.GroupId).ToHashSet();
+        return FmdDataset.PlanTraining(root, new FmdOptions { FramesPerFov = framesPerFov, NoiseLevels = levels.ToArray() })
+            .Where(p => heldOut.Contains(p.GroupId)).ToList();
+    }
 
     /// <summary>Groups by modality in ordinal order, then appends everything as "all".</summary>
     private static List<(string Group, List<T> Items)> ByModality<T>(IReadOnlyList<T> items, Func<T, string> modality)

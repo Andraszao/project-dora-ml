@@ -32,6 +32,7 @@ internal static class Bricks
     public const string BlockedConv = "23-blocked-conv";         // register-blocked convolution kernels
     public const string PerfBudget = "24-perf-budget";           // time budgets that fail on regressions
     public const string TiffStackWrite = "26-tiff-stack-write";  // multi-page TIFF writer
+    public const string NoiseRouting = "27-q10-routing";         // quality pass Q10: route by noise level
 }
 
 [Trait(Bricks.Trait, Bricks.Scaffold)]
@@ -41,7 +42,7 @@ public class BrickWiringTests
         [Bricks.Scaffold, Bricks.Nn, Bricks.Data, Bricks.IO, Bricks.Inference, Bricks.Training, Bricks.Fmd, Bricks.FmdEval,
          Bricks.NoiseDiagnostic, Bricks.StructuredMask, Bricks.Vst, Bricks.Calibration,
          Bricks.PoolUpsample, Bricks.UNet, Bricks.UNetTiling, Bricks.ArchEval,
-         Bricks.Bench, Bricks.BlockedConv, Bricks.PerfBudget, Bricks.TiffStackWrite];
+         Bricks.Bench, Bricks.BlockedConv, Bricks.PerfBudget, Bricks.TiffStackWrite, Bricks.NoiseRouting];
 
     /// <summary>An untagged test would silently run in no gate, so treat a missing or unknown brick as a build error.</summary>
     [Xunit.Fact]

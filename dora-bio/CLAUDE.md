@@ -87,6 +87,7 @@ before anything is built on top.** `./bricks.sh` runs the gates in order and sto
 | 24 | perf-budget | `tools/ci/perf_budget.json` | `Brick=24-perf-budget`; a full `bench` stays within the budgets |
 | 25 | q1-recipe (quality pass) | `tools/experiments/q1_supervised.sh`, `docs/RESULTS.md` | Q1's recorded verdict follows its pre-registered rule (`<!-- q1-verdict -->`); with data + weights the blocks reproduce |
 | 26 | tiff-stack-write | `IO/TiffCodec.cs` (`EncodeStack`), CLI `synth --stack`, `tools/ci/check_tiff_stack.py` | `Brick=26-tiff-stack-write` (3-page round trips, every sample type, ±Deflate); Pillow reads a written stack exactly (SKIPPED without Pillow; CI installs it) |
+| 27 | q10-routing (quality pass) | `NoiseLevelRouter.cs`, `FmdBenchmark.ValidationPlan`, CLI `fmd-route` / `fmd-eval --weights-clean`, `tools/experiments/q10_routing.sh` | `Brick=27-q10-routing`; Q10's recorded verdict follows its pre-registered rule; with data + weights the blocks reproduce |
 
 Gates 11–15 and 21 need the dataset (the reproductions in gates 15 and 21 also need the weights from `tools/experiments/`) (`tools/fetch_fmd.sh`, about 9 GB into the gitignored `data/fmd/`). Without it, their
 data-dependent part reports SKIPPED (exit code 77) while the pins, unit tests and RESULTS.md checks still run. CI has

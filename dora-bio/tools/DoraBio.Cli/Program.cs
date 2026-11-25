@@ -48,6 +48,9 @@ public static class Program
                    Verify a downloaded FMD dataset: structure, test_mix, and no train/test leakage.
           fmd-eval  --weights WEIGHTS.bin --root data/fmd [--levels raw,avg2,...] [--per-image]
                    [--weights-correlated W2.bin]  (images whose noise check says correlated go to W2 instead)
+                   [--weights-clean W2.bin --noise-threshold S]  (images with noise σ ≤ S go to W2 instead)
+          fmd-route --weights A.bin --weights-clean B.bin --root data/fmd [--seed 2026]
+                   Chooses the noise threshold for --weights-clean on the validation FOVs of a training run (never test_mix).
                    [--vst]  (for models trained with --vst)
                    PSNR/SSIM (8-bit scale) on FMD's held-out test_mix: noisy vs bilateral vs DORA, per microscope type.
           fmd-noise --root data/fmd [--levels raw,avg2,...]
@@ -86,6 +89,7 @@ public static class Program
                 "fmd-eval" => FmdEval(options),
                 "fmd-noise" => FmdNoise(options),
                 "fmd-diagnose" => FmdDiagnose(options),
+                "fmd-route" => FmdRoute(options),
                 "diagnose" => Diagnose(options),
                 "bench" => Bench(options),
                 _ => throw new ArgumentException($"Unknown command '{args[0]}'."),
@@ -345,13 +349,22 @@ public static class Program
     {
         var (net, _) = WeightsFile.Load(o.Required("weights"));
         // --weights-correlated: a second model for the images whose noise check says correlated (P3's routed design).
+        // --weights-clean + --noise-threshold: a second model for images whose noise σ is at or below the threshold (Q10).
         var correlatedNet = o.StringOrNull("weights-correlated") is { } c ? WeightsFile.Load(c).Net : null;
+        var cleanNet = o.StringOrNull("weights-clean") is { } q ? WeightsFile.Load(q).Net : null;
+        if (correlatedNet is not null && cleanNet is not null)
+            throw new ArgumentException("Use either --weights-correlated or --weights-clean, not both.");
+        double noiseThreshold = cleanNet is null ? 0 : o.Double("noise-threshold", double.NaN);
+        if (cleanNet is not null && double.IsNaN(noiseThreshold))
+            throw new ArgumentException("--weights-clean needs --noise-threshold (dora-bio fmd-route chooses one on validation data).");
         int routed = 0;
         DenoisingNet Pick(GrayImage noisy)
         {
-            if (correlatedNet is null || !IsCorrelated(noisy)) return net;
+            var second = correlatedNet ?? cleanNet;
+            bool useSecond = correlatedNet is not null ? IsCorrelated(noisy) : cleanNet is not null && NoiseLevelRouter.Sigma(noisy) <= noiseThreshold;
+            if (!useSecond) return net;
             routed++;
-            return correlatedNet;
+            return second!;
         }
         string testMix = Path.Combine(o.Required("root"), "test_mix");
         var levels = o.String("levels", "raw").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
@@ -365,6 +378,8 @@ public static class Program
                 Console.WriteLine($"{group,-10} {count,3}  {m.NoisyPsnr,6:0.00} / {m.NoisySsim:0.000}  {m.BilateralPsnr,6:0.00} / {m.BilateralSsim:0.000}  {m.DoraPsnr,6:0.00} / {m.DoraSsim:0.000}");
             if (correlatedNet is not null)
                 Console.WriteLine($"routed by the noise check: {routed} of {scores.Count} images to the correlated-noise model");
+            if (cleanNet is not null)
+                Console.WriteLine($"routed by noise level (σ ≤ {noiseThreshold:0.00000}): {routed} of {scores.Count} images to the clean-input model");
             if (o.Has("per-image"))
                 foreach (var s in scores)
                     Console.WriteLine($"  {s.Name,-40} {s.NoisyPsnr,6:0.00} {s.BilateralPsnr,6:0.00} {s.DoraPsnr,6:0.00}");
@@ -510,6 +525,37 @@ public static class Program
         }
         Console.WriteLine(disagreements == 0 ? "✓ every verdict agrees with the ground truth" : $"✗ {disagreements} verdicts disagree");
         return disagreements == 0 ? 0 : 1;
+    }
+
+    /// <summary>
+    /// <c>fmd-route</c>: on the FOVs a training run with <c>--seed</c> held out for validation (all five noise levels, one
+    /// frame each), scores model A and model B on every image, measures its noise σ, and chooses the threshold that
+    /// maximizes the mean PSNR of routing (σ above → A, otherwise → B). test_mix is never touched. Deterministic, so the
+    /// output can be recorded and re-checked (quality pass Q10, gate 27).
+    /// </summary>
+    private static int FmdRoute(Options o)
+    {
+        var a = WeightsFile.Load(o.Required("weights")).Net;
+        var b = WeightsFile.Load(o.Required("weights-clean")).Net;
+        var plan = FmdBenchmark.ValidationPlan(o.Required("root"), o.Int("seed", 2026), FmdDataset.Levels);
+        var sigmas = plan.Select(p => NoiseLevelRouter.Sigma(ImageLoader.Load(p.NoisyPath))).ToList();
+        var scoresA = FmdBenchmark.EvaluatePlan(_ => a, plan);
+        var scoresB = FmdBenchmark.EvaluatePlan(_ => b, plan);
+        var images = plan.Select((_, i) => (sigmas[i], scoresA[i].DoraPsnr, scoresB[i].DoraPsnr)).ToList();
+        var (threshold, mean) = NoiseLevelRouter.ChooseThreshold(images);
+
+        Console.WriteLine($"validation FOVs held out by seed {o.Int("seed", 2026)}: {plan.Select(p => p.GroupId).Distinct().Count()} FOVs × 5 levels = {plan.Count} images");
+        Console.WriteLine($"{"level",-6} {"n",3}  {"sigma median",12}  {"PSNR A",7} {"PSNR B",7} {"routed",7}  {"to B",4}");
+        foreach (string level in FmdDataset.Levels)
+        {
+            var idx = plan.Select((p, i) => (p, i)).Where(t => t.p.Name.Split('/')[1] == level).Select(t => t.i).ToList();
+            var s = idx.Select(i => sigmas[i]).OrderBy(v => v).ToList();
+            double routedMean = idx.Average(i => sigmas[i] > threshold ? scoresA[i].DoraPsnr : scoresB[i].DoraPsnr);
+            Console.WriteLine($"{level,-6} {idx.Count,3}  {s[s.Count / 2],12:0.00000}  {idx.Average(i => scoresA[i].DoraPsnr),7:0.00} {idx.Average(i => scoresB[i].DoraPsnr),7:0.00} {routedMean,7:0.00}  {idx.Count(i => sigmas[i] <= threshold),4}");
+        }
+        Console.WriteLine($"all    {plan.Count,3}  {"",12}  {scoresA.Average(x => x.DoraPsnr),7:0.00} {scoresB.Average(x => x.DoraPsnr),7:0.00} {mean,7:0.00}  {images.Count(i => i.Item1 <= threshold),4}");
+        Console.WriteLine($"chosen noise threshold: {threshold:0.00000}");
+        return 0;
     }
 
     /// <summary><c>info</c>: prints a weights file's version, architecture, size, save time and provenance.</summary>
