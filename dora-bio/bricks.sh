@@ -42,7 +42,7 @@ CHECKS=(
   "correlated-noise check from the noisy image alone; with data: agrees with the ground-truth measurement on every raw test image"
   "structured blind spots; recorded FMD results meet the bar set in advance (widefield +1 dB, others -0.2 dB at worst); with data + weights: they reproduce"
   "generalized Anscombe transform: unit variance across intensities on synthetic data, exact unbiased inverse"
-  "gain, offset and read-noise estimation: recovers the synthetic generator's settings within 10%"
+  "noise model (variance = gain · intensity + intercept) from one image: synthetic gain within 10%, variance curve within 10%"
 )
 LAST=$((${#NAMES[@]} - 1))
 LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dora-bricks.XXXXXX")"
@@ -233,6 +233,7 @@ MUTATIONS=(
   '13|docs/RESULTS.md||<DELETE-FILE>'
   '14|src/DoraBio.Core/NoiseDiagnostics.cs|b = r[(y + dy) * TileSize + x + dx];|b = r[(y + dy) * TileSize + x];'
   '15|src/DoraBio.Core/Data/BlindSpot.cs|do q = rng.Next(plane); while (hidden[q]);|q = rng.Next(plane);'
+  '16|src/DoraBio.Core/Data/Anscombe.cs|- 11 / (8 * d * d)|- 11 / (8 * d)'
 )
 
 self_test() {
