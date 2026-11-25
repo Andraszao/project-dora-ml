@@ -18,7 +18,9 @@ All numbers come from this repo, run on a 4-core cloud VM with no GPU.
 | Check | Result |
 |---|---|
 | Core unit tests (`dotnet test`) | 70 passing in ~4 s, including finite-difference gradient checks (mutation-tested) |
-| Brick gates (`./bricks.sh`) | all 9 green; documentation of every public member is enforced by the build |
+| Brick gates (`./bricks.sh`) | all 11 green; documentation of every public member is enforced by the build |
+| Gates can fail (`./bricks.sh --self-test`) | one planted bug per gate 0–7, all 9 caught (after a clean control copy passes) |
+| CI (GitHub Actions) | all gates incl. headless Godot, on PRs into `main`, pushes to `main` and manual runs (docs-only changes skipped): [run #1](https://github.com/Andraszao/project-dora-ml/actions/runs/45617118232) green in 150 s of runner time, 0 billable minutes (public repo) |
 | Codecs vs. independent encoders | TIFF/PNG fixtures written by Pillow, ImageMagick and libtiff decode exactly |
 | Tiled vs. whole-image inference | identical (≤1e-5) for ragged tiles, tiles smaller than the receptive field, etc. |
 | Training reproducibility | two runs with the same seed produce bit-identical weights |
@@ -41,14 +43,16 @@ Click **Load sample**, then **Denoise**. **Adapt to sample** runs self-supervise
 screen. **Train (synthetic)** generates data in memory and keeps training. **Train on folder…** trains on your
 own data. **Save weights** writes `user://dora_bio_weights.bin`.
 
-**Build brick by brick.** The project is a stack of 9 bricks (scaffold → nn → data → io → inference → training →
-cli → godot-build → godot-smoke). Each has a gate that must pass before the next is trusted:
+**Build brick by brick.** The project is a stack of 11 bricks (scaffold → nn → data → io → inference → training →
+cli → godot-build → godot-smoke → ci-core → ci-godot). Each has a gate that must pass before the next is trusted,
+and CI runs them all on PRs into `main`:
 
 ```bash
 cd dora-bio
 ./bricks.sh --list       # what each gate checks
 ./bricks.sh              # run gates 0..8 in order, stop at the first red one
 ./bricks.sh --only 5     # iterate on a single brick
+./bricks.sh --self-test  # prove the gates can fail: one planted bug per gate, each must turn red
 ```
 
 **Headless (CLI).** Works anywhere .NET 8 runs, with no Godot needed:

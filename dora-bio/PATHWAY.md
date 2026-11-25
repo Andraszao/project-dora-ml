@@ -10,8 +10,8 @@ settled first, and so every phase builds only on phases that are already green.
 | Phase | Theme | Risk it removes | Status |
 |---|---|---|---|
 | **P0** | Foundation | "does any of it work?" | ✅ done (`41e2c6f`): bricks 0–8 green, docs enforced |
-| **P1** | Continuous gates (CI) | regressions slipping in between sessions | ⏭ next |
-| **P2** | Real-data truth (FMD) | **performance on real microscopes is unmeasured** | planned |
+| **P1** | Continuous gates (CI) | regressions slipping in between sessions | ✅ done: bricks 9–10, [CI run #1](https://github.com/Andraszao/project-dora-ml/actions/runs/45617118232) green |
+| **P2** | Real-data truth (FMD) | **performance on real microscopes is unmeasured** | ⏭ next |
 | **P3** | Noise-model fidelity | Noise2Void's assumptions silently failing on real cameras | planned |
 | **P4** | Model capacity (U-Net) | the small CNN being the ceiling | planned |
 | **P5** | Performance | slowness on large frames and stacks | planned |
@@ -47,13 +47,21 @@ training step about 0.3 s (batch 16 × 64 px); held-out *synthetic* eval: noisy 
 **Why now:** every later phase changes behavior. CI turns "never build on red" from a habit into a hard rule,
 and catches regressions made outside these sessions.
 
+✅ **Done.** What was built (local gate → remote proof):
+
 | Brick | Delivers | Gate |
 |---|---|---|
-| 9 `ci-core` | `.github/workflows/dora-bio.yml`: on every push or PR touching `dora-bio/`, install .NET 8 and run `./bricks.sh 7` | workflow green on a PR |
-| 10 `ci-godot` | second job: download Godot 4.5.1 .NET (cached) and run gate 8 headless | gate 8 runs in CI and **passes** (not SKIPPED) |
+| 9 `ci-core` | `.github/workflows/dora-bio.yml` job `gates`: runs the **full** `./bricks.sh` (read-only token, timeout, superseded runs cancelled) under the spend policy below. `./bricks.sh --self-test` plants one known bug per gate 0–7 in scratch copies and requires each gate to turn red, after an unmutated control copy passes | `tools/ci/check_workflow.py … core` (itself shown to reject 3 broken workflows) + self-test: all 9 planted bugs caught |
+| 10 `ci-godot` | job `godot-smoke` (`needs: gates`): official Godot 4.5.1 .NET build, verified against the release's SHA-512, cached; runs gate 8 with `REQUIRE_GODOT=1` so it can never pass by skipping | `check_workflow.py … godot`: Godot version = Godot.NET.Sdk version, checksum pinned and verified, gate 8 mandatory |
 
-**Exit:** a deliberately broken commit on a throwaway branch turns CI red, then the revert turns it green.
-**Needs your OK:** this uses GitHub Actions minutes on the repo (roughly 3–5 min per push).
+**Exit, as met:** CI run #1 green on both jobs (gates job 1 min 47 s including the self-test; Godot job 39 s, including the Godot download). The plan said to prove red-ability with a
+broken commit on a throwaway branch. That was replaced by the self-test, which proves on **every** CI run that
+each gate can fail, without broken commits, and without pushing to branches other than the working branch.
+**Spend policy (enforced by gate 9):** CI runs on PRs into `main`, pushes to `main` and manual "Run workflow",
+never for docs-only changes (`*.md`), and cancels superseded runs. On working branches the local `./bricks.sh` is
+the gate. **Measured cost:** run #1 used 150 s of runner time, which is 3 billable minutes on a private repo since
+each job rounds up. GitHub reported **0 billable minutes** because the repo is public and standard runners are
+free there.
 
 ## P2: Real-data truth (FMD)
 

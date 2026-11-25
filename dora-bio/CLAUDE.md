@@ -39,8 +39,9 @@ godot/                         Godot 4.5 .NET project (open THIS folder in Godot
 ## Development pathway
 
 Work follows [`PATHWAY.md`](PATHWAY.md): phases **P0 → P10**, each a group of bricks with gates. P0 (bricks 0–8)
-is done. **The current phase is P1 (CI).** Pick up the next unfinished brick of the current phase, follow the
-phase protocol there, and update its status table when a phase closes.
+and P1 (bricks 9–10, CI) are done. **The current phase is P2 (real-data truth on FMD).** Pick up the next
+unfinished brick of the current phase, follow the phase protocol there, and update its status table when a
+phase closes.
 
 ## Brick-by-brick workflow (how this project is built: follow it)
 
@@ -56,8 +57,10 @@ before anything is built on top.** `./bricks.sh` runs the gates in order and sto
 | 4 | inference | `Metrics.cs`, `TiledInference.cs`, `BilateralBaseline.cs` | `Brick=4-inference`: tiled == whole image, PSNR/SSIM/noise σ |
 | 5 | training | `Training/`, `Data/DatasetLoader.cs` (needs IO) | `Brick=5-training`: learns on synthetic data, reproducible, journey lifecycle |
 | 6 | cli | `tools/DoraBio.Cli` | synth → train → info → denoise → eval end to end; bundled model and sample still work |
-| 7 | godot-build | `godot/*.csproj`, `scripts/*.cs` | Godot C# assembly compiles against Godot.NET.Sdk 4.5.1 |
-| 8 | godot-smoke | `godot/scenes`, `scripts/*.gd`, `shaders` | headless Godot smoke test (needs `GODOT=…`, otherwise **SKIPPED**, which is not a pass) |
+| 7 | godot-build | `godot/*.csproj`, `scripts/*.cs` | Godot C# assembly compiles against Godot.NET.Sdk 4.5.1; every member in `godot/scripts/*.cs` is documented |
+| 8 | godot-smoke | `godot/scenes`, `scripts/*.gd`, `shaders` | headless Godot smoke test (needs `GODOT=…`, otherwise **SKIPPED**, which is not a pass; `REQUIRE_GODOT=1` makes it a FAIL) |
+| 9 | ci-core | `.github/workflows/dora-bio.yml` (job `gates`), `tools/ci/`, `bricks.sh --self-test` | workflow structure check + self-test: one planted bug per gate 0–7, each must turn its gate red |
+| 10 | ci-godot | workflow job `godot-smoke` | CI's Godot version = Godot.NET.Sdk version; download SHA-512 pinned and verified; gate 8 mandatory in CI |
 
 Rules:
 1. **Work on one brick at a time.** Put new code in the lowest brick it belongs to, and give it tests tagged
@@ -67,21 +70,30 @@ Rules:
 3. **Dependencies only point down.** A change to a lower brick re-opens every brick above it, so run the full
    `./bricks.sh` before pushing.
 4. **To add a brick:** add a constant to `tests/DoraBio.Core.Tests/Bricks.cs` (and its `Known` set), add a `gate_N`
-   with `NAMES`/`CHECKS` entries in `bricks.sh`, and add a row to this table.
-5. A gate must never pass vacuously. Test gates fail if they match zero tests, and gate 0 fails on an untagged
-   test class. Both were mutation-checked, along with stop-on-first-failure.
+   with `NAMES`/`CHECKS` entries in `bricks.sh`, add a planted bug for it to `MUTATIONS` in `bricks.sh` (so the
+   self-test proves the new gate can fail), and add a row to this table.
+5. A gate must never pass vacuously. Test gates fail if they match zero tests, gate 0 fails on an untagged
+   test class, and `./bricks.sh --self-test` (part of gate 9, so it runs in every full run and in CI) plants
+   one bug per gate 0–7 and requires each to turn red. If code moves on and a planted bug no longer applies,
+   the self-test fails and says so: update `MUTATIONS`.
 6. **Documentation is part of the brick.** Every public member needs XML docs (`/// <summary>`, plus `<param>`
    for record parameters). The compiler enforces this for the core and CLI (gate 0) and `bricks.sh` enforces it
    for `godot/scripts/*.cs` (gate 7). Beyond the tags, comment the *why* and the math: formulas for numeric
    code, file-format primers for codecs, invariants (exact tiling, reproducible gradient sums) where they're
    relied on. GDScript uses `##` doc comments on exports and functions.
+7. **CI is the shared gate, and it's spent thoughtfully.** The full gate set (Godot gate 8 mandatory) runs on
+   GitHub Actions for PRs into `main`, pushes to `main` and manual "Run workflow", never for docs-only changes.
+   Gate 9 enforces that policy. On working branches the local `./bricks.sh` is the gate, so run it (with
+   `GODOT=…`) before every push and never push red. Don't trigger CI runs that a local run already answers.
+   If CI goes red, fixing it comes before anything else.
 
 ## Commands (all verified in a Linux container without a GPU)
 
 ```bash
 cd dora-bio
-./bricks.sh                                               # all gates in order (~1 min; add GODOT=… for gate 8)
+./bricks.sh                                               # all gates in order (~2 min incl. self-test; GODOT=… for gate 8)
 ./bricks.sh --only 3                                      # iterate on one brick
+./bricks.sh --self-test                                   # plant one bug per gate 0-7; each must turn red (~1 min)
 dotnet test DoraBio.sln                                   # all 70 tests at once, ~5 s
 dotnet run --project tools/DoraBio.Cli -c Release -- synth --out data/synth --count 10 --size 256
 dotnet run --project tools/DoraBio.Cli -c Release -- train --data data/synth --out runs/w.bin --mode n2v
