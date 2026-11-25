@@ -4,6 +4,10 @@ This file tells an AI coding session what this repository is and how it really b
 It was checked against the source at commit `02dd999`. **Where README.md, documentation.md or
 LIMITATIONS.md disagree with the code, trust the code.** The differences are listed in §11.
 
+> **Two projects live in this repo.** Everything below (§1–§14) describes **v1**, the GDScript MNIST digit
+> app at the repo root. **`dora-bio/`** is a separate v2 rebuild: a C# fluorescence-microscopy denoiser
+> with a Godot 4.5 .NET UI. It has its own rules in [`dora-bio/CLAUDE.md`](dora-bio/CLAUDE.md). See §15.
+
 ---
 
 ## 1. What it is
@@ -263,3 +267,15 @@ The code prints "Panel actual size" at startup, so check that line before relyin
 - `454652f` (2025-10-13) v1.0: all code, data, docs and trained state
 - `101f743` (2025-10-13) LIMITATIONS.md tweak
 - `02dd999` (2026-02-02) added documentation.md (function reference; partly describes intended rather than actual behavior)
+
+## 15. dora-bio/: the v2 rebuild (separate project)
+
+- **What:** a self-supervised (Noise2Void) fluorescence-microscopy denoiser. The ML is pure C#
+  (`dora-bio/src/DoraBio.Core`, net8.0, no Godot, no NuGet) with a Godot 4.5 **.NET** UI in `dora-bio/godot/`.
+  None of the v1 scripts, MNIST data or `.dat` weights are used. v1 weights are rejected by v2's loader.
+- **Isolation:** `dora-bio/.gdignore` stops v1's Godot project from importing it, and `dora-bio/godot/project.godot`
+  is a separate Godot project. Open that folder, not the repo root, to run v2.
+- **Build and test** (works in the cloud container; the .NET 8 SDK comes from `apt install dotnet-sdk-8.0`):
+  `cd dora-bio && dotnet test DoraBio.sln`. The Godot smoke test needs the Godot 4.5 .NET binary, see `dora-bio/CLAUDE.md`.
+- **Rules, file map and gotchas:** `dora-bio/CLAUDE.md`. **Results and limitations:** `dora-bio/README.md`.
+  The bundled sample and weights are **synthetic**.

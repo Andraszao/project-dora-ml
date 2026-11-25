@@ -1,0 +1,15 @@
+# .NET build output
+bin/
+obj/
+*.user
+TestResults/
+
+# Godot
+godot/.godot/
+godot/*.translation
+
+# Local datasets and experiment output (keep the repo small; only godot/samples and godot/models are committed)
+data/
+runs/
+*.h5
+*.hdf5

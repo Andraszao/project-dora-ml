@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    DoraBio.Core: all ML math, image IO and training.
+    Rule: no Godot references and no NuGet dependencies, so it builds and tests anywhere `dotnet` runs.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>DoraBio.Core</RootNamespace>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+    <!-- The Godot editor builds Debug. Unoptimized numeric loops are about 5× slower, so always optimize the core. -->
+    <Optimize>true</Optimize>
+  </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="DoraBio.Core.Tests" />
+  </ItemGroup>
+</Project>

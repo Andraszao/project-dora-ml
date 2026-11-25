@@ -1,0 +1,112 @@
+using System.Buffers.Binary;
+using System.Text;
+using DoraBio.Core.Nn;
+
+namespace DoraBio.Core.IO;
+
+/// <summary>Information stored alongside the parameters.</summary>
+public sealed record ModelInfo(NetConfig Config, string ModelVersion, string Provenance, DateTime SavedUtc);
+
+/// <summary>
+/// Compact binary model file (about 4 bytes per parameter, roughly 106 KB for the default network).
+///
+/// Layout, little-endian:
+///   "DORABIO\0"                         8-byte magic
+///   u16      format version (1)
+///   string   model version, e.g. "2.0.0-bio"   (BinaryWriter length-prefixed UTF-8)
+///   string   provenance: free text saying what the weights were trained on
+///   i64      saved time, UTC ticks
+///   i32      features, i32 layer count, i32[layer count] dilations
+///   i32      parameter count, f32[parameter count] parameters
+///   u32      CRC-32 of every preceding byte
+/// </summary>
+public static class WeightsFile
+{
+    public const string ModelVersion = "2.0.0-bio";
+    private const ushort FormatVersion = 1;
+    private static ReadOnlySpan<byte> Magic => "DORABIO\0"u8;
+
+    public static void Save(Stream stream, DenoisingNet net, string provenance)
+    {
+        byte[] bytes = Serialize(net, provenance, DateTime.UtcNow);
+        stream.Write(bytes);
+    }
+
+    public static void Save(string path, DenoisingNet net, string provenance)
+    {
+        // Write to a temp file and then rename, so a crash never leaves a half-written model behind.
+        string fullPath = Path.GetFullPath(path);
+        Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+        string temp = fullPath + ".tmp";
+        File.WriteAllBytes(temp, Serialize(net, provenance, DateTime.UtcNow));
+        File.Move(temp, fullPath, overwrite: true);
+    }
+
+    public static (DenoisingNet Net, ModelInfo Info) Load(string path) => Load(File.ReadAllBytes(path));
+
+    public static (DenoisingNet Net, ModelInfo Info) Load(ReadOnlySpan<byte> bytes)
+    {
+        if (bytes.Length < Magic.Length + 6 || !bytes[..Magic.Length].SequenceEqual(Magic))
+            throw new InvalidDataException("Not a DoraBio weights file (bad magic). v1 .dat JSON weights cannot be loaded.");
+
+        uint stored = BinaryPrimitives.ReadUInt32LittleEndian(bytes[^4..]);
+        if (Crc32.Compute(bytes[..^4]) != stored)
+            throw new InvalidDataException("Weights file is corrupted (CRC mismatch).");
+
+        using var reader = new BinaryReader(new MemoryStream(bytes[..^4].ToArray()), Encoding.UTF8);
+        reader.ReadBytes(Magic.Length);
+
+        ushort format = reader.ReadUInt16();
+        if (format != FormatVersion) throw new InvalidDataException($"Unsupported weights format version {format}.");
+
+        string modelVersion = reader.ReadString();
+        if (!modelVersion.StartsWith("2.", StringComparison.Ordinal))
+            throw new InvalidDataException($"Weights are model version {modelVersion}; this build reads 2.x.");
+
+        string provenance = reader.ReadString();
+        var saved = new DateTime(reader.ReadInt64(), DateTimeKind.Utc);
+
+        int features = reader.ReadInt32();
+        int layers = reader.ReadInt32();
+        if (layers is < 2 or > 64) throw new InvalidDataException($"Implausible layer count {layers}.");
+        var dilations = new int[layers];
+        for (int i = 0; i < layers; i++) dilations[i] = reader.ReadInt32();
+        var config = new NetConfig(features, dilations);
+        config.Validate();
+
+        int count = reader.ReadInt32();
+        int expected = DenoisingNet.CountParameters(config);
+        if (count != expected)
+            throw new InvalidDataException($"Weights hold {count} parameters but the stored architecture needs {expected}.");
+
+        var parameters = new float[count];
+        for (int i = 0; i < count; i++) parameters[i] = reader.ReadSingle();
+        if (reader.BaseStream.Position != reader.BaseStream.Length)
+            throw new InvalidDataException("Unexpected trailing data in weights file.");
+
+        return (DenoisingNet.FromParameters(config, parameters), new ModelInfo(config, modelVersion, provenance, saved));
+    }
+
+    internal static byte[] Serialize(DenoisingNet net, string provenance, DateTime savedUtc)
+    {
+        using var memory = new MemoryStream();
+        using (var writer = new BinaryWriter(memory, Encoding.UTF8, leaveOpen: true))
+        {
+            writer.Write(Magic);
+            writer.Write(FormatVersion);
+            writer.Write(ModelVersion);
+            writer.Write(provenance ?? "");
+            writer.Write(savedUtc.ToUniversalTime().Ticks);
+            writer.Write(net.Config.Features);
+            writer.Write(net.Config.LayerCount);
+            foreach (int d in net.Config.Dilations) writer.Write(d);
+            writer.Write(net.ParameterCount);
+            foreach (float p in net.Parameters) writer.Write(p);
+        }
+        uint crc = Crc32.Compute(memory.GetBuffer().AsSpan(0, (int)memory.Length));
+        Span<byte> crcBytes = stackalloc byte[4];
+        BinaryPrimitives.WriteUInt32LittleEndian(crcBytes, crc);
+        memory.Write(crcBytes);
+        return memory.ToArray();
+    }
+}
