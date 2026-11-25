@@ -4,6 +4,7 @@ extends Node
 ##   xvfb-run -s "-screen 0 1280x800x24" godot --path . --rendering-driver opengl3 \
 ##       res://tests/screenshot.tscn -- --out=/absolute/path/screenshot.png
 
+## Loads the sample, denoises it, waits for the frame to be drawn, then saves the viewport as PNG.
 func _ready() -> void:
 	var out := "user://screenshot.png"
 	for arg in OS.get_cmdline_user_args():

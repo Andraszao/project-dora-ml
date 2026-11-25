@@ -6,9 +6,11 @@ extends Node
 
 const TIMEOUT_SECONDS := 180.0
 
+## Set by the first failure, so later checks and the watchdog don't report twice.
 var _failed := false
 
 
+## Runs the whole scenario. Each step awaits the bridge's real signals, exactly as the UI would.
 func _ready() -> void:
 	get_tree().create_timer(TIMEOUT_SECONDS).timeout.connect(func(): _fail("timed out"))
 
@@ -51,6 +53,7 @@ func _ready() -> void:
 	get_tree().quit(0)
 
 
+## Prints "ok: …" and returns true, or fails the run. Use as `if not _check(...): return`.
 func _check(condition: bool, what: String) -> bool:
 	if _failed:
 		return false
@@ -61,6 +64,7 @@ func _check(condition: bool, what: String) -> bool:
 	return false
 
 
+## Reports the failure once and quits with exit code 1 (what bricks.sh gate 8 looks for).
 func _fail(what: String) -> void:
 	if _failed:
 		return

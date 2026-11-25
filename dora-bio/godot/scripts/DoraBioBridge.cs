@@ -296,7 +296,8 @@ public partial class DoraBioBridge : Node
                     SetModel(net, WeightsFile.Load(weightsPath).Info, UserWeightsPath);
                     EmitSignal(SignalName.TrainingFinished,
                         $"stopped: {result.StopReason} after {result.History.Count} epochs; best epoch {result.BestEpoch}" +
-                        (result.Best?.ValPsnrGain is { } g ? $" (+{g:0.00} dB over noisy)" : ""));
+                        (result.Best?.ValPsnrGain is { } g ? $" (+{g:0.00} dB over noisy)" : "") +
+                        $"; weights saved to {UserWeightsPath}");
                 }
                 else
                 {
