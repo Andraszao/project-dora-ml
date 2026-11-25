@@ -261,7 +261,7 @@ MUTATIONS=(
   '1|src/DoraBio.Core/Nn/ConvLayer.cs|gradients[BiasOffset + oc] += Simd.Sum(gOutPlane);|gradients[BiasOffset + oc] += 1.1f * Simd.Sum(gOutPlane);'
   '2|src/DoraBio.Core/Data/Dihedral.cs|(a, b) = (b, last - a);|(a, b) = (b, a);'
   '3|src/DoraBio.Core/IO/PngDecoder.cs|3 => (a + b) >> 1,|3 => (a + b + 1) >> 1,'
-  '4|src/DoraBio.Core/TiledInference.cs|margin = net.Config.ReceptiveRadius;|margin = net.Config.ReceptiveRadius - 1;'
+  '4|src/DoraBio.Core/TiledInference.cs|margin = RoundUp(net.Config.ReceptiveRadius, align);|margin = RoundUp(net.Config.ReceptiveRadius, align) - 1;'
   '5|src/DoraBio.Core/Training/Trainer.cs|old * cfg.LearningRateDecay|old / cfg.LearningRateDecay'
   '6|godot/samples/synthetic_cells.tif||<DELETE-FILE>'
   $'7|godot/scripts/DoraBioBridge.cs|    /// <summary>True while a denoise, adapt or training job runs. Only one job runs at a time.</summary>\n|'
@@ -274,6 +274,7 @@ MUTATIONS=(
   '17|src/DoraBio.Core/NoiseCalibration.cs|double gain = sxx > 0 ? sxy / sxx : 0;|double gain = sxx > 0 ? 0.8 * sxy / sxx : 0;'
   '18|src/DoraBio.Core/Nn/Resample.cs|float v = 0.25f * g[x];|float v = 0.5f * g[x];'
   '19|src/DoraBio.Core/Nn/DenoisingNet.UNet.cs|Simd.Axpy(1f, ws.SkipGrad[l].AsSpan(0, gOut.Length), gOut);|Simd.Axpy(0f, ws.SkipGrad[l].AsSpan(0, gOut.Length), gOut);'
+  $'20|src/DoraBio.Core/TiledInference.cs|        tileCore = RoundUp(tileCore, align);\n|'
 )
 
 self_test() {

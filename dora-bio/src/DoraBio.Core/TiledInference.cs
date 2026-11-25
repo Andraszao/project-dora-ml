@@ -16,6 +16,12 @@ namespace DoraBio.Core;
 /// padding), but they are in the margin and get discarded. At the true image border the window is clipped,
 /// so the padding there is the same padding the whole-image pass would use.
 /// <c>TiledInferenceMatchesWholeImage</c> pins this down.
+///
+/// <para>A U-Net needs one more rule. Pooling makes it shift-equivariant only for shifts that are multiples of
+/// 2^Depth (<see cref="NetConfig.TileAlignment"/>), so every core and every window starts on that grid: the core size
+/// and the margin are rounded up to multiples of it. A window clipped at the right or bottom image edge then gets
+/// zero-padded inside <see cref="DenoisingNet.Predict"/> to exactly the edge a whole-image pass pads to, because its
+/// start is on the grid. <c>TiledUNetInferenceMatchesWholeImage</c> pins this down.</para>
 /// </remarks>
 public static class TiledInference
 {
@@ -34,7 +40,9 @@ public static class TiledInference
     public static GrayImage Denoise(DenoisingNet net, GrayImage input, int tileCore = DefaultTileCore, CancellationToken cancellation = default)
     {
         if (tileCore < 8) throw new ArgumentOutOfRangeException(nameof(tileCore));
-        int w = input.Width, h = input.Height, margin = net.Config.ReceptiveRadius;
+        int align = net.Config.TileAlignment;
+        tileCore = RoundUp(tileCore, align);
+        int w = input.Width, h = input.Height, margin = RoundUp(net.Config.ReceptiveRadius, align);
         var output = new GrayImage(w, h);
 
         // Cores tile the image without overlap; the last row and column of cores may be smaller.
@@ -68,4 +76,6 @@ public static class TiledInference
 
         return output;
     }
+
+    private static int RoundUp(int value, int multiple) => (value + multiple - 1) / multiple * multiple;
 }
