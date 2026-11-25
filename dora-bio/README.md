@@ -122,6 +122,12 @@ The plan this rebuild started from had a few errors. Where the build differs fro
 - **Progressive targets on PSNR gain**, not fixed 24/26/28/30 dB, because absolute PSNR depends mostly on the
   noise level, so fixed targets wouldn't carry over between datasets.
 
+## Roadmap
+
+[`PATHWAY.md`](PATHWAY.md) lays out phases P0–P10, from today's foundation (P0, done) through CI, validation on
+real FMD data, noise-model fidelity, a U-Net, performance, stacks, analysis tools, model management, more formats,
+and a release. Each phase is a set of gated bricks.
+
 ## Honesty notes and limitations
 
 - **Everything shipped here is synthetic.** `godot/samples/synthetic_cells.tif` and the bundled weights come from

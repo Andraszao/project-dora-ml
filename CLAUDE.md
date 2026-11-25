@@ -279,5 +279,6 @@ The code prints "Panel actual size" at startup, so check that line before relyin
   inference → training → cli → godot-build → godot-smoke) and stops at the first failure. Work on one brick at a time
   and commit only on green (rules in `dora-bio/CLAUDE.md`). In the cloud container the .NET 8 SDK comes from
   `apt install dotnet-sdk-8.0`. Gate 8 needs the Godot 4.5 .NET binary (`GODOT=…`), otherwise it is reported SKIPPED.
+- **Roadmap:** `dora-bio/PATHWAY.md` (phases P0–P10; P0 done, P1 next).
 - **Rules, file map and gotchas:** `dora-bio/CLAUDE.md`. **Results and limitations:** `dora-bio/README.md`.
   The bundled sample and weights are **synthetic**.

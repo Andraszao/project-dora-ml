@@ -36,6 +36,12 @@ godot/                         Godot 4.5 .NET project (open THIS folder in Godot
   tests/smoke_test.tscn        headless end-to-end check
 ```
 
+## Development pathway
+
+Work follows [`PATHWAY.md`](PATHWAY.md): phases **P0 → P10**, each a group of bricks with gates. P0 (bricks 0–8)
+is done. **The current phase is P1 (CI).** Pick up the next unfinished brick of the current phase, follow the
+phase protocol there, and update its status table when a phase closes.
+
 ## Brick-by-brick workflow (how this project is built: follow it)
 
 The build is a stack of bricks. **Each brick depends only on the bricks below it, and has a gate that must pass

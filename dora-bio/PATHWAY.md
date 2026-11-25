@@ -1,0 +1,164 @@
+# DORA v2.0-bio development pathway: P0 → P10
+
+The plan from today's state to a released, real-data-validated tool. It extends the
+[brick-by-brick workflow](CLAUDE.md#brick-by-brick-workflow-how-this-project-is-built-follow-it): **each phase is a
+group of bricks, and each brick adds a gate to `bricks.sh`.** Phases are ordered so the biggest unknowns are
+settled first, and so every phase builds only on phases that are already green.
+
+## Status
+
+| Phase | Theme | Risk it removes | Status |
+|---|---|---|---|
+| **P0** | Foundation | "does any of it work?" | ✅ done (`41e2c6f`): bricks 0–8 green, docs enforced |
+| **P1** | Continuous gates (CI) | regressions slipping in between sessions | ⏭ next |
+| **P2** | Real-data truth (FMD) | **performance on real microscopes is unmeasured** | planned |
+| **P3** | Noise-model fidelity | Noise2Void's assumptions silently failing on real cameras | planned |
+| **P4** | Model capacity (U-Net) | the small CNN being the ceiling | planned |
+| **P5** | Performance | slowness on large frames and stacks | planned |
+| **P6** | Stacks, time-lapse, batch | single 2-D frames only | planned |
+| **P7** | Analysis UX | can see but can't measure or export | planned |
+| **P8** | Model and session management | adaptation lost on restart; no way back to a known-good model | planned |
+| **P9** | Format coverage | "my file won't open" (LZW, OME-TIFF, HDF5) | planned |
+| **P10** | Release | only runs from the editor or CLI | planned |
+
+## Phase protocol (applies to every phase)
+
+1. **Open:** add the phase's gates to `bricks.sh` first, as failing tests or explicit SKIPs with a reason, so
+   "done" is defined before any code is written. Mark the phase "in progress" in the table above.
+2. **Build:** one brick at a time. Iterate with `./bricks.sh --only N`, finish with `./bricks.sh N`, and commit
+   `brick N (<name>): …` only when green. Docs are part of the brick (rule 6 in `CLAUDE.md`).
+3. **Close:** full `./bricks.sh` green (with `GODOT=…`), README "What's verified" updated with **measured**
+   numbers and the command that produced them, this table updated, then a commit `P<n> done: …`.
+4. **Never start P(n+1) while P(n) is red.** Lower phases may be reopened. A reopened phase re-runs every gate above it.
+
+Brick numbers below continue from P0's 0–8. They're indicative; renumber if a phase needs more or fewer bricks.
+
+---
+
+## P0: Foundation ✅
+
+Done. Pure-C# core, 70 tests (finite-difference gradient checks, codec fixtures from independent encoders, exact
+tiling, reproducible training), CLI, Godot 4.5 .NET shell, headless smoke test, compiler-enforced docs.
+**Gate:** `./bricks.sh` bricks 0–8 green. **Baseline numbers** (4 vCPU, no GPU): 512×384 denoise about 0.5 s;
+training step about 0.3 s (batch 16 × 64 px); held-out *synthetic* eval: noisy 20.89 dB → bilateral 28.43 → DORA 30.21.
+
+## P1: Continuous gates (CI)
+
+**Why now:** every later phase changes behavior. CI turns "never build on red" from a habit into a hard rule,
+and catches regressions made outside these sessions.
+
+| Brick | Delivers | Gate |
+|---|---|---|
+| 9 `ci-core` | `.github/workflows/dora-bio.yml`: on every push or PR touching `dora-bio/`, install .NET 8 and run `./bricks.sh 7` | workflow green on a PR |
+| 10 `ci-godot` | second job: download Godot 4.5.1 .NET (cached) and run gate 8 headless | gate 8 runs in CI and **passes** (not SKIPPED) |
+
+**Exit:** a deliberately broken commit on a throwaway branch turns CI red, then the revert turns it green.
+**Needs your OK:** this uses GitHub Actions minutes on the repo (roughly 3–5 min per push).
+
+## P2: Real-data truth (FMD)
+
+**Why now:** this is the biggest open question. All quality numbers so far are on synthetic data, and the FMD
+loader matches the published layout but has never seen the real download.
+
+| Brick | Delivers | Gate |
+|---|---|---|
+| 11 `fmd-fetch` | `tools/fetch_fmd.sh` (download + checksum), or written instructions if the host blocks scripted download | script verifies checksums; SKIPPED with a reason if the data is absent |
+| 12 `fmd-loader` | `DatasetLoader` run against the real FMD tree, fixed if reality differs from the docs | loader test on the real layout (SKIPPED without data) |
+| 13 `fmd-eval` | `docs/RESULTS.md`: per microscope type (confocal / two-photon / widefield), noisy vs bilateral vs DORA PSNR/SSIM on **held-out FOVs**, for (a) the synthetic model, (b) N2V trained on raw only, (c) supervised with avg50 ground truth | numbers recorded with the commit hash and exact commands |
+
+**Exit:** README limitations rewritten from measured results, good or bad.
+**Needs your decision:** check FMD's license before committing any frames or FMD-trained weights. If
+redistribution isn't allowed, the bundled model stays synthetic and the doc says how to train your own.
+
+## P3: Noise-model fidelity
+
+**Why:** Noise2Void assumes pixel-independent, zero-mean noise. Real cameras add gain and offset structure
+(Poisson–Gaussian) and sometimes spatially correlated noise (sCMOS read-out patterns), and those break it quietly.
+
+| Brick | Delivers | Gate |
+|---|---|---|
+| 14 `vst` | generalized Anscombe transform (Poisson–Gaussian) with exact unbiased inverse, as an optional preprocessing step | after the transform, residual variance ≈ 1 across intensity bins on synthetic data; round-trip error ≤ 1e-4 |
+| 15 `calibration` | estimate gain, offset and read noise from the image (or from a dark/flat frame) | recovers `SyntheticOptions` gain/offset/read noise within 10% |
+| 16 `n2v-diagnostic` | noise autocorrelation check; warn in the CLI and UI when neighboring pixels' noise is correlated | flags correlated synthetic noise, stays quiet on i.i.d. noise |
+
+**Exit:** FMD eval with and without the transform recorded. It becomes the default only if it wins on held-out data.
+
+## P4: Model capacity (U-Net)
+
+**Why:** the 26k-parameter dilated CNN is fast and exact to tile, but it may be the quality ceiling. U-Nets are
+the standard Noise2Void backbone.
+
+| Brick | Delivers | Gate |
+|---|---|---|
+| 17 `pool-upsample` | 2×2 pooling and upsampling layers with forward/backward | finite-difference gradient checks (same harness as brick 1) |
+| 18 `unet` | U-Net with skip connections; architecture tag in the weights file (format v2) that still loads v1-format files | gradient check of the whole net; old weight files still load |
+| 19 `unet-tiling` | margins and padding-to-multiple-of-2ᵈ rules for exact tiling | `TiledInferenceMatchesWholeImage` passes for U-Net |
+| 20 `arch-eval` | DnCNN vs U-Net on held-out FMD: quality vs speed | numbers in `docs/RESULTS.md` |
+
+**Exit:** the default architecture is whichever wins on held-out real data, with the result documented.
+
+## P5: Performance
+
+**Why:** P6 (stacks) multiplies cost by the number of frames, so speed is measured and protected before that.
+
+| Brick | Delivers | Gate |
+|---|---|---|
+| 21 `bench` | `dora-bio bench`: denoise and train-step timings as JSON | runs in gate 6; JSON schema validated |
+| 22 `intra-image-parallel` | parallelize within a single large tile (by output channel); optional im2col + blocked matrix multiply | bit-exact against the current path on the tiling and gradient tests; faster in `bench` |
+| 23 `perf-budget` | loose regression budgets in CI (e.g. 512² denoise ≤ 1.0 s, train step ≤ 0.5 s on the CI runner) | fails if over budget |
+
+**Later, optional:** GPU inference via Godot compute shaders. Its gate would be numerical agreement with the CPU path.
+
+## P6: Stacks, time-lapse and batch
+
+| Brick | Delivers | Gate |
+|---|---|---|
+| 24 `tiff-stack-write` | multi-page TIFF writer (the reader already handles pages) | round-trip 3-page stacks in every sample type |
+| 25 `cli-batch` | `denoise` over stacks and folders, streaming one frame at a time with bounded memory | gate 6 denoises a 3-page synthetic stack; peak memory checked |
+| 26 `ui-stack` | page/frame slider in the UI, denoising the current frame or the whole stack (cancellable) | smoke test loads a stack, steps pages, denoises one frame |
+
+## P7: Analysis UX
+
+| Brick | Delivers | Gate |
+|---|---|---|
+| 27 `sync-view` | synchronized zoom and pan across the three panels | smoke test: same view transform on all panels after a zoom |
+| 28 `measure` | line profile and ROI mean/σ on raw, baseline and DORA | profile values equal the image values exactly (test) |
+| 29 `export` | "Export denoised…" writes float32 TIFF in original units | the UI export is byte-identical to `dora-bio denoise` with the same model and input |
+| 30 `compare` | before/after wipe slider and colormaps (display only) | screenshot review recorded; data path untouched (gate 8) |
+
+## P8: Model and session management
+
+| Brick | Delivers | Gate |
+|---|---|---|
+| 31 `optimizer-checkpoint` | optional Adam-state block in weights files, so adaptation survives restarts | save → load → continue adapting is **bit-identical** to never stopping |
+| 32 `model-picker` | bundled / user / history models in the UI; reset to bundled; undo last adaptation | smoke test: adapt → undo restores the exact parameters |
+| 33 `journey-view` | journey log viewer (sessions, epochs, milestones) in the UI | renders a fixture journey file; malformed files fail with a message |
+
+## P9: Format coverage
+
+| Brick | Delivers | Gate |
+|---|---|---|
+| 34 `tiff-lzw` | LZW decode (the most common "won't open" case today) | libtiff/Pillow LZW fixtures decode exactly |
+| 35 `tiff-tiled-big` | tiled TIFF and BigTIFF | fixtures from libtiff |
+| 36 `ome-metadata` | OME-TIFF pixel size and channel names read, and carried into outputs | metadata round-trip test |
+| 37 `hdf5` | HDF5 reader as a **separate** optional project (`DoraBio.Hdf5`) so the core stays dependency-free | fixture test; gate 0 asserts the core still has zero `PackageReference`s |
+
+## P10: Release
+
+| Brick | Delivers | Gate |
+|---|---|---|
+| 38 `export-presets` | Godot .NET export presets for Linux, Windows and macOS | exported Linux build runs the smoke scenario headless in CI |
+| 39 `release-ci` | tag → CI builds, attaches binaries and the CLI to a **draft** GitHub release | draft release created on a test tag |
+| 40 `user-docs` | user guide (install, first denoise, adapt, train, evaluate), changelog, data and weights license notes | docs link-checked; README quick start verified on the exported build |
+
+**Exit:** v2.0.0 tagged. **Needs your decisions:** app signing and notarization (Apple and Windows accounts) and
+the release license text.
+
+---
+
+## Parking lot (deliberately not on the path)
+
+- **Web export:** not possible for C# Godot projects in 4.5. Revisit only if Godot adds it.
+- **3-D (volumetric) denoising and GPU training:** large scope. Reconsider after P5 measurements.
+- **v1 (repo root, MNIST):** frozen as the educational original. Its bugs are documented in the root `CLAUDE.md`, not fixed.
+- **History rewrite into per-brick commits:** possible, but it needs a force-push and an explicit request.
