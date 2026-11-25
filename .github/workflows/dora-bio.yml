@@ -3,15 +3,24 @@
 # The v1 project at the repo root has no tests and is not built here.
 name: dora-bio gates
 
+# Spend policy (enforced by gate 9): CI runs where it adds information, not on every working-branch push.
+#   - PRs into main and pushes to main: the merge gate.
+#   - Manual "Run workflow" (workflow_dispatch) when a check on a working branch is wanted.
+#   - Never for docs-only changes. On working branches, the local ./bricks.sh is the gate (same gates).
 on:
   push:
+    branches: [main]
     paths:
       - "dora-bio/**"
+      - "!dora-bio/**/*.md"
       - ".github/workflows/dora-bio.yml"
   pull_request:
+    branches: [main]
     paths:
       - "dora-bio/**"
+      - "!dora-bio/**/*.md"
       - ".github/workflows/dora-bio.yml"
+  workflow_dispatch:
 
 permissions:
   contents: read

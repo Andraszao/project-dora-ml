@@ -6,8 +6,9 @@
 
 These are not a full GitHub Actions linter. The real proof is a green run on GitHub. They pin down the
 properties DORA relies on:
-  core:  runs on every push and PR that touches dora-bio/, runs the *full* ./bricks.sh (which includes the
-         gate self-test), has read-only permissions and a timeout.
+  core:  follows the CI spend policy (runs on PRs into main, pushes to main and manual dispatch only; never for
+         docs-only changes; superseded runs cancelled), runs the *full* ./bricks.sh (which includes the gate
+         self-test), has read-only permissions and a timeout.
   godot: the headless-Godot job pins the same Godot version as the Godot.NET.Sdk in godot/DoraBio.Godot.csproj,
          verifies the download against a pinned SHA-512, and makes gate 8 mandatory (REQUIRE_GODOT=1), so CI
          can never report a skipped Godot test as success.
@@ -38,11 +39,21 @@ def uses(job):
 
 
 def check_core(doc, problems):
+    # Spend policy: CI minutes go to merge gates and explicit requests, not to every working-branch push.
     triggers = doc.get("on") or {}
+    if set(triggers) != {"push", "pull_request", "workflow_dispatch"}:
+        problems.append("triggers must be exactly push, pull_request and workflow_dispatch")
     for event in ("push", "pull_request"):
-        paths = (triggers.get(event) or {}).get("paths", [])
+        spec = triggers.get(event) or {}
+        paths = spec.get("paths", [])
+        if spec.get("branches") != ["main"]:
+            problems.append(f"'{event}' must be limited to branches: [main]")
         if not any(p.startswith("dora-bio/") for p in paths):
             problems.append(f"'{event}' must trigger on paths under dora-bio/")
+        if "!dora-bio/**/*.md" not in paths:
+            problems.append(f"'{event}' must skip docs-only changes ('!dora-bio/**/*.md')")
+    if not (doc.get("concurrency") or {}).get("cancel-in-progress"):
+        problems.append("concurrency.cancel-in-progress must be true (superseded runs waste minutes)")
     if doc.get("permissions") != {"contents": "read"}:
         problems.append("top-level permissions must be exactly {contents: read}")
 
