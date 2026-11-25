@@ -3,8 +3,13 @@ using DoraBio.Core.Data;
 namespace DoraBio.Core;
 
 /// <summary>Image-quality metrics. All inputs are assumed to be on the same (normalized) scale.</summary>
+/// <remarks>
+/// PSNR and SSIM need a clean reference, so they only exist where ground truth does (validation, <c>eval</c>).
+/// <see cref="EstimateNoiseSigma"/> needs no reference; it's the only figure the app can show for a user's own image.
+/// </remarks>
 public static class Metrics
 {
+    /// <summary>Mean squared error, accumulated in double precision.</summary>
     public static double Mse(ReadOnlySpan<float> a, ReadOnlySpan<float> b)
     {
         if (a.Length != b.Length || a.IsEmpty) throw new ArgumentException("Inputs must be non-empty and equal length.");
@@ -18,9 +23,18 @@ public static class Metrics
     }
 
     /// <summary>Peak signal-to-noise ratio in dB. Identical inputs give +∞.</summary>
+    /// <remarks>
+    /// PSNR = 10·log10(range² / MSE). Every +3 dB halves the squared error and every +10 dB divides it by 10.
+    /// Absolute values depend on the noise level and the normalization, so compare PSNRs on the same data only.
+    /// </remarks>
     public static double Psnr(ReadOnlySpan<float> prediction, ReadOnlySpan<float> reference, double dataRange = 1.0) =>
         PsnrFromMse(Mse(prediction, reference), dataRange);
 
+    /// <summary>PSNR from a precomputed MSE.</summary>
+    /// <remarks>
+    /// Validation averages the MSE over all patches first and converts once. Averaging per-patch PSNRs instead
+    /// would overweight easy patches, because of the logarithm.
+    /// </remarks>
     public static double PsnrFromMse(double mse, double dataRange = 1.0) =>
         mse <= 0 ? double.PositiveInfinity : 10.0 * Math.Log10(dataRange * dataRange / mse);
 
@@ -56,6 +70,10 @@ public static class Metrics
         var sYY = FilterValid(yy, w, h, kernel, out _, out _);
         var sXY = FilterValid(xy, w, h, kernel, out _, out _);
 
+        // Per window, from Gaussian-weighted local statistics (μ = mean, σ² = variance, σxy = covariance):
+        //   SSIM = (2·μx·μy + C1)(2·σxy + C2) / ((μx² + μy² + C1)(σx² + σy² + C2))
+        // This compares luminance, contrast and structure. Variances come from E[x²] − E[x]², using the
+        // filtered x², y² and x·y images computed above.
         double total = 0;
         for (int i = 0; i < ow * oh; i++)
         {
@@ -78,6 +96,9 @@ public static class Metrics
         if (w < 3 || h < 3) throw new ArgumentException("Image must be at least 3×3.");
         var p = image.Pixels;
         double sum = 0;
+        // Mask  [ 1 −2  1 ; −2  4 −2 ; 1 −2  1 ]  is the difference of two Laplacians. It is zero on any locally
+        // linear surface, so mostly noise survives. For Gaussian noise of σ, E|response| = σ·6·√(2/π),
+        // which gives σ ≈ √(π/2) · mean|response| / 6.
         for (int y = 1; y < h - 1; y++)
             for (int x = 1; x < w - 1; x++)
             {
@@ -91,6 +112,7 @@ public static class Metrics
         return Math.Sqrt(Math.PI / 2) * sum / (6.0 * (w - 2) * (h - 2));
     }
 
+    /// <summary>1-D Gaussian weights normalized to sum to 1. Applied along rows, then columns, it gives the 2-D window.</summary>
     private static double[] GaussianKernel(int size, double sigma)
     {
         var k = new double[size];

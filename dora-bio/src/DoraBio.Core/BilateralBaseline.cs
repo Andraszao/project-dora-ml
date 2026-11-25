@@ -8,8 +8,16 @@ namespace DoraBio.Core;
 /// </summary>
 public static class BilateralBaseline
 {
+    /// <summary>
+    /// Replaces each pixel with a weighted mean of its neighbors. The weights fall off with distance
+    /// (spatial term) and with intensity difference (range term):
+    /// <c>w = exp(−d²/2σs²) · exp(−(v − center)²/2σr²)</c>.
+    /// Across an edge the intensities differ a lot, so the far side gets almost no weight and the edge stays sharp.
+    /// </summary>
+    /// <param name="image">Image to filter (unchanged); typically normalized.</param>
     /// <param name="sigmaSpatial">Gaussian falloff with distance, in pixels.</param>
     /// <param name="sigmaRange">Gaussian falloff with intensity difference, in the image's own units.</param>
+    /// <remarks>The window radius is ⌈2σs⌉. Borders are handled by clamping coordinates (edge pixels repeat).</remarks>
     public static GrayImage Filter(GrayImage image, float sigmaSpatial, float sigmaRange)
     {
         if (sigmaSpatial <= 0 || sigmaRange <= 0) throw new ArgumentOutOfRangeException(nameof(sigmaSpatial));
