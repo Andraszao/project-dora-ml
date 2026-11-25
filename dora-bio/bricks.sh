@@ -273,6 +273,7 @@ MUTATIONS=(
   '16|src/DoraBio.Core/Data/Anscombe.cs|- 11 / (8 * d * d)|- 11 / (8 * d)'
   '17|src/DoraBio.Core/NoiseCalibration.cs|double gain = sxx > 0 ? sxy / sxx : 0;|double gain = sxx > 0 ? 0.8 * sxy / sxx : 0;'
   '18|src/DoraBio.Core/Nn/Resample.cs|float v = 0.25f * g[x];|float v = 0.5f * g[x];'
+  '19|src/DoraBio.Core/Nn/DenoisingNet.UNet.cs|Simd.Axpy(1f, ws.SkipGrad[l].AsSpan(0, gOut.Length), gOut);|Simd.Axpy(0f, ws.SkipGrad[l].AsSpan(0, gOut.Length), gOut);'
 )
 
 self_test() {

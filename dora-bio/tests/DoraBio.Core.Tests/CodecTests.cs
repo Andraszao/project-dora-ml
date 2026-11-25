@@ -141,7 +141,9 @@ public class CodecTests
         Assert.Equal("unit test", info.Provenance);
         Assert.Equal(WeightsFile.ModelVersion, info.ModelVersion);
         Assert.Equal(new DateTime(2026, 1, 2, 3, 4, 5, DateTimeKind.Utc), info.SavedUtc);
-        Assert.Equal(8 + 2 + 1 + 9 + 1 + 9 + 8 + 4 + 4 + 12 + 4 + net.ParameterCount * 4 + 4, bytes.Length);
+        // magic, format, model version, provenance, ticks, architecture byte (format 2), features, layers, dilations,
+        // parameter count, parameters, CRC.
+        Assert.Equal(8 + 2 + 1 + 9 + 1 + 9 + 8 + 1 + 4 + 4 + 12 + 4 + net.ParameterCount * 4 + 4, bytes.Length);
     }
 
     [Fact]

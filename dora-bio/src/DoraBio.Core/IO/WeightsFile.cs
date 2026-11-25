@@ -19,19 +19,23 @@ public sealed record ModelInfo(NetConfig Config, string ModelVersion, string Pro
 ///
 /// Layout, little-endian:
 ///   "DORABIO\0"                         8-byte magic
-///   u16      format version (1)
+///   u16      format version (2; format 1 is still read)
 ///   string   model version, e.g. "2.0.0-bio"   (BinaryWriter length-prefixed UTF-8)
 ///   string   provenance: free text saying what the weights were trained on
 ///   i64      saved time, UTC ticks
-///   i32      features, i32 layer count, i32[layer count] dilations
+///   u8       architecture: 0 = dilated, 1 = U-Net                    (format 2 only)
+///   dilated: i32 features, i32 layer count, i32[layer count] dilations
+///   U-Net:   i32 features, i32 depth
 ///   i32      parameter count, f32[parameter count] parameters
 ///   u32      CRC-32 of every preceding byte
+/// Format 1 is format 2 without the architecture byte, so it always describes a dilated network (the bundled model,
+/// and every file written before P4).
 /// </summary>
 public static class WeightsFile
 {
     /// <summary>Model version written into new files. Readers accept any "2.x" version.</summary>
     public const string ModelVersion = "2.0.0-bio";
-    private const ushort FormatVersion = 1;
+    private const ushort FormatVersion = 2;
     private static ReadOnlySpan<byte> Magic => "DORABIO\0"u8;
 
     /// <summary>Serializes the network to a stream (timestamped now).</summary>
@@ -79,7 +83,7 @@ public static class WeightsFile
         reader.ReadBytes(Magic.Length);
 
         ushort format = reader.ReadUInt16();
-        if (format != FormatVersion) throw new InvalidDataException($"Unsupported weights format version {format}.");
+        if (format is not (1 or FormatVersion)) throw new InvalidDataException($"Unsupported weights format version {format}.");
 
         string modelVersion = reader.ReadString();
         if (!modelVersion.StartsWith("2.", StringComparison.Ordinal))
@@ -88,13 +92,22 @@ public static class WeightsFile
         string provenance = reader.ReadString();
         var saved = new DateTime(reader.ReadInt64(), DateTimeKind.Utc);
 
+        var architecture = format == 1 ? NetArchitecture.Dilated : (NetArchitecture)reader.ReadByte();
+        NetConfig config;
         int features = reader.ReadInt32();
-        int layers = reader.ReadInt32();
-        if (layers is < 2 or > 64) throw new InvalidDataException($"Implausible layer count {layers}.");
-        var dilations = new int[layers];
-        for (int i = 0; i < layers; i++) dilations[i] = reader.ReadInt32();
-        var config = new NetConfig(features, dilations);
-        config.Validate();
+        if (architecture == NetArchitecture.UNet)
+            config = NetConfig.UNet(features, reader.ReadInt32());
+        else if (architecture == NetArchitecture.Dilated)
+        {
+            int layers = reader.ReadInt32();
+            if (layers is < 2 or > 64) throw new InvalidDataException($"Implausible layer count {layers}.");
+            var dilations = new int[layers];
+            for (int i = 0; i < layers; i++) dilations[i] = reader.ReadInt32();
+            config = new NetConfig(features, dilations);
+        }
+        else throw new InvalidDataException($"Unknown architecture {(int)architecture}.");
+        try { config.Validate(); }
+        catch (ArgumentException e) { throw new InvalidDataException($"Invalid architecture in weights file: {e.Message}"); }
 
         int count = reader.ReadInt32();
         int expected = DenoisingNet.CountParameters(config);
@@ -120,9 +133,14 @@ public static class WeightsFile
             writer.Write(ModelVersion);
             writer.Write(provenance ?? "");
             writer.Write(savedUtc.ToUniversalTime().Ticks);
+            writer.Write((byte)net.Config.Architecture);
             writer.Write(net.Config.Features);
-            writer.Write(net.Config.LayerCount);
-            foreach (int d in net.Config.Dilations) writer.Write(d);
+            if (net.Config.Architecture == NetArchitecture.UNet) writer.Write(net.Config.Depth);
+            else
+            {
+                writer.Write(net.Config.LayerCount);
+                foreach (int d in net.Config.Dilations) writer.Write(d);
+            }
             writer.Write(net.ParameterCount);
             foreach (float p in net.Parameters) writer.Write(p);
         }

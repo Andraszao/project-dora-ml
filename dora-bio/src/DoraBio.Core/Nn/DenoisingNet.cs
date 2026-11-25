@@ -1,12 +1,33 @@
 namespace DoraBio.Core.Nn;
 
+/// <summary>Which network family a <see cref="NetConfig"/> describes.</summary>
+public enum NetArchitecture
+{
+    /// <summary>A stack of dilated 3×3 convolutions at full resolution (DnCNN-style). Exact to tile at any offset.</summary>
+    Dilated,
+
+    /// <summary>
+    /// A U-Net: two 3×3 convolutions per level, 2×2 average pooling down, nearest upsampling up, and skip connections
+    /// that concatenate each encoder level onto the decoder at the same resolution.
+    /// </summary>
+    UNet,
+}
+
 /// <summary>
-/// Architecture of the denoiser. Layer i is a 3×3 convolution with dilation <c>Dilations[i]</c>.
-/// The first layer maps 1 → Features channels, middle layers Features → Features, the last Features → 1.
+/// Architecture of the denoiser.
+/// <list type="bullet">
+/// <item><b>Dilated</b> (the default): layer i is a 3×3 convolution with dilation <c>Dilations[i]</c>. The first layer
+/// maps 1 → Features channels, middle layers Features → Features, the last Features → 1.</item>
+/// <item><b>U-Net</b> (<see cref="UNet"/>): <see cref="Depth"/> pooling steps; level l has Features · 2ˡ channels.
+/// <c>Dilations</c> is empty.</item>
+/// </list>
 /// </summary>
-/// <param name="Features">Channels in every hidden layer. More features means more capacity and proportionally slower runs.</param>
+/// <param name="Features">
+/// Dilated: channels in every hidden layer. U-Net: channels at full resolution (doubling at each level down).
+/// More features means more capacity and proportionally slower runs.
+/// </param>
 /// <param name="Dilations">
-/// One entry per layer (at least 2). Layer i adds <c>Dilations[i]</c> pixels of context on each side, so a
+/// Dilated only: one entry per layer (at least 2). Layer i adds <c>Dilations[i]</c> pixels of context on each side, so a
 /// 1-2-4-8-4-2-1 schedule sees 22 px in every direction (a 45 px receptive field) with only 7 layers.
 /// </param>
 public sealed record NetConfig(int Features, int[] Dilations)
@@ -14,38 +35,79 @@ public sealed record NetConfig(int Features, int[] Dilations)
     /// <summary>24 features, 7 layers, receptive field 45×45 px, about 26.5k parameters.</summary>
     public static NetConfig Default => new(24, [1, 2, 4, 8, 4, 2, 1]);
 
-    /// <summary>Number of convolution layers (= <c>Dilations.Length</c>).</summary>
-    public int LayerCount => Dilations.Length;
+    /// <summary>Dilated (default) or U-Net.</summary>
+    public NetArchitecture Architecture { get; init; } = NetArchitecture.Dilated;
 
-    /// <summary>Pixels of context each output pixel sees on each side, i.e. the receptive field is 2r+1.</summary>
-    /// <remarks>Also the tile margin <see cref="TiledInference"/> needs for exact results.</remarks>
-    public int ReceptiveRadius => Dilations.Sum();
+    /// <summary>U-Net only: number of 2×2 pooling steps (1 to 4). Image sides are padded to multiples of 2^Depth.</summary>
+    public int Depth { get; init; }
 
-    /// <summary>Throws if the configuration can't describe a network (non-positive sizes, fewer than 2 layers).</summary>
+    /// <summary>A U-Net with <paramref name="features"/> channels at full resolution and <paramref name="depth"/> levels below it.</summary>
+    /// <remarks>16 features and depth 2 cost about as much compute per pixel as <see cref="Default"/>, with 4.5× the parameters.</remarks>
+    public static NetConfig UNet(int features = 16, int depth = 2) =>
+        new(features, []) { Architecture = NetArchitecture.UNet, Depth = depth };
+
+    /// <summary>Number of convolution layers: <c>Dilations.Length</c>, or 4·Depth + 3 for a U-Net.</summary>
+    public int LayerCount => Architecture == NetArchitecture.UNet ? 4 * Depth + 3 : Dilations.Length;
+
+    /// <summary>Pixels of context each output pixel sees on each side, at most, i.e. the receptive field is 2r+1.</summary>
+    /// <remarks>
+    /// With <see cref="TileAlignment"/>, this sets the margin <see cref="TiledInference"/> needs for exact results.
+    /// U-Net: a 3×3 convolution at level l reaches one level-l cell (2ˡ pixels) further on each side, and so can each
+    /// pooling and upsampling step, which is a safe upper bound: Σ over those layers of 2ˡ.
+    /// </remarks>
+    public int ReceptiveRadius
+    {
+        get
+        {
+            if (Architecture != NetArchitecture.UNet) return Dilations.Sum();
+            int r = 1;   // the final full-resolution convolution
+            for (int l = 0; l < Depth; l++) r += (2 + 2) * (1 << l) + (1 << l) + (1 << l);   // encoder + decoder convs, pool, upsample
+            return r + 2 * (1 << Depth);                                                       // the bottleneck's two convs
+        }
+    }
+
+    /// <summary>
+    /// Tile origins must be multiples of this (1 for the dilated stack, 2^Depth for a U-Net), because pooling makes a
+    /// U-Net shift-equivariant only for shifts that are multiples of 2^Depth.
+    /// </summary>
+    public int TileAlignment => Architecture == NetArchitecture.UNet ? 1 << Depth : 1;
+
+    /// <summary>Throws if the configuration can't describe a network (non-positive sizes, too few layers or levels).</summary>
     public void Validate()
     {
         if (Features <= 0) throw new ArgumentOutOfRangeException(nameof(Features), "Features must be positive.");
+        if (Architecture == NetArchitecture.UNet)
+        {
+            if (Depth is < 1 or > 4) throw new ArgumentOutOfRangeException(nameof(Depth), "U-Net depth must be 1 to 4.");
+            if (Dilations is null || Dilations.Length != 0) throw new ArgumentException("A U-Net has no dilations.", nameof(Dilations));
+            return;
+        }
         if (Dilations is null || Dilations.Length < 2) throw new ArgumentException("Need at least 2 layers.", nameof(Dilations));
         if (Dilations.Any(d => d <= 0)) throw new ArgumentException("Dilations must be positive.", nameof(Dilations));
     }
 
     /// <summary>Human-readable summary, e.g. "7 conv layers × 24 features, dilations [1,2,4,8,4,2,1], receptive field 45px".</summary>
-    public override string ToString() =>
-        $"{LayerCount} conv layers × {Features} features, dilations [{string.Join(",", Dilations)}], receptive field {2 * ReceptiveRadius + 1}px";
+    public override string ToString() => Architecture == NetArchitecture.UNet
+        ? $"U-Net, depth {Depth}, {string.Join("→", Enumerable.Range(0, Depth + 1).Select(l => Features << l))} features, " +
+          $"{LayerCount} conv layers, receptive field up to {2 * ReceptiveRadius + 1}px"
+        : $"{LayerCount} conv layers × {Features} features, dilations [{string.Join(",", Dilations)}], receptive field {2 * ReceptiveRadius + 1}px";
 
-    /// <summary>Equal when the feature count and every dilation match.</summary>
+    /// <summary>Equal when the architecture, feature count, depth and every dilation match.</summary>
     /// <remarks>
     /// Records compare array members by reference, which would make two identical configs unequal.
     /// Weight loading and <see cref="DenoisingNet.CopyParametersFrom"/> rely on content equality.
     /// </remarks>
     public bool Equals(NetConfig? other) =>
-        other is not null && Features == other.Features && Dilations.AsSpan().SequenceEqual(other.Dilations);
+        other is not null && Architecture == other.Architecture && Features == other.Features && Depth == other.Depth
+        && Dilations.AsSpan().SequenceEqual(other.Dilations);
 
     /// <summary>Content-based hash, consistent with <see cref="Equals(NetConfig?)"/>.</summary>
     public override int GetHashCode()
     {
         var hash = new HashCode();
+        hash.Add(Architecture);
         hash.Add(Features);
+        hash.Add(Depth);
         foreach (int d in Dilations) hash.Add(d);
         return hash.ToHashCode();
     }
@@ -63,8 +125,13 @@ public sealed record NetConfig(int Features, int[] Dilations)
 /// <para>Why predict the noise rather than the clean image? The noise is small, zero-mean and statistically
 /// simple, while the image can be anything. The identity ("change nothing") is a good starting point, and
 /// residual learning makes it the default: if the network outputs 0, the input passes through unchanged.</para>
+///
+/// <para>The same class runs both architectures in <see cref="NetConfig"/>: the dilated stack (this file) and the
+/// U-Net (DenoisingNet.UNet.cs). Callers never need to know which one they hold. A U-Net works on sides that are
+/// multiples of 2^Depth; other sizes are zero-padded at the bottom and right inside <see cref="Predict"/> and
+/// <see cref="AccumulateGradients"/>, with the padding excluded from the loss.</para>
 /// </summary>
-public sealed class DenoisingNet
+public sealed partial class DenoisingNet
 {
     private readonly ConvLayer[] _layers;
 
@@ -84,13 +151,12 @@ public sealed class DenoisingNet
         config.Validate();
         Config = config;
 
+        var shapes = config.Architecture == NetArchitecture.UNet ? UNetLayerShapes(config) : DilatedLayerShapes(config);
         int offset = 0;
-        _layers = new ConvLayer[config.LayerCount];
-        for (int i = 0; i < config.LayerCount; i++)
+        _layers = new ConvLayer[shapes.Count];
+        for (int i = 0; i < shapes.Count; i++)
         {
-            int inC = i == 0 ? 1 : config.Features;
-            int outC = i == config.LayerCount - 1 ? 1 : config.Features;
-            _layers[i] = new ConvLayer(inC, outC, config.Dilations[i], offset);
+            _layers[i] = new ConvLayer(shapes[i].In, shapes[i].Out, shapes[i].Dilation, offset);
             offset += _layers[i].ParameterCount;
         }
 
@@ -98,6 +164,12 @@ public sealed class DenoisingNet
             throw new ArgumentException($"Architecture needs {offset} parameters but {parameters.Length} were given.");
         Parameters = parameters ?? new float[offset];
     }
+
+    /// <summary>Dilated stack: 1 → Features → … → Features → 1 channels, one layer per dilation.</summary>
+    private static List<(int In, int Out, int Dilation)> DilatedLayerShapes(NetConfig config) =>
+        Enumerable.Range(0, config.Dilations.Length)
+            .Select(i => (i == 0 ? 1 : config.Features, i == config.Dilations.Length - 1 ? 1 : config.Features, config.Dilations[i]))
+            .ToList();
 
     /// <summary>How many parameters a network with this architecture has (used to validate weight files).</summary>
     public static int CountParameters(NetConfig config) => new DenoisingNet(config, null).ParameterCount;
@@ -148,9 +220,33 @@ public sealed class DenoisingNet
     public void Predict(ReadOnlySpan<float> input, int height, int width, Span<float> output, Workspace workspace)
     {
         CheckPlane(input, height, width);
-        var residual = Forward(input, height, width, workspace);
-        for (int i = 0; i < residual.Length; i++)
-            output[i] = input[i] - residual[i];
+        int a = Config.TileAlignment;
+        if (height % a == 0 && width % a == 0)
+        {
+            var residual = Forward(input, height, width, workspace);
+            for (int i = 0; i < residual.Length; i++)
+                output[i] = input[i] - residual[i];
+            return;
+        }
+
+        // U-Net on a size that isn't a multiple of 2^Depth: zero-pad at the bottom and right, then crop.
+        int ph = RoundUp(height, a), pw = RoundUp(width, a);
+        var padded = workspace.AlignedInput(ph * pw);
+        PadTo(input, height, width, padded, pw);
+        var paddedResidual = Forward(padded, ph, pw, workspace);
+        for (int y = 0; y < height; y++)
+            for (int x = 0; x < width; x++)
+                output[y * width + x] = input[y * width + x] - paddedResidual[y * pw + x];
+    }
+
+    private static int RoundUp(int value, int multiple) => (value + multiple - 1) / multiple * multiple;
+
+    /// <summary>Copies an h×w plane into the top-left of a zeroed plane that is <paramref name="paddedWidth"/> wide.</summary>
+    private static void PadTo(ReadOnlySpan<float> plane, int height, int width, Span<float> padded, int paddedWidth)
+    {
+        padded.Clear();
+        for (int y = 0; y < height; y++)
+            plane.Slice(y * width, width).CopyTo(padded.Slice(y * paddedWidth, width));
     }
 
     /// <summary>
@@ -186,6 +282,24 @@ public sealed class DenoisingNet
         if (!mask.IsEmpty) CheckPlane(mask, height, width);
         if (gradients.Length != ParameterCount) throw new ArgumentException("Gradient buffer has the wrong length.");
 
+        int a = Config.TileAlignment;
+        if (height % a != 0 || width % a != 0)
+        {
+            // Pad input, target and mask; the padded pixels get mask 0, so they add nothing to the loss or gradients.
+            int ph = RoundUp(height, a), pw = RoundUp(width, a);
+            var (bi, bt, bm) = workspace.AlignedTraining(ph * pw);
+            Span<float> pi = bi.AsSpan(0, ph * pw), pt = bt.AsSpan(0, ph * pw), pm = bm.AsSpan(0, ph * pw);
+            PadTo(input, height, width, pi, pw);
+            PadTo(target, height, width, pt, pw);
+            if (mask.IsEmpty)
+            {
+                pm.Clear();
+                for (int y = 0; y < height; y++) pm.Slice(y * pw, width).Fill(1f);
+            }
+            else PadTo(mask, height, width, pm, pw);
+            return AccumulateGradients(pi, pt, pm, ph, pw, scale, gradients, workspace);
+        }
+
         var residual = Forward(input, height, width, workspace);
         var gradResidual = workspace.LossGradient.AsSpan(0, residual.Length);
 
@@ -213,6 +327,7 @@ public sealed class DenoisingNet
     /// </summary>
     private Span<float> Forward(ReadOnlySpan<float> input, int height, int width, Workspace ws)
     {
+        if (Config.Architecture == NetArchitecture.UNet) return ForwardUNet(input, height, width, ws);
         ws.Ensure(height, width);
         int plane = height * width;
         ReadOnlySpan<float> current = input;
@@ -240,6 +355,7 @@ public sealed class DenoisingNet
     /// </remarks>
     private void Backward(int height, int width, ReadOnlySpan<float> gradResidual, Span<float> gradients, Workspace ws)
     {
+        if (Config.Architecture == NetArchitecture.UNet) { BackwardUNet(height, width, gradResidual, gradients, ws); return; }
         int plane = height * width;
         float[] gradOut = ws.GradA, gradIn = ws.GradB;
         gradResidual.CopyTo(gradOut);
@@ -287,11 +403,31 @@ public sealed class DenoisingNet
     /// Scratch buffers for one forward/backward pass. Not thread-safe: use one per thread.
     /// Grows automatically to the largest image size it has seen.
     /// </summary>
-    public sealed class Workspace
+    public sealed partial class Workspace
     {
         private readonly DenoisingNet _net;
         private int _capacityPixels;
         private int _capacityPadded;
+        private float[] _alignedInput = [], _alignedTarget = [], _alignedMask = [];
+
+        /// <summary>A zero-padding buffer for <see cref="Predict"/> on sizes that aren't multiples of 2^Depth.</summary>
+        internal Span<float> AlignedInput(int length)
+        {
+            if (_alignedInput.Length < length) _alignedInput = new float[length];
+            return _alignedInput.AsSpan(0, length);
+        }
+
+        /// <summary>Padding buffers for <see cref="AccumulateGradients"/> on unaligned sizes (input, target, mask), at least <paramref name="length"/> long.</summary>
+        internal (float[] Input, float[] Target, float[] Mask) AlignedTraining(int length)
+        {
+            AlignedInput(length);
+            if (_alignedTarget.Length < length)
+            {
+                _alignedTarget = new float[length];
+                _alignedMask = new float[length];
+            }
+            return (_alignedInput, _alignedTarget, _alignedMask);
+        }
 
         /// <summary>Per layer: that layer's zero-padded input (needed again for weight gradients).</summary>
         internal float[][] Padded { get; private set; } = [];
@@ -316,6 +452,7 @@ public sealed class DenoisingNet
         /// <summary>Grows the buffers if this image is larger than any seen before; otherwise does nothing.</summary>
         internal void Ensure(int height, int width)
         {
+            if (_net.Config.Architecture == NetArchitecture.UNet) { EnsureUNet(height, width); return; }
             int pixels = height * width;
             int padded = _net._layers.Max(l => l.PaddedLength(height, width));
             if (pixels <= _capacityPixels && padded <= _capacityPadded) return;

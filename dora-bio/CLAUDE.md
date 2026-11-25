@@ -17,7 +17,8 @@ loaded sample in-app, or train on synthetic data or on a folder.
 ```
 DoraBio.sln                    core + tests + CLI (no Godot)
 src/DoraBio.Core/              ALL ML/IO code. net8.0. No Godot, no NuGet dependencies.
-  Nn/        ConvLayer (3×3 dilated conv fwd/bwd), DenoisingNet, AdamOptimizer, Simd, WorkspacePool
+  Nn/        ConvLayer (3×3 dilated conv fwd/bwd), DenoisingNet (+ .UNet.cs: the U-Net graph), Resample (2×2 pool,
+             upsample), AdamOptimizer, Simd, WorkspacePool
   Data/      GrayImage, Normalization, Anscombe (variance stabilization), Dihedral, V1Augment, BlindSpot (+MaskFootprint),
              PatchSampler, ImagePair/DatasetSplit,
              DatasetLoader, FmdDataset (real FMD layouts + test-FOV exclusion), SyntheticFluorescence
@@ -76,6 +77,10 @@ before anything is built on top.** `./bricks.sh` runs the gates in order and sto
 | 15 | structured-mask | `Data/BlindSpot.cs` (`MaskFootprint`), `ImagePair.Footprint`, `Training/StructuredMasking.cs`, CLI `--struct` / `--subset` / `--weights-correlated` | `Brick=15-structured-mask`; the recorded routed two-network results meet the bar set in advance (widefield ≥ +1 dB, confocal and two-photon ≥ −0.2 dB vs plain Noise2Void); with data + P3 weights: all three recorded blocks reproduce |
 | 16 | vst | `Data/Anscombe.cs` (`NoiseModel`, generalized Anscombe transform, Mäkitalo–Foi unbiased inverse) | `Brick=16-vst`: variance 0.98–1.05 after the transform at 5–200 photons, exact round trip, the unbiased inverse recovers the mean where the algebraic one is biased |
 | 17 | calibration | `NoiseCalibration.cs` | `Brick=17-calibration`: from one synthetic frame, gain within 10% and the predicted noise variance within 10% across its intensity range, for 6 camera settings |
+| 18 | pool-upsample | `Nn/Resample.cs` | `Brick=18-pool-upsample`: hand-checked values, adjoint identities, finite-difference gradients |
+| 19 | unet | `Nn/DenoisingNet.UNet.cs`, `NetConfig.UNet`, `IO/WeightsFile.cs` (format 2) | `Brick=19-unet`: whole-network finite-difference gradients (4 shapes, incl. unaligned), unaligned = hand-padded bit for bit, format 2 round-trips both architectures, format 1 loads, learns through the trainer |
+| 20 | unet-tiling | `TiledInference.cs` | `Brick=20-unet-tiling`: tiled U-Net inference equals whole-image inference for ragged sizes |
+| 21 | arch-eval | `tools/experiments/p4_arch.sh`, `docs/RESULTS.md` | `Brick=21-arch-eval`; the default architecture follows the rule set before measuring; with data + weights: the recorded blocks reproduce |
 
 Gates 11–15 need the dataset (gate 15's reproduction also needs the weights from `tools/experiments/p3_struct.sh`) (`tools/fetch_fmd.sh`, about 9 GB into the gitignored `data/fmd/`). Without it, their
 data-dependent part reports SKIPPED (exit code 77) while the pins, unit tests and RESULTS.md checks still run. CI has
@@ -176,9 +181,10 @@ cd godot && dotnet build && godot --headless --path . --import \
 
 ## File formats
 
-- **Weights** (`WeightsFile`): `"DORABIO\0"`, u16 format = 1, model version `"2.0.0-bio"`, provenance string,
-  saved-UTC ticks, features, layer count, dilations[], parameter count, float32 LE[], CRC-32. v1 JSON `.dat`
-  files are rejected with a clear message.
+- **Weights** (`WeightsFile`): `"DORABIO\0"`, u16 format = 2, model version `"2.0.0-bio"`, provenance string,
+  saved-UTC ticks, architecture byte (0 dilated, 1 U-Net), then features + layer count + dilations[] (dilated) or
+  features + depth (U-Net), parameter count, float32 LE[], CRC-32. Format 1 (no architecture byte, always dilated:
+  the bundled model) still loads. v1 JSON `.dat` files are rejected with a clear message.
 - **Images in:** TIFF (8/16/32-bit int/float; none/Deflate/PackBits; predictor 2; LE/BE; strips; multi-page)
   and PNG (8/16-bit gray/RGB(A), all filters). Not supported, each with a clear error: LZW, tiled TIFF,
   BigTIFF, palettes, interlaced PNG, **HDF5**.
