@@ -24,7 +24,7 @@ export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_SKIP_FIRST_TIME_EXPE
 
 NAMES=(scaffold nn data io inference training cli godot-build godot-smoke ci-core ci-godot fmd-fetch fmd-loader fmd-eval
        n2v-diagnostic structured-mask vst calibration pool-upsample unet unet-tiling arch-eval
-       bench blocked-conv perf-budget)
+       bench blocked-conv perf-budget q1-recipe)
 CHECKS=(
   "solution builds (warnings are errors, missing XML docs included); every test class belongs to exactly one brick"
   "ConvLayer/DenoisingNet/Adam/Simd: finite-difference gradient checks, optimizer behavior"
@@ -51,6 +51,7 @@ CHECKS=(
   "dora-bio bench: denoise and train-step timings for both architectures, as JSON that passes the schema check"
   "register-blocked convolution: bit-identical to the reference kernels (forward, weight and input gradients, whole nets)"
   "dora-bio bench stays within the time budgets in tools/ci/perf_budget.json"
+  "quality pass Q1: the recorded verdict follows the pre-registered rule; with data + weights the blocks reproduce"
 )
 LAST=$((${#NAMES[@]} - 1))
 LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dora-bricks.XXXXXX")"
@@ -226,6 +227,37 @@ gate_24() (   # perf-budget
   python3 tools/ci/check_bench.py "$LOG_DIR/bench-full.json" --budget tools/ci/perf_budget.json
 )
 
+# levels_all: "level PSNR" pairs from the all-48 rows of a multi-level fmd-eval block on stdin.
+levels_all() { awk '/^test_mix level/ { l = $3; sub(":", "", l) } $1 == "all" { print l, $9 }'; }
+
+gate_25() {   # q1-recipe (quality pass Q1, pre-registered in PATHWAY.md before any run)
+  # Rule: at raw, candidate >= baseline - 0.1 dB; mean over avg2..avg16 >= baseline mean + 0.5 dB; no lower level
+  # below baseline - 0.1 dB. Adopted: supervised FMD training defaults to all noise levels. Not adopted: nothing ships.
+  local base_raw expected recorded
+  base_raw="$(recorded_block p4-unet-sup | awk '$1 == "all" { print $9 }')"
+  [[ -n "$base_raw" && -n "$(recorded_block q1-baseline)" && -n "$(recorded_block q1-candidate)" ]] \
+    || { echo ">> docs/RESULTS.md needs the p4-unet-sup, q1-baseline and q1-candidate blocks"; return 1; }
+  expected="$( { echo "base raw $base_raw"; recorded_block q1-baseline | levels_all | sed 's/^/base /';
+                 recorded_block q1-candidate | levels_all | sed 's/^/cand /'; } | awk '
+    { v[$1 "," $2] = $3 }
+    END {
+      ok = v["cand,raw"] >= v["base,raw"] - 0.1 - 1e-9; split("avg2 avg4 avg8 avg16", L, " "); sum = 0
+      for (i = 1; i <= 4; i++) { d = v["cand," L[i]] - v["base," L[i]]; sum += d; if (d < -0.1 - 1e-9) ok = 0 }
+      if (sum / 4 < 0.5 - 1e-9) ok = 0
+      printf "%s raw %+.2f, lower levels %+.2f on average\n", ok ? "adopted" : "not-adopted", v["cand,raw"] - v["base,raw"], sum / 4
+    }')"
+  recorded="$(sed -n 's/.*<!-- q1-verdict: \([a-z-]*\) -->.*/\1/p' docs/RESULTS.md)"
+  [[ "${expected%% *}" == "$recorded" ]] || { echo ">> Q1's rule gives '${expected%% *}' ($expected), but RESULTS.md records '$recorded'"; return 1; }
+  echo ">> Q1: $expected; recorded verdict agrees"
+  local w=runs/q1
+  [[ -f "$FMD/test_mix/.complete" && -f runs/p4/unet_sup.bin && -f $w/unet_levels60.bin && -f $w/unet_levels30.bin ]] \
+    || { echo "verdict checked on the recorded results; reproduction skipped (needs FMD data and the Q1 weights)"; return 77; }
+  dotnet build tools/DoraBio.Cli -c Release >/dev/null || return 1
+  reproduces q1-baseline fmd-eval --weights runs/p4/unet_sup.bin --root "$FMD" --levels avg2,avg4,avg8,avg16 || return 1
+  reproduces q1-candidate fmd-eval --weights $w/unet_levels60.bin --root "$FMD" --levels raw,avg2,avg4,avg8,avg16 || return 1
+  reproduces q1-ablation fmd-eval --weights $w/unet_levels30.bin --root "$FMD" --levels raw,avg2,avg4,avg8,avg16 || return 1
+}
+
 gate_21() {   # arch-eval
   test_gate 21-arch-eval || return 1
   # The rule was set before measuring (PATHWAY.md, P4): the U-Net becomes the default only if, at the same training
@@ -301,6 +333,7 @@ MUTATIONS=(
   '22|src/DoraBio.Core/PerformanceBench.cs|? "unet" : "dilated";|? "u-net" : "dilated";'
   '23|src/DoraBio.Core/Nn/ConvLayer.Blocked.cs|a7 += new Vector<float>(Unsafe.Add(ref weights, t + 7 * ic9)) * v;|a7 += new Vector<float>(Unsafe.Add(ref weights, t + 6 * ic9)) * v;'
   '24|src/DoraBio.Core/Nn/DenoisingNet.cs|    internal bool ReferenceKernels { get; set; }|    internal bool ReferenceKernels { get; set; } = true;'
+  '25|docs/RESULTS.md|<!-- q1-verdict: not-adopted -->|<!-- q1-verdict: adopted -->'
 )
 
 self_test() {

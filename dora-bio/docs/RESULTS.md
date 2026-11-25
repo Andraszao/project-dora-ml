@@ -337,6 +337,37 @@ cores), **1.36× slower** <!-- p4-slowdown: 1.36 -->. Training took 5:42 for 30 
   Noise2Void. `--arch unet` is available and is the better choice when ground truth exists. Making the default depend
   on the training mode would be a new rule, chosen after seeing these numbers, so it isn't adopted here.
 
+## Quality pass Q1: the best supervised recipe
+
+The first quality pass (brick 25), pre-registered in [`PATHWAY.md`](../PATHWAY.md) before any run and measured
+2026-11-25. Reproduce: `tools/experiments/q1_supervised.sh`.
+
+**Candidate:** the U-Net (16 → 64 features, depth 2) trained supervised on all five FMD noise levels (2 frames of
+each, 2,280 images) for up to 60 epochs. **Ablation:** the same at 30 epochs. **Baseline:** P4's U-Net trained on raw
+frames only for 30 epochs, the best supervised model so far. **Bar:** at raw, all-48 PSNR no more than 0.1 dB lower; the
+mean over avg2–avg16 at least 0.5 dB higher; no lower level more than 0.1 dB worse.
+
+| All 48, PSNR (dB) | raw | avg2 | avg4 | avg8 | avg16 |
+|---|---|---|---|---|---|
+| Noisy input | 27.22 | 30.08 | 32.86 | 36.03 | 39.70 |
+| Bilateral filter | 30.22 | 32.45 | 34.88 | 37.39 | 40.57 |
+| Baseline: U-Net, raw frames, 30 epochs | **34.73** | 35.04 | 35.44 | 35.33 | 35.28 |
+| Candidate: U-Net, all levels, 60 epochs (best epoch 46) | 34.26 | **35.16** | **37.02** | **38.32** | **40.15** |
+| Ablation: U-Net, all levels, 30 epochs | 34.03 | 35.05 | 36.84 | 38.28 | 40.15 |
+
+- **The bar is missed at raw:** the candidate is 0.47 dB below the baseline there, against a tolerance of 0.1. The other
+  two conditions hold easily (mean +2.39 dB over avg2–avg16, every level better). **By the rule, nothing ships**:
+  supervised FMD training keeps defaulting to raw frames. <!-- q1-verdict: not-adopted -->
+- **But it's the first DORA model that doesn't damage clean images.** Averaged over all 48, every model before it
+  scored below the untouched 16-frame averages (35.28 dB for the baseline against 39.70). This one scores 40.15, above
+  the untouched image though still below the bilateral filter (40.57). It also beats the bilateral filter from avg2 to
+  avg8, by up to 2.7 dB.
+- **What the extra epochs bought:** +0.23 dB at raw and almost nothing elsewhere (the ablation). The all-level training
+  is what costs the 0.47 dB at raw: the network shares its capacity across five noise levels.
+- **What it suggests (backlog, not adopted here):** choose the model per image from its estimated noise level, the
+  raw-trained model for noisy images and the all-level model for clean ones, the way P3 routed by noise correlation.
+  If the noise estimate is good enough, that could keep 34.73 at raw and gain the 2–5 dB on clean inputs.
+
 ## What these results do and don't show
 
 - **One seed per configuration.** Differences of a few tenths of a dB may be run-to-run variation rather than real
@@ -354,7 +385,7 @@ cores), **1.36× slower** <!-- p4-slowdown: 1.36 -->. Training took 5:42 for 30 
 - **Weights trained on FMD are not published** (CC BY-SA terms for derived models are a separate decision). The
   bundled model stays the synthetic one.
 
-## Reproducibility checks (gates 13, 15 and 21)
+## Reproducibility checks (gates 13, 15, 21 and 25)
 
 The blocks marked `fmd-noise` above and the blocks below are verbatim program output. `bricks.sh` gate 13 re-runs
 the first two whenever the data is present and requires an exact match. The block below is
@@ -462,3 +493,110 @@ WideField   12   25.23 / 0.374   26.53 / 0.466   27.98 / 0.571
 all         48   27.22 / 0.543   30.22 / 0.752   31.21 / 0.756
 ```
 <!-- /p4-unet-n2v -->
+
+Gate 25 applies Q1's pre-registered rule to the blocks below (and the baseline's raw row in `p4-unet-sup`), checks that
+the verdict recorded above matches it, and re-runs the blocks when the weights are present (`runs/p4/unet_sup.bin`,
+`runs/q1/`, from `tools/experiments/q1_supervised.sh`). Baseline at the lower levels:
+
+<!-- q1-baseline -->
+```text
+test_mix level avg2: mean PSNR (dB) / SSIM vs ground truth, 8-bit scale
+modality     n  noisy           bilateral       DORA           
+Confocal    20   32.11 / 0.805   34.43 / 0.919   35.95 / 0.913
+TwoPhoton   16   28.95 / 0.627   32.22 / 0.868   33.73 / 0.902
+WideField   12   28.19 / 0.540   29.46 / 0.631   35.25 / 0.910
+all         48   30.08 / 0.680   32.45 / 0.830   35.04 / 0.909
+test_mix level avg4: mean PSNR (dB) / SSIM vs ground truth, 8-bit scale
+modality     n  noisy           bilateral       DORA           
+Confocal    20   34.86 / 0.882   36.66 / 0.947   35.68 / 0.904
+TwoPhoton   16   31.58 / 0.764   34.46 / 0.917   34.59 / 0.905
+WideField   12   31.23 / 0.702   32.45 / 0.773   36.20 / 0.918
+all         48   32.86 / 0.798   34.88 / 0.894   35.44 / 0.908
+test_mix level avg8: mean PSNR (dB) / SSIM vs ground truth, 8-bit scale
+modality     n  noisy           bilateral       DORA           
+Confocal    20   37.97 / 0.937   39.28 / 0.967   35.41 / 0.900
+TwoPhoton   16   34.53 / 0.871   36.06 / 0.938   34.00 / 0.876
+WideField   12   34.79 / 0.833   36.01 / 0.878   36.98 / 0.922
+all         48   36.03 / 0.889   37.39 / 0.935   35.33 / 0.898
+test_mix level avg16: mean PSNR (dB) / SSIM vs ground truth, 8-bit scale
+modality     n  noisy           bilateral       DORA           
+Confocal    20   41.08 / 0.970   41.66 / 0.979   34.64 / 0.890
+TwoPhoton   16   38.70 / 0.941   39.70 / 0.962   34.20 / 0.867
+WideField   12   38.74 / 0.923   39.91 / 0.944   37.77 / 0.924
+all         48   39.70 / 0.949   40.57 / 0.964   35.28 / 0.891
+```
+<!-- /q1-baseline -->
+
+Candidate (all levels, 60 epochs):
+
+<!-- q1-candidate -->
+```text
+test_mix level raw: mean PSNR (dB) / SSIM vs ground truth, 8-bit scale
+modality     n  noisy           bilateral       DORA           
+Confocal    20   29.13 / 0.701   31.74 / 0.872   35.31 / 0.924
+TwoPhoton   16   26.32 / 0.473   31.07 / 0.816   33.73 / 0.886
+WideField   12   25.23 / 0.374   26.53 / 0.466   33.21 / 0.861
+all         48   27.22 / 0.543   30.22 / 0.752   34.26 / 0.895
+test_mix level avg2: mean PSNR (dB) / SSIM vs ground truth, 8-bit scale
+modality     n  noisy           bilateral       DORA           
+Confocal    20   32.11 / 0.805   34.43 / 0.919   37.00 / 0.945
+TwoPhoton   16   28.95 / 0.627   32.22 / 0.868   33.44 / 0.898
+WideField   12   28.19 / 0.540   29.46 / 0.631   34.36 / 0.890
+all         48   30.08 / 0.680   32.45 / 0.830   35.16 / 0.916
+test_mix level avg4: mean PSNR (dB) / SSIM vs ground truth, 8-bit scale
+modality     n  noisy           bilateral       DORA           
+Confocal    20   34.86 / 0.882   36.66 / 0.947   38.59 / 0.958
+TwoPhoton   16   31.58 / 0.764   34.46 / 0.917   35.67 / 0.932
+WideField   12   31.23 / 0.702   32.45 / 0.773   36.19 / 0.918
+all         48   32.86 / 0.798   34.88 / 0.894   37.02 / 0.939
+test_mix level avg8: mean PSNR (dB) / SSIM vs ground truth, 8-bit scale
+modality     n  noisy           bilateral       DORA           
+Confocal    20   37.97 / 0.937   39.28 / 0.967   40.14 / 0.969
+TwoPhoton   16   34.53 / 0.871   36.06 / 0.938   36.24 / 0.941
+WideField   12   34.79 / 0.833   36.01 / 0.878   38.06 / 0.940
+all         48   36.03 / 0.889   37.39 / 0.935   38.32 / 0.952
+test_mix level avg16: mean PSNR (dB) / SSIM vs ground truth, 8-bit scale
+modality     n  noisy           bilateral       DORA           
+Confocal    20   41.08 / 0.970   41.66 / 0.979   40.97 / 0.975
+TwoPhoton   16   38.70 / 0.941   39.70 / 0.962   39.04 / 0.957
+WideField   12   38.74 / 0.923   39.91 / 0.944   40.27 / 0.957
+all         48   39.70 / 0.949   40.57 / 0.964   40.15 / 0.965
+```
+<!-- /q1-candidate -->
+
+Ablation (all levels, 30 epochs):
+
+<!-- q1-ablation -->
+```text
+test_mix level raw: mean PSNR (dB) / SSIM vs ground truth, 8-bit scale
+modality     n  noisy           bilateral       DORA           
+Confocal    20   29.13 / 0.701   31.74 / 0.872   35.15 / 0.918
+TwoPhoton   16   26.32 / 0.473   31.07 / 0.816   33.58 / 0.879
+WideField   12   25.23 / 0.374   26.53 / 0.466   32.78 / 0.841
+all         48   27.22 / 0.543   30.22 / 0.752   34.03 / 0.886
+test_mix level avg2: mean PSNR (dB) / SSIM vs ground truth, 8-bit scale
+modality     n  noisy           bilateral       DORA           
+Confocal    20   32.11 / 0.805   34.43 / 0.919   36.76 / 0.938
+TwoPhoton   16   28.95 / 0.627   32.22 / 0.868   33.43 / 0.894
+WideField   12   28.19 / 0.540   29.46 / 0.631   34.36 / 0.884
+all         48   30.08 / 0.680   32.45 / 0.830   35.05 / 0.910
+test_mix level avg4: mean PSNR (dB) / SSIM vs ground truth, 8-bit scale
+modality     n  noisy           bilateral       DORA           
+Confocal    20   34.86 / 0.882   36.66 / 0.947   38.34 / 0.952
+TwoPhoton   16   31.58 / 0.764   34.46 / 0.917   35.44 / 0.922
+WideField   12   31.23 / 0.702   32.45 / 0.773   36.21 / 0.915
+all         48   32.86 / 0.798   34.88 / 0.894   36.84 / 0.933
+test_mix level avg8: mean PSNR (dB) / SSIM vs ground truth, 8-bit scale
+modality     n  noisy           bilateral       DORA           
+Confocal    20   37.97 / 0.937   39.28 / 0.967   39.85 / 0.964
+TwoPhoton   16   34.53 / 0.871   36.06 / 0.938   36.14 / 0.930
+WideField   12   34.79 / 0.833   36.01 / 0.878   38.50 / 0.938
+all         48   36.03 / 0.889   37.39 / 0.935   38.28 / 0.946
+test_mix level avg16: mean PSNR (dB) / SSIM vs ground truth, 8-bit scale
+modality     n  noisy           bilateral       DORA           
+Confocal    20   41.08 / 0.970   41.66 / 0.979   40.70 / 0.971
+TwoPhoton   16   38.70 / 0.941   39.70 / 0.962   38.89 / 0.951
+WideField   12   38.74 / 0.923   39.91 / 0.944   40.93 / 0.956
+all         48   39.70 / 0.949   40.57 / 0.964   40.15 / 0.961
+```
+<!-- /q1-ablation -->

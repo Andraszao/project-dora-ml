@@ -85,6 +85,7 @@ before anything is built on top.** `./bricks.sh` runs the gates in order and sto
 | 22 | bench | `PerformanceBench.cs`, CLI `bench`, `tools/ci/check_bench.py` | `Brick=22-bench`; `dora-bio bench --quick --json` passes the schema-1 check |
 | 23 | blocked-conv | `Nn/ConvLayer.cs` (register-blocked kernels) | `Brick=23-blocked-conv`: bit-identical to the reference row kernels; bar set before building: ≥ 1.5× faster on the 512² denoise and the training step |
 | 24 | perf-budget | `tools/ci/perf_budget.json` | `Brick=24-perf-budget`; a full `bench` stays within the budgets |
+| 25 | q1-recipe (quality pass) | `tools/experiments/q1_supervised.sh`, `docs/RESULTS.md` | Q1's recorded verdict follows its pre-registered rule (`<!-- q1-verdict -->`); with data + weights the blocks reproduce |
 
 Gates 11–15 and 21 need the dataset (the reproductions in gates 15 and 21 also need the weights from `tools/experiments/`) (`tools/fetch_fmd.sh`, about 9 GB into the gitignored `data/fmd/`). Without it, their
 data-dependent part reports SKIPPED (exit code 77) while the pins, unit tests and RESULTS.md checks still run. CI has

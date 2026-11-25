@@ -168,9 +168,11 @@ analysis tools, model management, more formats, and a release. Each phase is a s
 - **Variance stabilization (`--vst`) is opt-in and lost on FMD.** It works when the noise model is right, but
   estimating that model from one dim 8-bit confocal frame isn't reliable, and overall Noise2Void scored 0.25–0.28 dB
   lower with it. A model trained with `--vst` must also be applied with `--vst`.
-- **DORA can make clean images worse.** On FMD's 16-frame averages, every DORA model scored below the unprocessed
-  input (the bundled model by 4.2 dB). It has no notion of "this image is already clean". Training on all noise
-  levels reduces the harm a lot for supervised models ([RESULTS.md](docs/RESULTS.md#2-graded-noise-progressive-noise)).
+- **DORA can make clean images worse.** On FMD's 16-frame averages, every default model scores below the
+  unprocessed input (the bundled model by 4.2 dB). It has no notion of "this image is already clean". A supervised
+  U-Net trained on all noise levels (`--arch unet --fmd-levels raw,avg2,avg4,avg8,avg16`) is the exception, slightly
+  above the untouched image, but it costs 0.47 dB on the noisiest input, so it isn't a default
+  ([quality pass Q1](docs/RESULTS.md#quality-pass-q1-the-best-supervised-recipe)).
 - The "estimated noise σ" in the UI is Immerkær's white-noise estimate: a rough image-wide figure, not calibrated.
 - C# Godot projects **cannot export to the web** (Godot 4.5), so v2 targets desktop and mobile only.
 - CPU only. That's fine for 512² frames and small models; large stacks or 3D volumes would need GPU work.
