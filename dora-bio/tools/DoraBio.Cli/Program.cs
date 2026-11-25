@@ -28,10 +28,12 @@ public static class Program
                    [--struct off|auto|always] [--footprint diamond-2]  (Noise2Void: structured blind spots for
                     correlated noise; auto = only on images whose noise check flags them)
                    [--subset correlated|independent]  (train only on the images whose noise check says so)
+                   [--vst]  (Noise2Void in the variance-stabilized domain; apply the model with --vst too)
                    FMD folders: [--fmd-frames 4] [--fmd-levels raw,avg2,avg4,avg8,avg16] [--fmd-categories A,B]
                    (FOV 19, FMD's test FOV, is always excluded from training)
           denoise  --weights WEIGHTS.bin --in IMAGE --out OUT.tif [--baseline BASELINE.tif] [--tile 128]
                    [--weights-correlated W2.bin]  (used instead if the image's noise check says correlated)
+                   [--vst]  (for models trained with --vst)
                    Output is float32 TIFF in the input's original intensity units.
           eval     --weights WEIGHTS.bin --data DIR
                    Per-image PSNR/SSIM of noisy, bilateral and DORA against clean (needs clean images).
@@ -42,6 +44,7 @@ public static class Program
                    Verify a downloaded FMD dataset: structure, test_mix, and no train/test leakage.
           fmd-eval  --weights WEIGHTS.bin --root data/fmd [--levels raw,avg2,...] [--per-image]
                    [--weights-correlated W2.bin]  (images whose noise check says correlated go to W2 instead)
+                   [--vst]  (for models trained with --vst)
                    PSNR/SSIM (8-bit scale) on FMD's held-out test_mix: noisy vs bilateral vs DORA, per microscope type.
           fmd-noise --root data/fmd [--levels raw,avg2,...]
                    How correlated test_mix's real noise is between neighbouring pixels (Noise2Void assumes 0).
@@ -123,7 +126,8 @@ public static class Program
     private static int Train(Options o)
     {
         string dataDir = o.Required("data");
-        var dataset = DatasetLoader.LoadDirectory(dataDir, FmdOptionsFrom(o));
+        bool vst = o.Has("vst");
+        var dataset = DatasetLoader.LoadDirectory(dataDir, FmdOptionsFrom(o), vst ? VarianceStabilization.Stabilize : null);
         var mode = o.String("mode", dataset.All(d => d.HasClean) ? "supervised" : "n2v") switch
         {
             "n2v" or "noise2void" => TrainingMode.Noise2Void,
@@ -160,7 +164,9 @@ public static class Program
             net = DenoisingNet.Create(new NetConfig(o.Int("features", defaults.Features), defaults.Dilations), config.Seed);
         }
 
-        string structure = "";
+        if (vst && mode != TrainingMode.Noise2Void)
+            throw new ArgumentException("--vst is for Noise2Void: supervised targets are clean, so their noise needs no stabilizing.");
+        string structure = vst ? "; variance-stabilized (generalized Anscombe, each image calibrated on its own)" : "";
         // --subset: train only on the images the noise check calls correlated (or independent), for P3's routed design.
         if (o.StringOrNull("subset") is { } subset)
         {
@@ -239,10 +245,21 @@ public static class Program
         }
 
         var clock = Stopwatch.StartNew();
-        var denoised = TiledInference.Denoise(net, input, o.Int("tile", TiledInference.DefaultTileCore));
+        GrayImage output, denoised;
+        if (o.Has("vst"))
+        {
+            (output, var model) = VarianceStabilization.Denoise(net, raw, o.Int("tile", TiledInference.DefaultTileCore));
+            denoised = Normalization.Apply(output, map);
+            Console.WriteLine($"📐 noise model: variance = {model.Gain:G4} · intensity {model.Intercept:+0.###;-0.###}");
+        }
+        else
+        {
+            denoised = TiledInference.Denoise(net, input, o.Int("tile", TiledInference.DefaultTileCore));
+            output = Normalization.Invert(denoised, map);
+        }
         double seconds = clock.Elapsed.TotalSeconds;
 
-        File.WriteAllBytes(o.Required("out"), TiffCodec.Encode(Normalization.Invert(denoised, map), TiffSampleType.Float32));
+        File.WriteAllBytes(o.Required("out"), TiffCodec.Encode(output, TiffSampleType.Float32));
         Console.WriteLine($"🧬 model: {info.Provenance}");
         Console.WriteLine($"✨ denoised {raw.Width}×{raw.Height} in {seconds:0.00}s → {o.Required("out")}");
         Console.WriteLine($"   estimated noise σ (normalized): {Metrics.EstimateNoiseSigma(input):0.0000} → {Metrics.EstimateNoiseSigma(denoised):0.0000}");
@@ -321,7 +338,7 @@ public static class Program
         foreach (string level in levels)
         {
             routed = 0;
-            var scores = FmdBenchmark.Evaluate(Pick, testMix, level);
+            var scores = FmdBenchmark.Evaluate(Pick, testMix, level, stabilize: o.Has("vst"));
             Console.WriteLine($"test_mix level {level}: mean PSNR (dB) / SSIM vs ground truth, 8-bit scale");
             Console.WriteLine($"{"modality",-10} {"n",3}  {"noisy",-15} {"bilateral",-15} {"DORA",-15}");
             foreach (var (group, count, m) in FmdBenchmark.Summarize(scores))
@@ -469,14 +486,15 @@ public static class Program
 
         public static Options Parse(IEnumerable<string> args)
         {
+            // "--key value", or a bare "--flag" when the next token is another option or there is none (--vst, --per-image).
             var o = new Options();
-            using var e = args.GetEnumerator();
-            while (e.MoveNext())
+            var tokens = args.ToList();
+            for (int i = 0; i < tokens.Count; i++)
             {
-                if (!e.Current.StartsWith("--", StringComparison.Ordinal)) throw new ArgumentException($"Unexpected argument '{e.Current}'.");
-                string key = e.Current[2..];
-                if (!e.MoveNext()) throw new ArgumentException($"--{key} needs a value.");
-                o._values[key] = e.Current;
+                if (!tokens[i].StartsWith("--", StringComparison.Ordinal)) throw new ArgumentException($"Unexpected argument '{tokens[i]}'.");
+                string key = tokens[i][2..];
+                bool hasValue = i + 1 < tokens.Count && !tokens[i + 1].StartsWith("--", StringComparison.Ordinal);
+                o._values[key] = hasValue ? tokens[++i] : "true";
             }
             return o;
         }

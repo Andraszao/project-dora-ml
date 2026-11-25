@@ -94,6 +94,18 @@ public class FmdDatasetTests : IDisposable
         Assert.Equal(4, test.Count);
         Assert.All(all.Concat(one).Concat(test), p => Assert.True(p.HasClean));
         Assert.DoesNotContain(all, p => p.GroupId.EndsWith("/19"));
+
+        // The optional step before normalization (variance stabilization uses it) sees every pair in original units.
+        int calls = 0;
+        float largest = 0;
+        DatasetLoader.LoadDirectory(_root, beforeNormalize: p =>
+        {
+            Interlocked.Increment(ref calls);
+            lock (this) largest = Math.Max(largest, p.Noisy.Pixels.Max());
+            return p;
+        });
+        Assert.Equal(24, calls);
+        Assert.True(largest > 2, "the hook runs before normalization, on 8-bit values");
         // Normalized: the noisy image's 0.1–99.9% quantiles map to about 0 and 1.
         Assert.All(all, p => Assert.InRange(p.Noisy.Pixels.Average(), -0.5, 1.5));
     }

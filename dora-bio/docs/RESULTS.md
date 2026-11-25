@@ -177,7 +177,8 @@ Reproduce: `tools/experiments/p3_struct.sh`.
 best-fit plane removed, the flattest quarter kept, the median correlation per offset. Noise counts as correlated at
 0.4 or more one pixel away. On the 48 raw test images it agrees with the ground-truth measurement every time:
 widefield estimates 0.557–0.578 (truth 0.58–0.65), confocal 0.262 at most and two-photon 0.155 at most. Gate 14
-re-checks this whenever the data is present. The Godot app runs the check on every loaded image.
+re-checks this whenever the data is present. On the 912 training images it flags exactly the 228 widefield ones.
+The Godot app runs the check on every loaded image.
 
 Limits: small tiles keep cell structure out but bias the estimate low, about half the truth at two pixels. On
 cleaner inputs the check false-alarms on densely stained images: on 16-frame averages it reads 0.57 on
@@ -247,6 +248,54 @@ for. They are opt-in rather than the default, because they lose on cleaner input
 `--struct auto` when the noise check flags the training images, and the two-network recipe when the data is mixed.
 "Adapt to sample" uses them automatically on images the check flags (one image is one microscope, so the mixing
 problem doesn't arise).
+
+### Variance stabilization and calibration (bricks 16–17)
+
+The generalized Anscombe transform turns Poisson–Gaussian noise, whose variance grows with brightness, into noise of
+unit variance, and Mäkitalo and Foi's unbiased inverse maps the denoised result back. It needs each image's noise
+model, variance = gain · intensity + intercept, which `NoiseCalibration` estimates from the noisy image alone.
+On synthetic frames from six camera settings it finds the gain within 5.1% and the variance curve within 6.8%.
+
+**On real FMD images the calibration is only reliable for widefield.** Checked against ground truth on *training*
+FOVs 1–3 of every category (never test_mix): the variance predicted from the noisy image alone, divided by the
+variance measured against ground truth in 5 brightness bands, and the noise variance left after the transform,
+which should be 1:
+
+| | Predicted / measured variance (median, middle 80%) | Variance after the transform (mean, range) |
+|---|---|---|
+| Confocal | 1.09 (−0.28 to 1.52) | 0.41 (0.17–0.77) |
+| Two-photon | 1.12 (0.89–1.40) | 0.71 (0.39–0.92) |
+| Widefield | 0.91 (0.72–1.17) | 1.16 (0.91–1.61) |
+
+Dim confocal images are the problem. Their measured variance curve bends at low intensity (3.5 at mean 4 on
+Confocal_BPAE_B, where a line through the brighter bands is already below zero), and their bright regions are nearly
+all cell structure, which steepens the fitted line. The transform then clamps much of the dark background to zero.
+Trusting a lower quantile of each band's tiles (0.10 or 0.05 instead of 0.25) helps only slightly (confocal 0.52), so
+the default stays. A straight Poisson–Gaussian line doesn't describe FMD's 8-bit confocal noise at low intensities.
+
+**With the transform, Noise2Void loses.** The bar for a win was set before running it (PATHWAY.md, P3 exit): the
+all-48 PSNR must rise at raw and drop by no more than 0.2 dB at any lower level, compared with the same design
+without the transform. It fails for both designs:
+
+| Raw test_mix | Confocal (20) | Two-photon (16) | Widefield (12) | All 48 |
+|---|---|---|---|---|
+| Plain Noise2Void | 33.77 / 0.881 | 31.85 / 0.800 | 27.97 / 0.563 | 31.68 / 0.774 |
+| Plain, with the transform | 33.35 / 0.886 | 31.28 / 0.783 | 28.30 / 0.631 | 31.40 / 0.788 |
+| Routed pair | 34.09 / 0.886 | 32.46 / 0.819 | 31.76 / 0.807 | 32.97 / 0.844 |
+| Routed pair, with the transform | 33.60 / 0.885 | 31.99 / 0.809 | 32.23 / 0.806 | 32.72 / 0.840 |
+
+| All 48, PSNR (dB) | raw | avg2 | avg4 | avg8 | avg16 |
+|---|---|---|---|---|---|
+| Plain Noise2Void | 31.68 | 33.21 | 34.89 | 36.33 | 37.89 |
+| Plain, with the transform | 31.40 | 33.01 | 34.18 | 35.72 | 36.91 |
+| Routed pair | 32.97 | 33.85 | 34.67 | 35.13 | 35.49 |
+| Routed pair, with the transform | 32.72 | 33.68 | 34.00 | 34.81 | 35.22 |
+
+The split follows the calibration exactly: widefield, the one modality it calibrates well, gains 0.33 dB (plain) and
+0.47 dB (routed), while confocal and two-photon lose about 0.5 dB. **Verdict:** the transform stays opt-in (`--vst`,
+Noise2Void only, and a model trained with it must be applied with it). What limits it here is calibrating dim 8-bit
+images from one frame, not the transform. A calibrated camera (dark and flat frames) or a curve-based transform would
+be the way to revisit it.
 
 ## What these results do and don't show
 

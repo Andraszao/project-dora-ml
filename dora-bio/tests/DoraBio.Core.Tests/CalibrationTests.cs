@@ -81,8 +81,34 @@ public class CalibrationTests
     }
 
     [Fact]
-    public void RefusesImagesTooSmallToCalibrate()
+    public void CalibratedStabilizationGivesUnitNoiseOnARealisticFrame()
+    {
+        // End to end, as training with --vst does it: estimate the model from the noisy frame alone, then transform.
+        var frame = SyntheticFluorescence.Generate(512, 512, seed: 8,
+            new SyntheticOptions { GainAduPerPhoton = 2, CameraOffsetAdu = 300, ReadNoiseAdu = 4, PeakPhotons = 40 });
+        var stabilized = VarianceStabilization.Stabilize(new ImagePair(frame.Noisy, frame.Clean, "g", "n"));
+        double sum = 0, squares = 0;
+        for (int i = 0; i < stabilized.Noisy.Length; i++)
+        {
+            double r = stabilized.Noisy.Pixels[i] - stabilized.Clean!.Pixels[i];
+            sum += r;
+            squares += r * r;
+        }
+        double mean = sum / stabilized.Noisy.Length, variance = squares / stabilized.Noisy.Length - mean * mean;
+        _output.WriteLine($"residual after stabilization: mean {mean:0.000}, variance {variance:0.000}");
+        Assert.InRange(variance, 0.9, 1.1);   // raw variance here ranges over about 16 to 200 ADU²
+    }
+
+    [Fact]
+    public void RefusesImagesTooSmallToCalibrateAndUnsupportedQuantiles()
     {
         Assert.Throws<ArgumentException>(() => NoiseCalibration.Estimate(new GrayImage(64, 64)));
+        var frame = SyntheticFluorescence.Generate(512, 512, seed: 9);
+        Assert.Throws<ArgumentException>(() => NoiseCalibration.Estimate(frame.Noisy, quantile: 0.3));
+        // The low quantiles are debiased and ignore structure, so they agree on the gain. The median is accepted, but it
+        // lets structured tiles in and overestimates (that's why the default is the lower quartile).
+        foreach (double q in new[] { 0.05, 0.1, 0.25 })
+            Assert.InRange(NoiseCalibration.Estimate(frame.Noisy, q).Gain, 0.9, 1.1);
+        Assert.True(NoiseCalibration.Estimate(frame.Noisy, 0.5).Gain > NoiseCalibration.Estimate(frame.Noisy).Gain);
     }
 }

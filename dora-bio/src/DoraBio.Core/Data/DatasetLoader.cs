@@ -19,16 +19,17 @@ public static class DatasetLoader
     /// <summary>Detects the layout, loads every image, checks sizes, and normalizes each pair by its noisy image's percentiles.</summary>
     /// <param name="dir">Dataset folder.</param>
     /// <param name="fmd">What to load from an FMD folder (frames per FOV, noise levels, categories). Defaults exclude the test FOV.</param>
+    /// <param name="beforeNormalize">Optional per-pair step in original units, before normalization (e.g. variance stabilization).</param>
     /// <exception cref="DirectoryNotFoundException"><paramref name="dir"/> doesn't exist.</exception>
     /// <exception cref="InvalidDataException">No supported images found, or a clean image doesn't match its noisy image's size.</exception>
-    public static List<ImagePair> LoadDirectory(string dir, FmdOptions? fmd = null)
+    public static List<ImagePair> LoadDirectory(string dir, FmdOptions? fmd = null, Func<ImagePair, ImagePair>? beforeNormalize = null)
     {
         if (!Directory.Exists(dir)) throw new DirectoryNotFoundException(dir);
 
         if (FmdDataset.IsCategory(dir) || FmdDataset.IsRoot(dir))
-            return FmdDataset.Load(FmdDataset.PlanTraining(dir, fmd ?? new FmdOptions()));
+            return FmdDataset.Load(FmdDataset.PlanTraining(dir, fmd ?? new FmdOptions()), beforeNormalize);
         if (FmdDataset.IsTestMix(dir))
-            return FmdDataset.Load(FmdDataset.PlanTestMix(dir));
+            return FmdDataset.Load(FmdDataset.PlanTestMix(dir), beforeNormalize);
 
         string noisyDir = Path.Combine(dir, "noisy"), cleanDir = Path.Combine(dir, "clean");
         List<ImagePair> raw = Directory.Exists(noisyDir)
@@ -38,7 +39,7 @@ public static class DatasetLoader
         if (raw.Count == 0)
             throw new InvalidDataException($"No .tif/.tiff/.png images found in {dir} (looked for noisy/, FMD raw/+gt/, or flat files).");
         foreach (var pair in raw) pair.Validate();
-        return raw.Select(p => p.Normalize().Pair).ToList();
+        return raw.Select(p => (beforeNormalize?.Invoke(p) ?? p).Normalize().Pair).ToList();
     }
 
     /// <summary>noisy/NAME.* paired with clean/NAME.* by file stem; a noisy image without a match gets no clean image.</summary>

@@ -66,8 +66,13 @@ public static class FmdBenchmark
     /// <param name="testMixDir">The test_mix folder.</param>
     /// <param name="level">Noise level: raw, avg2, avg4, avg8 or avg16.</param>
     /// <param name="tileCore">Tile core size for inference.</param>
+    /// <param name="stabilize">
+    /// For models trained with variance stabilization: calibrate each image (<see cref="NoiseCalibration"/>), denoise
+    /// its <see cref="Anscombe"/> transform, and map the result back with the unbiased inverse. The noisy and bilateral
+    /// columns are unaffected.
+    /// </param>
     public static List<FmdScore> Evaluate(Func<GrayImage, DenoisingNet> pickNet, string testMixDir, string level = "raw",
-        int tileCore = TiledInference.DefaultTileCore)
+        int tileCore = TiledInference.DefaultTileCore, bool stabilize = false)
     {
         var scores = new List<FmdScore>();
         foreach (var p in FmdDataset.PlanTestMix(testMixDir, level))
@@ -76,7 +81,9 @@ public static class FmdBenchmark
             var clean = ImageLoader.Load(p.CleanPath);
             var map = Normalization.FromPercentiles(noisy.Pixels);
             var input = Normalization.Apply(noisy, map);
-            var dora = ToSensorUnits(TiledInference.Denoise(pickNet(noisy), input, tileCore), map);
+            var dora = stabilize
+                ? DenoiseStabilized(pickNet(noisy), noisy, tileCore)
+                : ToSensorUnits(TiledInference.Denoise(pickNet(noisy), input, tileCore), map);
             var bilateral = ToSensorUnits(BilateralBaseline.FilterAuto(input), map);
 
             scores.Add(new FmdScore(p.Name, p.GroupId, ModalityOf(p.GroupId),
@@ -174,6 +181,14 @@ public static class FmdBenchmark
         var groups = items.GroupBy(modality).OrderBy(g => g.Key, StringComparer.Ordinal).Select(g => (g.Key, g.ToList())).ToList();
         groups.Add(("all", items.ToList()));
         return groups;
+    }
+
+    /// <summary>Calibrate, transform, normalize, denoise, then undo each step (unbiased inverse last), clipped to 8 bits.</summary>
+    private static GrayImage DenoiseStabilized(DenoisingNet net, GrayImage noisy, int tileCore)
+    {
+        var (output, _) = VarianceStabilization.Denoise(net, noisy, tileCore);
+        for (int i = 0; i < output.Length; i++) output.Pixels[i] = (float)Math.Clamp(output.Pixels[i], 0, DataRange);
+        return output;
     }
 
     /// <summary>Normalized → original units, clipped to the 8-bit range (evaluation only; training never clips).</summary>

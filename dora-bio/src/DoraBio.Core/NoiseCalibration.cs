@@ -10,7 +10,7 @@ namespace DoraBio.Core;
 /// and the variance left after removing its best-fit plane (<see cref="NoiseDiagnostics"/> does the same to judge
 /// correlation). Sort the tiles by mean into 12 bands of equal size. In each band, cell edges and other structure only
 /// ever add variance, so take the band's lower quartile of tile variances, which ignores the busiest three quarters,
-/// and divide out the quartile's known bias for pure noise. Fit a straight line variance = gain · mean + intercept
+/// and divide out the quartile's known bias for pure noise. (A lower quantile can be asked for; see the parameter.) Fit a straight line variance = gain · mean + intercept
 /// through the bands, drop bands far off it, and fit again.
 /// </summary>
 /// <remarks>
@@ -26,15 +26,28 @@ public static class NoiseCalibration
     /// <summary>Fewest usable tiles an estimate needs (3 per band).</summary>
     public const int MinTiles = 3 * Bands;
 
-    // The lower quartile of a chi-square variance estimate with k = 16² − 3 degrees of freedom, as a fraction of the
-    // true variance (Wilson–Hilferty): (1 − 2/(9k) − 0.6745·√(2/(9k)))³ ≈ 0.939.
-    private static readonly double QuartileBias = QuartileOfChiSquareMean(NoiseDiagnostics.TileSize * NoiseDiagnostics.TileSize - 3);
+    /// <summary>Which quantile of each band's tile variances is trusted by default.</summary>
+    public const double DefaultQuantile = 0.25;
+
+    // Standard-normal quantiles for the supported choices (Wilson–Hilferty needs z for the bias correction below).
+    private static readonly Dictionary<double, double> NormalQuantile = new() { [0.05] = -1.6449, [0.1] = -1.2816, [0.25] = -0.6745, [0.5] = 0 };
 
     /// <summary>Estimates the noise model of a noisy image in its original intensity units (not normalized).</summary>
     /// <param name="image">A noisy image; at least 36 usable 16×16 tiles (e.g. 96×96).</param>
-    /// <exception cref="ArgumentException">Too few usable tiles.</exception>
-    public static NoiseModel Estimate(GrayImage image)
+    /// <param name="quantile">
+    /// Which quantile of each band's tile variances to trust: 0.05, 0.1, 0.25 or 0.5. Lower ignores more structure
+    /// (images whose bright regions are all cells) at the cost of more scatter. The bias it introduces for pure noise
+    /// is divided out.
+    /// </param>
+    /// <exception cref="ArgumentException">Too few usable tiles, or an unsupported quantile.</exception>
+    public static NoiseModel Estimate(GrayImage image, double quantile = DefaultQuantile)
     {
+        if (!NormalQuantile.TryGetValue(quantile, out double z))
+            throw new ArgumentException("Supported quantiles: 0.05, 0.1, 0.25, 0.5.", nameof(quantile));
+        // That quantile of a chi-square variance estimate with k = 16² − 3 degrees of freedom, as a fraction of the true
+        // variance (Wilson–Hilferty): (1 − 2/(9k) + z·√(2/(9k)))³, e.g. 0.939 for the lower quartile.
+        double c = 2.0 / (9 * (NoiseDiagnostics.TileSize * NoiseDiagnostics.TileSize - 3));
+        double bias = Math.Pow(1 - c + z * Math.Sqrt(c), 3);
         float top = image.Pixels.Max();
         bool clippedTop = top is 255f or 4095f or 65535f;
         const int t = NoiseDiagnostics.TileSize;
@@ -69,7 +82,7 @@ public static class NoiseCalibration
         {
             var band = tiles.Skip(b * tiles.Count / Bands).Take((b + 1) * tiles.Count / Bands - b * tiles.Count / Bands).ToList();
             var variances = band.Select(x => x.Variance).OrderBy(v => v).ToList();
-            bands.Add((band[band.Count / 2].Mean, Quantile(variances, 0.25) / QuartileBias));
+            bands.Add((band[band.Count / 2].Mean, Quantile(variances, quantile) / bias));
         }
 
         var (gain, intercept) = FitLine(bands);
@@ -106,11 +119,5 @@ public static class NoiseCalibration
         double position = q * (sorted.Count - 1);
         int low = (int)Math.Floor(position), high = Math.Min(low + 1, sorted.Count - 1);
         return sorted[low] + (position - low) * (sorted[high] - sorted[low]);
-    }
-
-    private static double QuartileOfChiSquareMean(double k)
-    {
-        double c = 2 / (9 * k);
-        return Math.Pow(1 - c - 0.6745 * Math.Sqrt(c), 3);
     }
 }

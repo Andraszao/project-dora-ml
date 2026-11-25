@@ -140,7 +140,9 @@ public static class FmdDataset
     /// Each ground-truth file is decoded once and shared by all its frames before normalization. Every pair is
     /// normalized by its own noisy image's percentiles, as at inference time.
     /// </remarks>
-    public static List<ImagePair> Load(IReadOnlyList<PlannedPair> plan)
+    /// <param name="plan">Pairs from <see cref="PlanTraining"/> or <see cref="PlanTestMix"/>.</param>
+    /// <param name="beforeNormalize">Optional per-pair step in original units, before normalization.</param>
+    public static List<ImagePair> Load(IReadOnlyList<PlannedPair> plan, Func<ImagePair, ImagePair>? beforeNormalize = null)
     {
         var cleanCache = plan.Select(p => p.CleanPath).Distinct()
             .AsParallel().Select(path => (path, image: ImageLoader.Load(path)))
@@ -151,7 +153,7 @@ public static class FmdDataset
             var p = plan[i];
             var pair = new ImagePair(ImageLoader.Load(p.NoisyPath), cleanCache[p.CleanPath], p.GroupId, p.Name);
             pair.Validate();
-            result[i] = pair.Normalize().Pair;
+            result[i] = (beforeNormalize?.Invoke(pair) ?? pair).Normalize().Pair;
         });
         return result.ToList();
     }
