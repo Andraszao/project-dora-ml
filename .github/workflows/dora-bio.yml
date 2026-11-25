@@ -1,0 +1,48 @@
+# CI for dora-bio/ (DORA v2.0-bio). It runs the same brick gates as a local `./bricks.sh`, so "green locally"
+# and "green in CI" mean the same thing. See dora-bio/PATHWAY.md (phase P1) and dora-bio/bricks.sh.
+# The v1 project at the repo root has no tests and is not built here.
+name: dora-bio gates
+
+on:
+  push:
+    paths:
+      - "dora-bio/**"
+      - ".github/workflows/dora-bio.yml"
+  pull_request:
+    paths:
+      - "dora-bio/**"
+      - ".github/workflows/dora-bio.yml"
+
+permissions:
+  contents: read
+
+# A newer push to the same branch makes an in-progress run obsolete.
+concurrency:
+  group: dora-bio-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gates:
+    name: "Bricks 0-10 + gate self-test (gate 8 runs in godot-smoke)"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: dora-bio
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+      DOTNET_NOLOGO: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install PyYAML (gates 9-10 check this workflow file)
+        run: python -m pip install pyyaml==6.0.2
+      # The full run: gate 8 reports SKIPPED here (no Godot in this job), and gate 9 includes the self-test that
+      # plants one bug per gate 0-7 and requires each to turn red.
+      - name: All gates
+        run: ./bricks.sh
