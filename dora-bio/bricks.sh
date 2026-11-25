@@ -23,7 +23,7 @@ cd "$(dirname "$0")"
 export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1
 
 NAMES=(scaffold nn data io inference training cli godot-build godot-smoke ci-core ci-godot fmd-fetch fmd-loader fmd-eval
-       n2v-diagnostic structured-mask vst calibration)
+       n2v-diagnostic structured-mask vst calibration pool-upsample unet unet-tiling arch-eval)
 CHECKS=(
   "solution builds (warnings are errors, missing XML docs included); every test class belongs to exactly one brick"
   "ConvLayer/DenoisingNet/Adam/Simd: finite-difference gradient checks, optimizer behavior"
@@ -43,6 +43,10 @@ CHECKS=(
   "structured blind spots; recorded FMD results meet the bar set in advance (widefield +1 dB, others -0.2 dB at worst); with data + weights: they reproduce"
   "generalized Anscombe transform: unit variance across intensities on synthetic data, exact unbiased inverse"
   "noise model (variance = gain · intensity + intercept) from one image: synthetic gain within 10%, variance curve within 10%"
+  "2×2 average pooling and nearest upsampling: finite-difference gradients, adjoint identities"
+  "U-Net: whole-network finite-difference gradients; weights format 2 round-trips both architectures; format-1 files still load"
+  "U-Net tiled inference equals whole-image inference for ragged sizes (tiles on the 2^depth grid)"
+  "recorded FMD results for both architectures reproduce; the default follows the rule set before measuring"
 )
 LAST=$((${#NAMES[@]} - 1))
 LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dora-bricks.XXXXXX")"
@@ -196,6 +200,39 @@ gate_15() {   # structured-mask
 
 gate_16() { test_gate 16-vst; }           # vst
 gate_17() { test_gate 17-calibration; }   # calibration
+gate_18() { test_gate 18-pool-upsample; } # pool-upsample
+gate_19() { test_gate 19-unet; }          # unet
+gate_20() { test_gate 20-unet-tiling; }   # unet-tiling
+
+gate_21() {   # arch-eval
+  test_gate 21-arch-eval || return 1
+  # The rule was set before measuring (PATHWAY.md, P4): the U-Net becomes the default only if, at the same training
+  # steps, it beats the dilated CNN on all-48 test_mix PSNR (raw) for supervised AND Noise2Void training, and is at
+  # most 3x slower on a 512x512 frame. The recorded blocks hold the four scores; the default must follow the rule.
+  local dncnn_sup unet_sup dncnn_n2v unet_n2v
+  dncnn_sup="$(recorded_block p4-dncnn-sup | awk '$1 == "all" { print $9 }')"
+  unet_sup="$(recorded_block p4-unet-sup | awk '$1 == "all" { print $9 }')"
+  dncnn_n2v="$(recorded_block p4-dncnn-n2v | awk '$1 == "all" { print $9 }')"
+  unet_n2v="$(recorded_block p4-unet-n2v | awk '$1 == "all" { print $9 }')"
+  [[ -n "$dncnn_sup" && -n "$unet_sup" && -n "$dncnn_n2v" && -n "$unet_n2v" ]] \
+    || { echo ">> docs/RESULTS.md needs p4-dncnn-sup, p4-unet-sup, p4-dncnn-n2v and p4-unet-n2v fmd-eval blocks"; return 1; }
+  local slowdown; slowdown="$(sed -n 's/.*<!-- p4-slowdown: \([0-9.]*\) -->.*/\1/p' docs/RESULTS.md)"
+  [[ -n "$slowdown" ]] || { echo ">> docs/RESULTS.md needs a <!-- p4-slowdown: X --> marker (U-Net / dilated CNN time, 512x512)"; return 1; }
+  local want=dilated
+  awk -v a="$unet_sup" -v b="$dncnn_sup" -v c="$unet_n2v" -v d="$dncnn_n2v" -v s="$slowdown" \
+    'BEGIN { exit !(a > b && c > d && s <= 3) }' && want=unet
+  dotnet build tools/DoraBio.Cli -c Release >/dev/null || return 1
+  local have; have="$(dotnet "$CLI_DLL" info --default-arch)"
+  [[ "$have" == "$want" ]] || { echo ">> the rule says the default should be $want, but NetConfig.Default is $have"; return 1; }
+  echo ">> supervised: U-Net $unet_sup vs dilated $dncnn_sup dB; Noise2Void: U-Net $unet_n2v vs dilated $dncnn_n2v dB; slowdown ${slowdown}x: default $want"
+  local w=runs/p4 d=runs/p3
+  [[ -f "$FMD/test_mix/.complete" && -f $d/sup_plain.bin && -f $d/n2v_plain.bin && -f $w/unet_sup.bin && -f $w/unet_n2v.bin ]] \
+    || { echo "rule checked on the recorded results; reproduction skipped (needs FMD data and the weights from tools/experiments)"; return 77; }
+  reproduces p4-dncnn-sup fmd-eval --weights $d/sup_plain.bin --root "$FMD" --levels raw || return 1
+  reproduces p4-unet-sup fmd-eval --weights $w/unet_sup.bin --root "$FMD" --levels raw || return 1
+  reproduces p4-dncnn-n2v fmd-eval --weights $d/n2v_plain.bin --root "$FMD" --levels raw || return 1
+  reproduces p4-unet-n2v fmd-eval --weights $w/unet_n2v.bin --root "$FMD" --levels raw || return 1
+}
 
 # recorded_block <marker>: the contents of the ```text block between <!-- marker --> and <!-- /marker --> in RESULTS.md.
 recorded_block() { sed -n "/<!-- $1 -->/,/<!-- \/$1 -->/p" docs/RESULTS.md | sed '1,2d;$d' | sed '$d'; }
@@ -235,6 +272,7 @@ MUTATIONS=(
   '15|src/DoraBio.Core/Data/BlindSpot.cs|do q = rng.Next(plane); while (hidden[q]);|q = rng.Next(plane);'
   '16|src/DoraBio.Core/Data/Anscombe.cs|- 11 / (8 * d * d)|- 11 / (8 * d)'
   '17|src/DoraBio.Core/NoiseCalibration.cs|double gain = sxx > 0 ? sxy / sxx : 0;|double gain = sxx > 0 ? 0.8 * sxy / sxx : 0;'
+  '18|src/DoraBio.Core/Nn/Resample.cs|float v = 0.25f * g[x];|float v = 0.5f * g[x];'
 )
 
 self_test() {

@@ -24,6 +24,10 @@ internal static class Bricks
     public const string StructuredMask = "15-structured-mask";   // structured blind spots for correlated noise
     public const string Vst = "16-vst";                          // generalized Anscombe transform and its inverse
     public const string Calibration = "17-calibration";          // gain, offset and read noise from the image
+    public const string PoolUpsample = "18-pool-upsample";       // 2×2 average pooling and nearest upsampling
+    public const string UNet = "19-unet";                        // U-Net architecture, weights format 2
+    public const string UNetTiling = "20-unet-tiling";           // exact tiled inference for the U-Net
+    public const string ArchEval = "21-arch-eval";               // dilated CNN vs U-Net on FMD
 }
 
 [Trait(Bricks.Trait, Bricks.Scaffold)]
@@ -31,7 +35,8 @@ public class BrickWiringTests
 {
     private static readonly HashSet<string> Known =
         [Bricks.Scaffold, Bricks.Nn, Bricks.Data, Bricks.IO, Bricks.Inference, Bricks.Training, Bricks.Fmd, Bricks.FmdEval,
-         Bricks.NoiseDiagnostic, Bricks.StructuredMask, Bricks.Vst, Bricks.Calibration];
+         Bricks.NoiseDiagnostic, Bricks.StructuredMask, Bricks.Vst, Bricks.Calibration,
+         Bricks.PoolUpsample, Bricks.UNet, Bricks.UNetTiling, Bricks.ArchEval];
 
     /// <summary>An untagged test would silently run in no gate, so treat a missing or unknown brick as a build error.</summary>
     [Xunit.Fact]

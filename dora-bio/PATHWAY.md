@@ -13,7 +13,7 @@ settled first, and so every phase builds only on phases that are already green.
 | **P1** | Continuous gates (CI) | regressions slipping in between sessions | ✅ done: bricks 9–10, [CI run #1](https://github.com/Andraszao/project-dora-ml/actions/runs/45617118232) green |
 | **P2** | Real-data truth (FMD) | performance on real microscopes is unmeasured | ✅ done: bricks 11–13, [results](docs/RESULTS.md) on 48 held-out FMD images |
 | **P3** | Noise-model fidelity | Noise2Void's assumptions failing on real cameras (measured in P2 on widefield) | ✅ done: bricks 14–17, [results](docs/RESULTS.md#p3-correlated-noise-and-structured-blind-spots) |
-| **P4** | Model capacity (U-Net) | **the small CNN being the ceiling** | ⏭ next |
+| **P4** | Model capacity (U-Net) | **the small CNN being the ceiling** | 🚧 in progress: gates 18–21 defined |
 | **P5** | Performance | slowness on large frames and stacks | planned |
 | **P6** | Stacks, time-lapse, batch | single 2-D frames only | planned |
 | **P7** | Analysis UX | can see but can't measure or export | planned |
@@ -125,7 +125,10 @@ the standard Noise2Void backbone.
 | 20 `unet-tiling` | margins and padding-to-multiple-of-2ᵈ rules for exact tiling | `TiledInferenceMatchesWholeImage` passes for U-Net |
 | 21 `arch-eval` | DnCNN vs U-Net on held-out FMD: quality vs speed | numbers in `docs/RESULTS.md` |
 
-**Exit:** the default architecture is whichever wins on held-out real data, with the result documented.
+**Exit:** the default architecture is whichever wins on held-out real data, with the result documented. *Rule set
+before building (2026-11-25): the U-Net becomes the default only if, at the same number of training steps (P3's
+budget and seed), it beats the dilated CNN on all-48 test_mix PSNR (raw) for supervised AND plain Noise2Void
+training, and denoises a 512×512 frame at most 3× slower. Gate 21 checks that the default follows the rule.*
 
 ## P5: Performance
 
