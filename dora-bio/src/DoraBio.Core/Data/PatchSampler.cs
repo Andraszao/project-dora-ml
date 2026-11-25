@@ -77,17 +77,24 @@ public sealed class PatchSampler
     /// <summary>Fraction of pixels blind-spotted per patch (Noise2Void only).</summary>
     public float MaskRatio { get; }
 
+    /// <summary>How patches are augmented (lossless dihedral by default).</summary>
+    public AugmentationMode Augmentation { get; }
+
     /// <param name="images">Normalized training images. Images smaller than the patch are skipped.</param>
     /// <param name="patchSize">Patch side length (at least 8).</param>
     /// <param name="mode">Noise2Void or supervised. Supervised requires a clean image for every usable pair.</param>
     /// <param name="maskRatio">Fraction of pixels to blind-spot per patch in Noise2Void mode (e.g. 0.02).</param>
     /// <param name="rng">Owned by the caller and reused for every draw, so a seeded run is reproducible.</param>
-    public PatchSampler(IReadOnlyList<ImagePair> images, int patchSize, TrainingMode mode, float maskRatio, Random rng)
+    /// <param name="augmentation">Dihedral (default) or the v1-style rotate-and-scale comparison mode.</param>
+    public PatchSampler(IReadOnlyList<ImagePair> images, int patchSize, TrainingMode mode, float maskRatio, Random rng,
+        AugmentationMode augmentation = AugmentationMode.Dihedral)
     {
         if (patchSize < 8) throw new ArgumentOutOfRangeException(nameof(patchSize), "Patch size must be at least 8.");
-        var usable = images.Where(i => i.Noisy.Width >= patchSize && i.Noisy.Height >= patchSize).ToList();
+        // v1-style rotation and scaling reads a footprint wider than the patch, so images must be large enough for it.
+        int minSide = augmentation == AugmentationMode.V1RotateScale ? 2 * V1Augment.Reach(patchSize) + 1 : patchSize;
+        var usable = images.Where(i => i.Noisy.Width >= minSide && i.Noisy.Height >= minSide).ToList();
         if (usable.Count == 0)
-            throw new ArgumentException($"No image is at least {patchSize}x{patchSize}; lower the patch size.");
+            throw new ArgumentException($"No image is at least {minSide}x{minSide}; lower the patch size.");
         if (mode == TrainingMode.Supervised && usable.Any(i => !i.HasClean))
             throw new ArgumentException("Supervised training needs a clean image for every training image.");
         foreach (var image in usable) image.Validate();
@@ -97,6 +104,7 @@ public sealed class PatchSampler
         PatchSize = patchSize;
         Mode = mode;
         MaskRatio = maskRatio;
+        Augmentation = augmentation;
 
         _cumulativeArea = new double[usable.Count];
         double total = 0;
@@ -127,15 +135,29 @@ public sealed class PatchSampler
     private void FillSample(Span<float> input, Span<float> target, Span<float> mask)
     {
         var image = PickImage();
-        int x = _rng.Next(image.Noisy.Width - PatchSize + 1);
-        int y = _rng.Next(image.Noisy.Height - PatchSize + 1);
-        int transform = _rng.Next(Dihedral.Count);
-
-        ExtractAugmented(image.Noisy, x, y, transform, _noisyPatch);
+        if (Augmentation == AugmentationMode.V1RotateScale)
+        {
+            // v1's recipe: one random angle and scale, applied identically to noisy and clean.
+            int reach = V1Augment.Reach(PatchSize);
+            double cx = reach + _rng.NextDouble() * (image.Noisy.Width - 1 - 2 * reach);
+            double cy = reach + _rng.NextDouble() * (image.Noisy.Height - 1 - 2 * reach);
+            double angle = (_rng.NextDouble() * 2 - 1) * V1Augment.MaxAngleDegrees * Math.PI / 180;
+            double scale = V1Augment.MinScale + _rng.NextDouble() * (V1Augment.MaxScale - V1Augment.MinScale);
+            V1Augment.RotateScaleNearest(image.Noisy, cx, cy, angle, scale, PatchSize, _noisyPatch);
+            if (Mode == TrainingMode.Supervised)
+                V1Augment.RotateScaleNearest(image.Clean!, cx, cy, angle, scale, PatchSize, _cleanPatch);
+        }
+        else
+        {
+            int x = _rng.Next(image.Noisy.Width - PatchSize + 1);
+            int y = _rng.Next(image.Noisy.Height - PatchSize + 1);
+            int transform = _rng.Next(Dihedral.Count);
+            ExtractAugmented(image.Noisy, x, y, transform, _noisyPatch);
+            if (Mode == TrainingMode.Supervised) ExtractAugmented(image.Clean!, x, y, transform, _cleanPatch);
+        }
 
         if (Mode == TrainingMode.Supervised)
         {
-            ExtractAugmented(image.Clean!, x, y, transform, _cleanPatch);
             _noisyPatch.CopyTo(input);
             _cleanPatch.CopyTo(target);
             mask.Fill(1f);

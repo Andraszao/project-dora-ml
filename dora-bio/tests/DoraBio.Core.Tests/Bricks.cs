@@ -19,13 +19,14 @@ internal static class Bricks
     public const string Inference = "4-inference"; // Metrics, TiledInference, BilateralBaseline
     public const string Training = "5-training";   // Trainer, ValidationSet, ProgressiveTargets, JourneyLog, OnlineAdapter, DatasetLoader
     public const string Fmd = "12-fmd";            // FmdDataset: real FMD layouts, test-FOV exclusion, leakage guard
+    public const string FmdEval = "13-fmd-eval";   // FmdBenchmark: test_mix protocol (8-bit scale, per-modality summary)
 }
 
 [Trait(Bricks.Trait, Bricks.Scaffold)]
 public class BrickWiringTests
 {
     private static readonly HashSet<string> Known =
-        [Bricks.Scaffold, Bricks.Nn, Bricks.Data, Bricks.IO, Bricks.Inference, Bricks.Training, Bricks.Fmd];
+        [Bricks.Scaffold, Bricks.Nn, Bricks.Data, Bricks.IO, Bricks.Inference, Bricks.Training, Bricks.Fmd, Bricks.FmdEval];
 
     /// <summary>An untagged test would silently run in no gate, so treat a missing or unknown brick as a build error.</summary>
     [Xunit.Fact]

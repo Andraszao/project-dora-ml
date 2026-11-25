@@ -42,7 +42,7 @@ public sealed class Trainer
         var cfg = _config;
         var (trainImages, valImages) = DatasetSplit.Split(dataset, cfg.ValidationFraction, cfg.Seed);
         var rng = new Random(cfg.Seed);
-        var sampler = new PatchSampler(trainImages, cfg.PatchSize, cfg.Mode, cfg.MaskRatio, rng);
+        var sampler = new PatchSampler(trainImages, cfg.PatchSize, cfg.Mode, cfg.MaskRatio, rng, cfg.Augmentation);
         var validation = new ValidationSet(valImages, cfg);
         var optimizer = new AdamOptimizer(_net.ParameterCount, cfg.LearningRate) { ClipNorm = cfg.GradientClipNorm };
         var targets = cfg.EnableProgressiveTargets && validation.HasClean

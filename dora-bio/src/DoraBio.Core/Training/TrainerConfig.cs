@@ -54,6 +54,9 @@ public sealed record TrainerConfig
 
     // ---- Noise2Void and validation --------------------------------------------------------------
 
+    /// <summary>Patch augmentation. Lossless dihedral by default; <see cref="AugmentationMode.V1RotateScale"/> exists to measure v1's recipe.</summary>
+    public AugmentationMode Augmentation { get; init; } = AugmentationMode.Dihedral;
+
     /// <summary>Fraction of pixels masked per patch in Noise2Void mode.</summary>
     /// <remarks>
     /// 2% follows the Noise2Void paper. More masked pixels give more loss terms per patch, but leave more

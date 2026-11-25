@@ -11,41 +11,9 @@ namespace DoraBio.Core.Tests;
 [Trait(Bricks.Trait, Bricks.Fmd)]
 public class FmdDatasetTests : IDisposable
 {
-    private const int Size = 16;
-    private static readonly string[] Categories = ["Confocal_FISH", "WideField_BPAE_B"];
-    private static readonly int[] FovIds = [1, 2, 3, 19, 20];
     private readonly string _root = TestUtil.TempDirectory();
 
-    public FmdDatasetTests()
-    {
-        foreach (string category in Categories)
-            foreach (int fov in FovIds)
-            {
-                // Each FOV gets a distinct ground truth, so mix-ups between FOVs are detectable.
-                byte Truth(int x, int y) => (byte)(20 + 7 * fov + x + y);
-                TestUtil.WritePng(Path.Combine(_root, category, "gt", fov.ToString(), "avg50.png"), Size, Size, Truth);
-                foreach (string level in FmdDataset.Levels)
-                    for (int frame = 0; frame < 3; frame++)
-                        TestUtil.WritePng(Path.Combine(_root, category, level, fov.ToString(), $"HV_P{frame:D3}.png"),
-                            Size, Size, (x, y) => (byte)(Truth(x, y) + ((x * 31 + y * 17 + frame * 13) % 9) - 4));
-            }
-
-        // test_mix: two images per category, copied from FOV 19, named <Category>_<k>.png, like the real one.
-        foreach (string category in Categories)
-            for (int k = 1; k <= 2; k++)
-            {
-                File.Copy(Path.Combine(_root, category, "gt", "19", "avg50.png"), Target("gt"));
-                foreach (string level in FmdDataset.Levels)
-                    File.Copy(Path.Combine(_root, category, level, "19", $"HV_P{k:D3}.png"), Target(level));
-
-                string Target(string folder)
-                {
-                    string path = Path.Combine(_root, "test_mix", folder, $"{category}_{k}.png");
-                    Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-                    return path;
-                }
-            }
-    }
+    public FmdDatasetTests() => FmdTestTree.Build(_root);
 
     public void Dispose() => Directory.Delete(_root, recursive: true);
 

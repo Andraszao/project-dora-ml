@@ -37,7 +37,7 @@ CHECKS=(
   "CI Godot job pins the SDK's Godot version, verifies its SHA-512, and makes gate 8 mandatory"
   "FMD fetch script pins every archive (Drive id, size, SHA-256); downloaded data matches the pins"
   "FMD loader unit tests (real layouts, test-FOV exclusion); with data: counts + no train/test leakage"
-  "docs/RESULTS.md exists; with data: the recorded synthetic-model evaluation reproduces exactly"
+  "benchmark unit tests; docs/RESULTS.md exists; with data: the recorded synthetic-model evaluation and noise measurement reproduce exactly"
 )
 LAST=$((${#NAMES[@]} - 1))
 LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dora-bricks.XXXXXX")"
@@ -148,18 +148,25 @@ gate_12() {   # fmd-loader
 }
 
 gate_13() {   # fmd-eval
+  test_gate 13-fmd-eval || return 1
   [[ -f docs/RESULTS.md ]] || { echo ">> docs/RESULTS.md is missing"; return 1; }
   [[ -f "$FMD/test_mix/.complete" ]] || { echo "results recorded; reproduction skipped (no FMD data)"; return 77; }
   dotnet build tools/DoraBio.Cli -c Release >/dev/null || return 1
-  # The block between the markers in RESULTS.md is the verbatim output of this command; it must reproduce exactly.
-  local recorded fresh
-  recorded="$(sed -n '/<!-- fmd-eval:synthetic -->/,/<!-- \/fmd-eval -->/p' docs/RESULTS.md | sed '1,2d;$d' | sed '$d')"
-  fresh="$(dotnet "$CLI_DLL" fmd-eval --weights godot/models/dora_bio_weights.bin --root "$FMD" --levels raw)"
-  [[ -n "$recorded" ]] || { echo ">> no <!-- fmd-eval:synthetic --> block in docs/RESULTS.md"; return 1; }
+  reproduces fmd-eval-synthetic fmd-eval --weights godot/models/dora_bio_weights.bin --root "$FMD" --levels raw || return 1
+  reproduces fmd-noise fmd-noise --root "$FMD" --levels raw || return 1
+}
+
+# reproduces <marker> <cli args...>: the ```text block between <!-- marker --> and <!-- /marker --> in RESULTS.md is
+# the verbatim output of `dora-bio <cli args...>`, and a fresh run must print exactly the same.
+reproduces() {
+  local marker="$1" recorded fresh; shift
+  recorded="$(sed -n "/<!-- $marker -->/,/<!-- \/$marker -->/p" docs/RESULTS.md | sed '1,2d;$d' | sed '$d')"
+  [[ -n "$recorded" ]] || { echo ">> no <!-- $marker --> block in docs/RESULTS.md"; return 1; }
+  fresh="$(dotnet "$CLI_DLL" "$@")" || return 1
   if [[ "$recorded" != "$fresh" ]]; then
-    echo ">> recorded synthetic-model results differ from a fresh run:"; diff <(echo "$recorded") <(echo "$fresh") | head -20; return 1
+    echo ">> RESULTS.md block '$marker' differs from a fresh run:"; diff <(echo "$recorded") <(echo "$fresh") | head -20; return 1
   fi
-  echo ">> recorded results reproduce exactly"
+  echo ">> RESULTS.md block '$marker' reproduces exactly"
 }
 
 # ---- gate self-test ---------------------------------------------------------
@@ -179,6 +186,7 @@ MUTATIONS=(
   $'7|godot/scripts/DoraBioBridge.cs|    /// <summary>True while a denoise, adapt or training job runs. Only one job runs at a time.</summary>\n|'
   '11|tools/fetch_fmd.sh|d7a14d3be17368dbfe24a5cfe8ed0d40d403d7902d70fe914d04303e4aa8f2f6"|"'
   '12|src/DoraBio.Core/Data/FmdDataset.cs|public IReadOnlyCollection<int> ExcludedFovs { get; init; } = [FmdDataset.TestFov];|public IReadOnlyCollection<int> ExcludedFovs { get; init; } = [];'
+  '13|docs/RESULTS.md||<DELETE-FILE>'
 )
 
 self_test() {

@@ -18,14 +18,17 @@ loaded sample in-app, or train on synthetic data or on a folder.
 DoraBio.sln                    core + tests + CLI (no Godot)
 src/DoraBio.Core/              ALL ML/IO code. net8.0. No Godot, no NuGet dependencies.
   Nn/        ConvLayer (3×3 dilated conv fwd/bwd), DenoisingNet, AdamOptimizer, Simd, WorkspacePool
-  Data/      GrayImage, Normalization, Dihedral, BlindSpot, PatchSampler, ImagePair/DatasetSplit,
-             DatasetLoader, SyntheticFluorescence
+  Data/      GrayImage, Normalization, Dihedral, V1Augment, BlindSpot, PatchSampler, ImagePair/DatasetSplit,
+             DatasetLoader, FmdDataset (real FMD layouts + test-FOV exclusion), SyntheticFluorescence
   IO/        TiffCodec, PngDecoder, ImageLoader, WeightsFile, Crc32
   Training/  Trainer (+BatchStepper), ValidationSet, ProgressiveTargets, TrainingJob, JourneyLog,
              OnlineAdapter, TrainerConfig
-  Metrics.cs, TiledInference.cs, BilateralBaseline.cs
+  Metrics.cs, TiledInference.cs, BilateralBaseline.cs, FmdBenchmark.cs (held-out FMD scores, noise correlation)
 tests/DoraBio.Core.Tests/      xunit. Fixtures/ written by Pillow/ImageMagick (make_fixtures.py)
-tools/DoraBio.Cli/             `dora-bio` CLI: synth | train | denoise | eval | info
+tools/DoraBio.Cli/             `dora-bio` CLI: synth | train | denoise | eval | info | fmd-check | fmd-eval | fmd-noise
+tools/fetch_fmd.sh             downloads + verifies the real FMD dataset into data/fmd/ (gitignored)
+tools/experiments/p2_fmd.sh    every P2 training run and evaluation behind docs/RESULTS.md
+docs/RESULTS.md                measured results on real microscope data (FMD), with reproducible blocks
 godot/                         Godot 4.5 .NET project (open THIS folder in Godot)
   DoraBio.Godot.csproj         Godot.NET.Sdk/4.5.1, ProjectReference → src/DoraBio.Core
   scripts/DoraBioBridge.cs     the ONLY Godot↔core boundary ([GlobalClass] Node)
@@ -38,10 +41,11 @@ godot/                         Godot 4.5 .NET project (open THIS folder in Godot
 
 ## Development pathway
 
-Work follows [`PATHWAY.md`](PATHWAY.md): phases **P0 → P10**, each a group of bricks with gates. P0 (bricks 0–8)
-and P1 (bricks 9–10, CI) are done. **The current phase is P2 (real-data truth on FMD).** Pick up the next
-unfinished brick of the current phase, follow the phase protocol there, and update its status table when a
-phase closes.
+Work follows [`PATHWAY.md`](PATHWAY.md): phases **P0 → P10**, each a group of bricks with gates. P0 (bricks 0–8),
+P1 (bricks 9–10, CI) and P2 (bricks 11–13, real FMD data) are done. **The current phase is P3 (noise-model
+fidelity)**, starting with brick 14 (`n2v-diagnostic`). Pick up the next unfinished brick of the current phase,
+follow the phase protocol there, and update its status table when a phase closes. Read `docs/RESULTS.md` before
+changing training or the model: it records what actually works on real data.
 
 ## Brick-by-brick workflow (how this project is built: follow it)
 
@@ -61,6 +65,13 @@ before anything is built on top.** `./bricks.sh` runs the gates in order and sto
 | 8 | godot-smoke | `godot/scenes`, `scripts/*.gd`, `shaders` | headless Godot smoke test (needs `GODOT=…`, otherwise **SKIPPED**, which is not a pass; `REQUIRE_GODOT=1` makes it a FAIL) |
 | 9 | ci-core | `.github/workflows/dora-bio.yml` (job `gates`), `tools/ci/`, `bricks.sh --self-test` | workflow structure check + self-test: one planted bug per gate 0–7, each must turn its gate red |
 | 10 | ci-godot | workflow job `godot-smoke` | CI's Godot version = Godot.NET.Sdk version; download SHA-512 pinned and verified; gate 8 mandatory in CI |
+| 11 | fmd-fetch | `tools/fetch_fmd.sh` | all 13 FMD archives pinned (Drive id, size, SHA-256); with data: every archive's digest and image count match |
+| 12 | fmd-loader | `Data/FmdDataset.cs` | `Brick=12-fmd` (miniature real-layout tree); with data: `dora-bio fmd-check` (structure + test_mix = FOV 19 pixel for pixel, FOV 19 never in training) |
+| 13 | fmd-eval | `FmdBenchmark.cs`, `tools/experiments/`, `docs/RESULTS.md` | `Brick=13-fmd-eval`; RESULTS.md exists; with data: its recorded synthetic-model evaluation and noise-correlation blocks reproduce exactly |
+
+Gates 11–13 need the dataset (`tools/fetch_fmd.sh`, about 9 GB into the gitignored `data/fmd/`). Without it, their
+data-dependent part reports SKIPPED (exit code 77) while the pins, unit tests and RESULTS.md checks still run. CI has
+no data and must not download it.
 
 Rules:
 1. **Work on one brick at a time.** Put new code in the lowest brick it belongs to, and give it tests tagged
@@ -93,8 +104,12 @@ Rules:
 cd dora-bio
 ./bricks.sh                                               # all gates in order (~2 min incl. self-test; GODOT=… for gate 8)
 ./bricks.sh --only 3                                      # iterate on one brick
-./bricks.sh --self-test                                   # plant one bug per gate 0-7; each must turn red (~1 min)
-dotnet test DoraBio.sln                                   # all 70 tests at once, ~5 s
+./bricks.sh --self-test                                   # plant one bug per gate; each must turn red (~1 min)
+tools/fetch_fmd.sh                                        # FMD dataset, ~9 GB, into data/fmd/ (needs drive.usercontent.google.com)
+dotnet tools/DoraBio.Cli/bin/Release/net8.0/dora-bio.dll fmd-eval --weights W.bin --root data/fmd   # held-out test_mix
+tools/experiments/p2_fmd.sh                               # retrain + evaluate every P2 model (~45 min CPU)
+dotnet tools/DoraBio.Cli/bin/Release/net8.0/dora-bio.dll fmd-noise --root data/fmd   # is the real noise pixel-independent?
+dotnet test DoraBio.sln                                   # all 85 tests at once, ~5 s
 dotnet run --project tools/DoraBio.Cli -c Release -- synth --out data/synth --count 10 --size 256
 dotnet run --project tools/DoraBio.Cli -c Release -- train --data data/synth --out runs/w.bin --mode n2v
 cd godot && dotnet build && godot --headless --path . --import \
@@ -125,7 +140,11 @@ cd godot && dotnet build && godot --headless --path . --import \
 8. **Validation is held out by FOV** (`ImagePair.GroupId`). Frames of one field of view never straddle the split.
 9. **Journey log lifecycle:** a session opens only when training starts. Every epoch is appended and saved.
    The session ends as `completed` or `failed: …`. Inference-only launches write nothing.
-10. **Label synthetic things as synthetic.** The bundled sample and weights come from `SyntheticFluorescence`.
+10. **Never train on FMD's test FOV (19).** `FmdOptions.ExcludedFovs` defaults to it, the CLI doesn't expose it, and
+    gate 12 proves test_mix is FOV 19 and absent from the training plan. Report results on test_mix only.
+11. **Don't commit FMD data, or weights trained on it, without a license decision.** The data is CC BY-SA 4.0;
+    data/ and runs/ are gitignored. Credit Zhang et al., CVPR 2019 wherever FMD numbers appear.
+12. **Label synthetic things as synthetic.** The bundled sample and weights come from `SyntheticFluorescence`.
     Don't describe them as real microscope data, and don't claim real-data accuracy that hasn't been measured.
 
 ## Godot ⇄ C# gotchas
@@ -148,5 +167,5 @@ cd godot && dotnet build && godot --headless --path . --import \
 - **Images in:** TIFF (8/16/32-bit int/float; none/Deflate/PackBits; predictor 2; LE/BE; strips; multi-page)
   and PNG (8/16-bit gray/RGB(A), all filters). Not supported, each with a clear error: LZW, tiled TIFF,
   BigTIFF, palettes, interlaced PNG, **HDF5**.
-- **Datasets** (`DatasetLoader`): `noisy/`+`clean/`; FMD `raw/<fov>/`+`gt/<fov>/` (written to the published
-  layout, **untested against the real download**); or a flat folder (Noise2Void only).
+- **Datasets** (`DatasetLoader`): `noisy/`+`clean/`; FMD (`FmdDataset`: the dataset root, one category, or
+  `test_mix`, checked against the real download by `dora-bio fmd-check`); or a flat folder (Noise2Void only).

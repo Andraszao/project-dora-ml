@@ -24,6 +24,7 @@ public static class Program
                    [--batch 16] [--patch 64] [--lr 0.001] [--features 24] [--journey FILE.json] [--seed 1234]
                    [--init WEIGHTS.bin]   (fine-tune existing weights instead of starting fresh)
                    [--describe TEXT]      (what the data is; stored in the weights' provenance)
+                   [--augment dihedral|v1] (v1 = v1's ±15° rotation + 0.85-1.15 scale, nearest neighbour; for comparison)
                    FMD folders: [--fmd-frames 4] [--fmd-levels raw,avg2,avg4,avg8,avg16] [--fmd-categories A,B]
                    (FOV 19, FMD's test FOV, is always excluded from training)
           denoise  --weights WEIGHTS.bin --in IMAGE --out OUT.tif [--baseline BASELINE.tif] [--tile 128]
@@ -33,6 +34,10 @@ public static class Program
           info     --weights WEIGHTS.bin
           fmd-check --root data/fmd
                    Verify a downloaded FMD dataset: structure, test_mix, and no train/test leakage.
+          fmd-eval  --weights WEIGHTS.bin --root data/fmd [--levels raw,avg2,...] [--per-image]
+                   PSNR/SSIM (8-bit scale) on FMD's held-out test_mix: noisy vs bilateral vs DORA, per microscope type.
+          fmd-noise --root data/fmd [--levels raw,avg2,...]
+                   How correlated test_mix's real noise is between neighbouring pixels (Noise2Void assumes 0).
         """;
 
     /// <summary>Entry point: <c>dora-bio &lt;command&gt; [--option value]…</c>.</summary>
@@ -62,6 +67,8 @@ public static class Program
                 "eval" => Eval(options),
                 "info" => Info(options),
                 "fmd-check" => FmdCheck(options),
+                "fmd-eval" => FmdEval(options),
+                "fmd-noise" => FmdNoise(options),
                 _ => throw new ArgumentException($"Unknown command '{args[0]}'."),
             };
         }
@@ -119,6 +126,12 @@ public static class Program
             MaxEpochs = o.Int("epochs", 30),
             StepsPerEpoch = o.Int("steps", 50),
             BatchSize = o.Int("batch", 16),
+            Augmentation = o.String("augment", "dihedral") switch
+            {
+                "dihedral" => AugmentationMode.Dihedral,
+                "v1" => AugmentationMode.V1RotateScale,
+                var a => throw new ArgumentException($"Unknown --augment '{a}' (use dihedral or v1)."),
+            },
             PatchSize = o.Int("patch", 64),
             LearningRate = (float)o.Double("lr", 1e-3),
             Seed = o.Int("seed", 1234),
@@ -222,7 +235,6 @@ public static class Program
         return 0;
     }
 
-    /// <summary><c>info</c>: prints a weights file's version, architecture, size, save time and provenance.</summary>
     /// <summary>
     /// FMD loading options from <c>--fmd-frames</c>, <c>--fmd-levels</c> and <c>--fmd-categories</c>. The test FOV
     /// exclusion is deliberately not exposed: the CLI never trains on FMD's test FOV.
@@ -233,6 +245,48 @@ public static class Program
         NoiseLevels = o.String("fmd-levels", "raw").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
         Categories = o.StringOrNull("fmd-categories")?.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
     };
+
+    /// <summary>
+    /// <c>fmd-eval</c>: deterministic benchmark on test_mix (see <see cref="FmdBenchmark"/>). The output is designed to be
+    /// pasted verbatim into docs/RESULTS.md, where gate 13 re-runs it and requires an exact match.
+    /// </summary>
+    private static int FmdEval(Options o)
+    {
+        var (net, _) = WeightsFile.Load(o.Required("weights"));
+        string testMix = Path.Combine(o.Required("root"), "test_mix");
+        var levels = o.String("levels", "raw").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        foreach (string level in levels)
+        {
+            var scores = FmdBenchmark.Evaluate(net, testMix, level);
+            Console.WriteLine($"test_mix level {level}: mean PSNR (dB) / SSIM vs ground truth, 8-bit scale");
+            Console.WriteLine($"{"modality",-10} {"n",3}  {"noisy",-15} {"bilateral",-15} {"DORA",-15}");
+            foreach (var (group, count, m) in FmdBenchmark.Summarize(scores))
+                Console.WriteLine($"{group,-10} {count,3}  {m.NoisyPsnr,6:0.00} / {m.NoisySsim:0.000}  {m.BilateralPsnr,6:0.00} / {m.BilateralSsim:0.000}  {m.DoraPsnr,6:0.00} / {m.DoraSsim:0.000}");
+            if (o.Has("per-image"))
+                foreach (var s in scores)
+                    Console.WriteLine($"  {s.Name,-40} {s.NoisyPsnr,6:0.00} {s.BilateralPsnr,6:0.00} {s.DoraPsnr,6:0.00}");
+        }
+        return 0;
+    }
+
+    /// <summary>
+    /// <c>fmd-noise</c>: correlation of test_mix's real noise between neighbouring pixels, per microscope type (see
+    /// <see cref="FmdBenchmark.NoiseCorrelation"/>). Like fmd-eval, the output is recorded verbatim in docs/RESULTS.md
+    /// and re-checked by gate 13.
+    /// </summary>
+    private static int FmdNoise(Options o)
+    {
+        string testMix = Path.Combine(o.Required("root"), "test_mix");
+        var levels = o.String("levels", "raw").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        foreach (string level in levels)
+        {
+            Console.WriteLine($"test_mix level {level}: correlation of the noise (noisy - ground truth) with a neighbour, mean over images");
+            Console.WriteLine($"{"modality",-10} {"n",3}  {"right 1",7} {"down 1",7} {"right 2",7}  {"noise SD",8}");
+            foreach (var (group, count, m) in FmdBenchmark.SummarizeNoise(FmdBenchmark.MeasureNoise(testMix, level)))
+                Console.WriteLine($"{group,-10} {count,3}  {m.Right1,7:0.000} {m.Down1,7:0.000} {m.Right2,7:0.000}  {m.NoiseSd,8:0.00}");
+        }
+        return 0;
+    }
 
     /// <summary>
     /// <c>fmd-check</c>: structure of every category and of test_mix, plus the leakage guard. Every test_mix
@@ -248,6 +302,7 @@ public static class Program
         return 0;
     }
 
+    /// <summary><c>info</c>: prints a weights file's version, architecture, size, save time and provenance.</summary>
     private static int Info(Options o)
     {
         var (net, info) = WeightsFile.Load(o.Required("weights"));

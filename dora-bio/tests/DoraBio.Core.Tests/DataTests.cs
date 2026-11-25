@@ -157,6 +157,51 @@ public class DataTests
     }
 
     [Fact]
+    public void V1AugmentWithoutRotationOrScalingIsAnExactCrop()
+    {
+        var image = TestUtil.Pattern(40, 40, (x, y) => x * 100 + y);
+        var patch = new float[8 * 8];
+        // Center (13.5, 21.5) with an even patch → offsets ±0.5..±3.5 land exactly on pixels 10..17 and 18..25.
+        V1Augment.RotateScaleNearest(image, 13.5, 21.5, 0, 1, 8, patch);
+        for (int i = 0; i < 8; i++)
+            for (int j = 0; j < 8; j++)
+                Assert.Equal(image[10 + j, 18 + i], patch[i * 8 + j]);
+    }
+
+    [Fact]
+    public void V1AugmentDuplicatesPixelsWhichIsWhatHurtsNoise2Void()
+    {
+        // Every source pixel unique: a magnified (scale 1.15) nearest-neighbour patch must reuse some of them,
+        // so neighbouring patch pixels share one noise sample, the leak a blind spot can't tolerate.
+        var image = TestUtil.Pattern(200, 200, (x, y) => y * 200 + x);
+        var patch = new float[64 * 64];
+        V1Augment.RotateScaleNearest(image, 100, 100, 10 * Math.PI / 180, 1.15, 64, patch);
+        Assert.True(patch.Distinct().Count() < patch.Length);
+        Assert.All(patch, v => Assert.InRange(v, 0, 200 * 200 - 1));   // values are copied, never interpolated
+    }
+
+    [Fact]
+    public void V1AugmentRefusesAFootprintOutsideTheImage()
+    {
+        var image = TestUtil.Pattern(40, 40, (x, y) => 1);
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            V1Augment.RotateScaleNearest(image, 5, 5, 0.2, 0.85, 32, new float[32 * 32]));
+    }
+
+    [Fact]
+    public void V1SamplerKeepsNoisyAndCleanAligned()
+    {
+        var clean = TestUtil.RandomImage(160, 160, 1);
+        var noisy = new GrayImage(160, 160, clean.Pixels.Select(v => v + 10f).ToArray());
+        var sampler = new PatchSampler([new ImagePair(noisy, clean, "a", "a")], 32, TrainingMode.Supervised, 0.02f,
+            new Random(1), AugmentationMode.V1RotateScale);
+        var batch = new TrainingBatch(4, 32);
+        sampler.Fill(batch);
+        for (int i = 0; i < batch.Inputs.Length; i++)
+            Assert.Equal(batch.Targets[i] + 10f, batch.Inputs[i], 4);
+    }
+
+    [Fact]
     public void SyntheticFramesHavePoissonGaussianStatistics()
     {
         var options = new SyntheticOptions { PeakPhotons = 40, ReadNoiseAdu = 2, CameraOffsetAdu = 100 };
