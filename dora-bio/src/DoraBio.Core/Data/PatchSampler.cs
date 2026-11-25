@@ -1,5 +1,6 @@
 namespace DoraBio.Core.Data;
 
+/// <summary>What the network is trained to reproduce.</summary>
 public enum TrainingMode
 {
     /// <summary>Self-supervised blind-spot training on noisy images alone.</summary>
@@ -10,15 +11,28 @@ public enum TrainingMode
 }
 
 /// <summary>A mini-batch of square patches, stored sample-major: index = sample * Size² + y * Size + x.</summary>
+/// <remarks>Allocated once and refilled every step by <see cref="PatchSampler.Fill"/>, so training allocates nothing per step.</remarks>
 public sealed class TrainingBatch
 {
+    /// <summary>Number of patches in the batch.</summary>
     public int Count { get; }
+
+    /// <summary>Patch side length in pixels.</summary>
     public int Size { get; }
+
+    /// <summary>Pixels per patch (Size²).</summary>
     public int Plane => Size * Size;
+
+    /// <summary>All network inputs, patch after patch.</summary>
     public float[] Inputs { get; }
+
+    /// <summary>All targets the outputs are compared against, patch after patch.</summary>
     public float[] Targets { get; }
+
+    /// <summary>All per-pixel loss weights (0 or 1), patch after patch.</summary>
     public float[] Masks { get; }
 
+    /// <summary>Allocates a batch of <paramref name="count"/> patches of <paramref name="size"/>×<paramref name="size"/> pixels.</summary>
     public TrainingBatch(int count, int size)
     {
         if (count <= 0 || size <= 0) throw new ArgumentOutOfRangeException(nameof(count));
@@ -29,8 +43,13 @@ public sealed class TrainingBatch
         Masks = new float[count * Plane];
     }
 
+    /// <summary>Input plane of sample <paramref name="i"/> (a view, not a copy).</summary>
     public Span<float> Input(int i) => Inputs.AsSpan(i * Plane, Plane);
+
+    /// <summary>Target plane of sample <paramref name="i"/> (a view, not a copy).</summary>
     public Span<float> Target(int i) => Targets.AsSpan(i * Plane, Plane);
+
+    /// <summary>Loss-mask plane of sample <paramref name="i"/> (a view, not a copy).</summary>
     public Span<float> Mask(int i) => Masks.AsSpan(i * Plane, Plane);
 }
 
@@ -49,10 +68,20 @@ public sealed class PatchSampler
     private readonly float[] _cleanPatch;
     private readonly float[] _scratch;
 
+    /// <summary>Side length of the square patches this sampler produces.</summary>
     public int PatchSize { get; }
+
+    /// <summary>Whether batches are built for Noise2Void or supervised training.</summary>
     public TrainingMode Mode { get; }
+
+    /// <summary>Fraction of pixels blind-spotted per patch (Noise2Void only).</summary>
     public float MaskRatio { get; }
 
+    /// <param name="images">Normalized training images. Images smaller than the patch are skipped.</param>
+    /// <param name="patchSize">Patch side length (at least 8).</param>
+    /// <param name="mode">Noise2Void or supervised. Supervised requires a clean image for every usable pair.</param>
+    /// <param name="maskRatio">Fraction of pixels to blind-spot per patch in Noise2Void mode (e.g. 0.02).</param>
+    /// <param name="rng">Owned by the caller and reused for every draw, so a seeded run is reproducible.</param>
     public PatchSampler(IReadOnlyList<ImagePair> images, int patchSize, TrainingMode mode, float maskRatio, Random rng)
     {
         if (patchSize < 8) throw new ArgumentOutOfRangeException(nameof(patchSize), "Patch size must be at least 8.");
@@ -83,6 +112,7 @@ public sealed class PatchSampler
         _scratch = new float[plane];
     }
 
+    /// <summary>Overwrites every sample in <paramref name="batch"/> with a freshly drawn, augmented patch.</summary>
     public void Fill(TrainingBatch batch)
     {
         if (batch.Size != PatchSize) throw new ArgumentException("Batch patch size does not match the sampler.");
@@ -90,6 +120,10 @@ public sealed class PatchSampler
             FillSample(batch.Input(i), batch.Target(i), batch.Mask(i));
     }
 
+    /// <summary>
+    /// Draws one patch: pick an image, pick a position, pick one of the 8 symmetries, and apply the same
+    /// symmetry to noisy and clean so they stay aligned. Then build input, target and mask for the mode.
+    /// </summary>
     private void FillSample(Span<float> input, Span<float> target, Span<float> mask)
     {
         var image = PickImage();
@@ -113,6 +147,10 @@ public sealed class PatchSampler
         }
     }
 
+    /// <summary>
+    /// Area-weighted choice: a uniform draw on [0, total area) is located in the cumulative-area table, so
+    /// every pixel in the dataset is equally likely to start a patch, however the images vary in size.
+    /// </summary>
     private ImagePair PickImage()
     {
         double r = _rng.NextDouble() * _cumulativeArea[^1];
@@ -121,6 +159,7 @@ public sealed class PatchSampler
         return _images[Math.Min(index, _images.Count - 1)];
     }
 
+    /// <summary>Copies the PatchSize² window at (x, y) into scratch, then writes its dihedral transform to <paramref name="destination"/>.</summary>
     private void ExtractAugmented(GrayImage source, int x, int y, int transform, Span<float> destination)
     {
         for (int row = 0; row < PatchSize; row++)

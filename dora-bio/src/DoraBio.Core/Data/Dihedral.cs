@@ -7,6 +7,7 @@ namespace DoraBio.Core.Data;
 /// </summary>
 public static class Dihedral
 {
+    /// <summary>Number of distinct transforms (valid ids are 0..7).</summary>
     public const int Count = 8;
 
     /// <summary>
@@ -28,6 +29,11 @@ public static class Dihedral
             }
     }
 
+    /// <summary>
+    /// Where destination pixel (y, x) is read from. Starting from (y, x), optionally mirror horizontally,
+    /// then rotate 90° (id &amp; 3) times. Each step is a bijection on the grid, so the result is a pure
+    /// permutation of pixels.
+    /// </summary>
     internal static (int Y, int X) SourceCoordinates(int y, int x, int size, int id)
     {
         int last = size - 1;

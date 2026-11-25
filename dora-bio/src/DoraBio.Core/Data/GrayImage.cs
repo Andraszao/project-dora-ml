@@ -5,12 +5,25 @@ namespace DoraBio.Core.Data;
 /// Values are whatever the caller puts in: raw sensor units (ADU) straight from a loader,
 /// or normalized intensities after <see cref="Normalization"/>. Nothing here clamps or quantizes.
 /// </summary>
+/// <remarks>
+/// Pixel (x, y) is at <c>Pixels[y * Width + x]</c>. This is the same layout the network uses for a
+/// one-channel plane, so a <see cref="GrayImage"/> can be passed to it without copying.
+/// </remarks>
 public sealed class GrayImage
 {
+    /// <summary>Width in pixels (number of columns).</summary>
     public int Width { get; }
+
+    /// <summary>Height in pixels (number of rows).</summary>
     public int Height { get; }
+
+    /// <summary>The pixel values, row-major. Exposed directly for speed; callers may read and write it.</summary>
     public float[] Pixels { get; }
 
+    /// <summary>Creates a zero-filled image, or wraps <paramref name="pixels"/> without copying it.</summary>
+    /// <param name="width">Width in pixels (positive).</param>
+    /// <param name="height">Height in pixels (positive).</param>
+    /// <param name="pixels">Optional row-major data of length width × height, used as-is.</param>
     public GrayImage(int width, int height, float[]? pixels = null)
     {
         if (width <= 0 || height <= 0)
@@ -23,16 +36,20 @@ public sealed class GrayImage
         Pixels = pixels ?? new float[width * height];
     }
 
+    /// <summary>Total number of pixels (Width × Height).</summary>
     public int Length => Pixels.Length;
 
+    /// <summary>The value at column <paramref name="x"/>, row <paramref name="y"/>.</summary>
     public float this[int x, int y]
     {
         get => Pixels[y * Width + x];
         set => Pixels[y * Width + x] = value;
     }
 
+    /// <summary>A writable view of row <paramref name="y"/> (no copy).</summary>
     public Span<float> Row(int y) => Pixels.AsSpan(y * Width, Width);
 
+    /// <summary>Deep copy with an independent pixel array.</summary>
     public GrayImage Clone() => new(Width, Height, (float[])Pixels.Clone());
 
     /// <summary>Copies the rectangle [x, x+w) × [y, y+h) into a new image.</summary>
@@ -47,6 +64,7 @@ public sealed class GrayImage
         return result;
     }
 
+    /// <summary>The smallest and largest pixel values.</summary>
     public (float Min, float Max) Range()
     {
         float min = float.PositiveInfinity, max = float.NegativeInfinity;

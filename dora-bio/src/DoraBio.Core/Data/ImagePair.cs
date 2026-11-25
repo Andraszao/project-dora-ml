@@ -5,10 +5,16 @@ namespace DoraBio.Core.Data;
 /// <paramref name="GroupId"/> names the field of view (FOV): frames of the same FOV are never split
 /// between training and validation, so the validation scores aren't inflated by leakage.
 /// </summary>
+/// <param name="Noisy">The image the network sees.</param>
+/// <param name="Clean">Optional ground truth of the same size. Used for supervised training and for PSNR/SSIM scoring.</param>
+/// <param name="GroupId">Field-of-view identifier; pairs with the same id always land on the same side of the split.</param>
+/// <param name="Name">Display name for logs and error messages (usually the file name).</param>
 public sealed record ImagePair(GrayImage Noisy, GrayImage? Clean, string GroupId, string Name)
 {
+    /// <summary>True when ground truth is available.</summary>
     public bool HasClean => Clean is not null;
 
+    /// <summary>Throws if the clean image's size differs from the noisy one's.</summary>
     public void Validate()
     {
         if (Clean is not null && (Clean.Width != Noisy.Width || Clean.Height != Noisy.Height))
@@ -16,6 +22,11 @@ public sealed record ImagePair(GrayImage Noisy, GrayImage? Clean, string GroupId
                 $"'{Name}': clean image is {Clean.Width}x{Clean.Height} but noisy is {Noisy.Width}x{Noisy.Height}.");
     }
 
+    /// <summary>Crops both images to the same rectangle and appends <paramref name="suffix"/> to the group id and name.</summary>
+    /// <remarks>
+    /// The suffix gives the train and validation halves of a spatially split FOV different group ids,
+    /// so they stay apart.
+    /// </remarks>
     public ImagePair Crop(int x, int y, int w, int h, string suffix) =>
         new(Noisy.Crop(x, y, w, h), Clean?.Crop(x, y, w, h), GroupId + suffix, Name + suffix);
 

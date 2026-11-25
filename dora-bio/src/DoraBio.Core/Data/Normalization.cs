@@ -1,10 +1,21 @@
 namespace DoraBio.Core.Data;
 
 /// <summary>Affine map from sensor units to normalized intensity: (v − Low) / (High − Low).</summary>
+/// <param name="Low">Sensor value that maps to 0.</param>
+/// <param name="High">Sensor value that maps to 1. Must differ from <paramref name="Low"/>.</param>
+/// <remarks>
+/// Keep the map next to the image: the CLI uses <see cref="Invert"/> to write denoised output back in the
+/// original intensity units, so downstream quantification still works on real numbers.
+/// </remarks>
 public readonly record struct IntensityMap(float Low, float High)
 {
+    /// <summary>Width of the mapped range in sensor units (High − Low).</summary>
     public float Scale => High - Low;
+
+    /// <summary>Sensor units → normalized (Low → 0, High → 1; values outside the range are not clamped).</summary>
     public float Apply(float value) => (value - Low) / Scale;
+
+    /// <summary>Normalized → sensor units; the exact inverse of <see cref="Apply"/>.</summary>
     public float Invert(float normalized) => normalized * Scale + Low;
 }
 
@@ -13,9 +24,16 @@ public readonly record struct IntensityMap(float Low, float High)
 /// and by default nothing is clamped either: clipping the noise tails would bias a denoiser
 /// toward darker or brighter values.
 /// </summary>
+/// <remarks>
+/// Why percentiles rather than min/max? A single hot pixel or cosmic-ray hit would set the max and squash
+/// everything else into a sliver of the range. The 0.1% and 99.9% quantiles ignore such outliers.
+/// </remarks>
 public static class Normalization
 {
+    /// <summary>Quantile mapped to 0 by default (0.1%).</summary>
     public const double DefaultLowPercentile = 0.001;
+
+    /// <summary>Quantile mapped to 1 by default (99.9%).</summary>
     public const double DefaultHighPercentile = 0.999;
 
     /// <summary>
@@ -50,6 +68,10 @@ public static class Normalization
         return (float)(sorted[lower] + (sorted[upper] - sorted[lower]) * t);
     }
 
+    /// <summary>Returns a new image with <paramref name="map"/> applied to every pixel.</summary>
+    /// <param name="image">Source image (unchanged).</param>
+    /// <param name="map">The mapping to apply.</param>
+    /// <param name="clamp">Clamp results to [0, 1]. Off by default; only useful for display, never for training.</param>
     public static GrayImage Apply(GrayImage image, IntensityMap map, bool clamp = false)
     {
         var result = new GrayImage(image.Width, image.Height);
@@ -63,6 +85,7 @@ public static class Normalization
         return result;
     }
 
+    /// <summary>Returns a new image mapped back from normalized intensities to sensor units.</summary>
     public static GrayImage Invert(GrayImage normalized, IntensityMap map)
     {
         var result = new GrayImage(normalized.Width, normalized.Height);

@@ -3,13 +3,31 @@ namespace DoraBio.Core.Data;
 /// <summary>Knobs for <see cref="SyntheticFluorescence"/>. Photon counts are per pixel at the brightest structure.</summary>
 public sealed record SyntheticOptions
 {
+    /// <summary>
+    /// Expected photons per pixel at signal level 1.0. This is the main difficulty knob: shot-noise SNR is
+    /// about √photons, so 25 gives SNR ≈ 5 at the brightest structures and much less in dim ones.
+    /// </summary>
     public double PeakPhotons { get; init; } = 25;
+
+    /// <summary>Camera read-noise standard deviation in ADU, added on top of shot noise.</summary>
     public double ReadNoiseAdu { get; init; } = 2.0;
+
+    /// <summary>Camera baseline (dark offset) in ADU, as real sCMOS/CCD cameras add.</summary>
     public double CameraOffsetAdu { get; init; } = 100;
+
+    /// <summary>ADU recorded per detected photon.</summary>
     public double GainAduPerPhoton { get; init; } = 1.0;
+
+    /// <summary>Strength of the smooth background glow, as a fraction of peak signal.</summary>
     public double Autofluorescence { get; init; } = 0.08;
+
+    /// <summary>Number of soft-edged elliptical cell bodies with brighter cores.</summary>
     public int Cells { get; init; } = 6;
+
+    /// <summary>Number of thin wandering filaments (about 1 px wide; the hardest structure to preserve).</summary>
     public int Filaments { get; init; } = 10;
+
+    /// <summary>Number of small bright Gaussian spots (vesicle- or puncta-like).</summary>
     public int Puncta { get; init; } = 40;
 }
 
@@ -24,14 +42,24 @@ public sealed record SyntheticOptions
 public static class SyntheticFluorescence
 {
     /// <summary>A noisy 16-bit-range frame and its noise-free expectation, both in camera units (ADU).</summary>
+    /// <param name="Noisy">What a camera would record: integer ADU, clipped to the 16-bit range.</param>
+    /// <param name="Clean">The expected value of each pixel (offset + gain × expected photons): the ideal denoising target.</param>
     public sealed record Frame(GrayImage Noisy, GrayImage Clean);
 
+    /// <summary>Renders one scene and simulates its noisy acquisition. The same seed always gives the same frame.</summary>
+    /// <param name="width">Frame width in pixels.</param>
+    /// <param name="height">Frame height in pixels.</param>
+    /// <param name="seed">Controls both the scene layout and the noise draw.</param>
+    /// <param name="options">Scene and camera parameters; defaults if null.</param>
     public static Frame Generate(int width, int height, int seed, SyntheticOptions? options = null)
     {
         var o = options ?? new SyntheticOptions();
         var rng = new Random(seed);
         var signal = RenderSignal(width, height, rng, o);
 
+        // Acquisition model per pixel:  ADU = offset + gain · Poisson(λ) + Normal(0, readNoise²),  λ = signal · peakPhotons.
+        // Shot noise grows with brightness (variance = λ), so bright structures are noisier in absolute terms
+        // but cleaner relative to their signal. This signal-dependent noise is what makes real fluorescence hard.
         var noisy = new GrayImage(width, height);
         var clean = new GrayImage(width, height);
         for (int i = 0; i < signal.Length; i++)
