@@ -275,7 +275,9 @@ The code prints "Panel actual size" at startup, so check that line before relyin
   None of the v1 scripts, MNIST data or `.dat` weights are used. v1 weights are rejected by v2's loader.
 - **Isolation:** `dora-bio/.gdignore` stops v1's Godot project from importing it, and `dora-bio/godot/project.godot`
   is a separate Godot project. Open that folder, not the repo root, to run v2.
-- **Build and test** (works in the cloud container; the .NET 8 SDK comes from `apt install dotnet-sdk-8.0`):
-  `cd dora-bio && dotnet test DoraBio.sln`. The Godot smoke test needs the Godot 4.5 .NET binary, see `dora-bio/CLAUDE.md`.
+- **Built brick by brick:** `cd dora-bio && ./bricks.sh` runs 9 ordered gates (scaffold → nn → data → io →
+  inference → training → cli → godot-build → godot-smoke) and stops at the first failure. Work on one brick at a time
+  and commit only on green (rules in `dora-bio/CLAUDE.md`). In the cloud container the .NET 8 SDK comes from
+  `apt install dotnet-sdk-8.0`. Gate 8 needs the Godot 4.5 .NET binary (`GODOT=…`), otherwise it is reported SKIPPED.
 - **Rules, file map and gotchas:** `dora-bio/CLAUDE.md`. **Results and limitations:** `dora-bio/README.md`.
   The bundled sample and weights are **synthetic**.

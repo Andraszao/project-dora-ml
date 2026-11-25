@@ -4,6 +4,7 @@ using Xunit;
 
 namespace DoraBio.Core.Tests;
 
+[Trait(Bricks.Trait, Bricks.Inference)]
 public class InferenceAndMetricsTests
 {
     [Theory]

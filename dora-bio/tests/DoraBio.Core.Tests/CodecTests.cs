@@ -10,6 +10,7 @@ namespace DoraBio.Core.Tests;
 /// Decoders are checked against files written by Pillow, ImageMagick and libtiff (Fixtures/make_fixtures.py).
 /// Every fixture is 37×23 with a known per-pixel formula.
 /// </summary>
+[Trait(Bricks.Trait, Bricks.IO)]
 public class CodecTests
 {
     private const int W = 37, H = 23;

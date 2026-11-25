@@ -7,6 +7,7 @@ namespace DoraBio.Core.Tests;
 /// Checks backpropagation against central finite differences, in double precision over float32 math.
 /// This is what proves the training gradients are right, instead of just hoping they are.
 /// </summary>
+[Trait(Bricks.Trait, Bricks.Nn)]
 public class GradientTests
 {
     [Theory]

@@ -3,6 +3,7 @@ using Xunit;
 
 namespace DoraBio.Core.Tests;
 
+[Trait(Bricks.Trait, Bricks.Data)]
 public class DataTests
 {
     [Fact]

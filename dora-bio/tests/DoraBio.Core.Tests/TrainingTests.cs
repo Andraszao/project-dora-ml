@@ -7,6 +7,7 @@ using Xunit.Abstractions;
 
 namespace DoraBio.Core.Tests;
 
+[Trait(Bricks.Trait, Bricks.Training)]
 public class ProgressiveTargetTests
 {
     [Fact]
@@ -44,6 +45,7 @@ public class ProgressiveTargetTests
     }
 }
 
+[Trait(Bricks.Trait, Bricks.Training)]
 public class TrainingTests
 {
     private readonly ITestOutputHelper _output;

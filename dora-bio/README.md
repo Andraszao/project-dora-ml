@@ -40,6 +40,16 @@ Click **Load sample**, then **Denoise**. **Adapt to sample** runs self-supervise
 screen. **Train (synthetic)** generates data in memory and keeps training. **Train on folder…** trains on your
 own data. **Save weights** writes `user://dora_bio_weights.bin`.
 
+**Build brick by brick.** The project is a stack of 9 bricks (scaffold → nn → data → io → inference → training →
+cli → godot-build → godot-smoke). Each has a gate that must pass before the next is trusted:
+
+```bash
+cd dora-bio
+./bricks.sh --list       # what each gate checks
+./bricks.sh              # run gates 0..8 in order, stop at the first red one
+./bricks.sh --only 5     # iterate on a single brick
+```
+
 **Headless (CLI).** Works anywhere .NET 8 runs, with no Godot needed:
 
 ```bash

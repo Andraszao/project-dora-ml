@@ -36,11 +36,42 @@ godot/                         Godot 4.5 .NET project (open THIS folder in Godot
   tests/smoke_test.tscn        headless end-to-end check
 ```
 
+## Brick-by-brick workflow (how this project is built: follow it)
+
+The build is a stack of bricks. **Each brick depends only on the bricks below it, and has a gate that must pass
+before anything is built on top.** `./bricks.sh` runs the gates in order and stops at the first failure.
+
+| # | Brick | Source | Gate |
+|---|---|---|---|
+| 0 | scaffold | `*.sln`, `*.csproj`, `Directory.Build.props` | solution builds with warnings as errors; every test class has exactly one brick trait |
+| 1 | nn | `Nn/` | `Brick=1-nn`: finite-difference gradient checks, Adam behavior |
+| 2 | data | `Data/` (except `DatasetLoader`) | `Brick=2-data`: dihedral, blind-spot, normalization, sampler, synthetic noise statistics |
+| 3 | io | `IO/` | `Brick=3-io`: decoders vs Pillow/ImageMagick/libtiff fixtures, weights round-trip and CRC |
+| 4 | inference | `Metrics.cs`, `TiledInference.cs`, `BilateralBaseline.cs` | `Brick=4-inference`: tiled == whole image, PSNR/SSIM/noise σ |
+| 5 | training | `Training/`, `Data/DatasetLoader.cs` (needs IO) | `Brick=5-training`: learns on synthetic data, reproducible, journey lifecycle |
+| 6 | cli | `tools/DoraBio.Cli` | synth → train → info → denoise → eval end to end; bundled model and sample still work |
+| 7 | godot-build | `godot/*.csproj`, `scripts/*.cs` | Godot C# assembly compiles against Godot.NET.Sdk 4.5.1 |
+| 8 | godot-smoke | `godot/scenes`, `scripts/*.gd`, `shaders` | headless Godot smoke test (needs `GODOT=…`, otherwise **SKIPPED**, which is not a pass) |
+
+Rules:
+1. **Work on one brick at a time.** Put new code in the lowest brick it belongs to, and give it tests tagged
+   `[Trait(Bricks.Trait, Bricks.X)]`. Iterate with `./bricks.sh --only N`.
+2. **A brick is done when `./bricks.sh N` is green**, meaning gate N and every gate below it. Then commit
+   (`brick N (<name>): …`) before starting the next brick. Never build on a red gate.
+3. **Dependencies only point down.** A change to a lower brick re-opens every brick above it, so run the full
+   `./bricks.sh` before pushing.
+4. **To add a brick:** add a constant to `tests/DoraBio.Core.Tests/Bricks.cs` (and its `Known` set), add a `gate_N`
+   with `NAMES`/`CHECKS` entries in `bricks.sh`, and add a row to this table.
+5. A gate must never pass vacuously. Test gates fail if they match zero tests, and gate 0 fails on an untagged
+   test class. Both were mutation-checked, along with stop-on-first-failure.
+
 ## Commands (all verified in a Linux container without a GPU)
 
 ```bash
 cd dora-bio
-dotnet test DoraBio.sln                                   # about 70 tests, ~30 s
+./bricks.sh                                               # all gates in order (~1 min; add GODOT=… for gate 8)
+./bricks.sh --only 3                                      # iterate on one brick
+dotnet test DoraBio.sln                                   # all 70 tests at once, ~5 s
 dotnet run --project tools/DoraBio.Cli -c Release -- synth --out data/synth --count 10 --size 256
 dotnet run --project tools/DoraBio.Cli -c Release -- train --data data/synth --out runs/w.bin --mode n2v
 cd godot && dotnet build && godot --headless --path . --import \
