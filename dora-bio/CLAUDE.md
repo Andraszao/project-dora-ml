@@ -18,13 +18,15 @@ loaded sample in-app, or train on synthetic data or on a folder.
 DoraBio.sln                    core + tests + CLI (no Godot)
 src/DoraBio.Core/              ALL ML/IO code. net8.0. No Godot, no NuGet dependencies.
   Nn/        ConvLayer (3×3 dilated conv fwd/bwd), DenoisingNet, AdamOptimizer, Simd, WorkspacePool
-  Data/      GrayImage, Normalization, Dihedral, V1Augment, BlindSpot, PatchSampler, ImagePair/DatasetSplit,
+  Data/      GrayImage, Normalization, Anscombe (variance stabilization), Dihedral, V1Augment, BlindSpot (+MaskFootprint),
+             PatchSampler, ImagePair/DatasetSplit,
              DatasetLoader, FmdDataset (real FMD layouts + test-FOV exclusion), SyntheticFluorescence
   IO/        TiffCodec, PngDecoder, ImageLoader, WeightsFile, Crc32
   Training/  Trainer (+BatchStepper), ValidationSet, ProgressiveTargets, TrainingJob, JourneyLog,
              OnlineAdapter, TrainerConfig
   Metrics.cs, TiledInference.cs, BilateralBaseline.cs, FmdBenchmark.cs (held-out FMD scores, noise correlation),
-  NoiseDiagnostics.cs (is the noise pixel-independent? from the noisy image alone)
+  NoiseDiagnostics.cs (is the noise pixel-independent? from the noisy image alone),
+  NoiseCalibration.cs (variance = gain · intensity + intercept, from the noisy image alone)
 tests/DoraBio.Core.Tests/      xunit. Fixtures/ written by Pillow/ImageMagick (make_fixtures.py)
 tools/DoraBio.Cli/             `dora-bio` CLI: synth | train | denoise | eval | info | diagnose | fmd-check | fmd-eval |
                                fmd-noise | fmd-diagnose
@@ -45,7 +47,7 @@ godot/                         Godot 4.5 .NET project (open THIS folder in Godot
 
 Work follows [`PATHWAY.md`](PATHWAY.md): phases **P0 → P10**, each a group of bricks with gates. P0 (bricks 0–8),
 P1 (bricks 9–10, CI) and P2 (bricks 11–13, real FMD data) are done. **The current phase is P3 (noise-model
-fidelity)**: bricks 14–15 are done, 16 (`vst`) is next. Pick up the next unfinished brick of the current phase,
+fidelity)**: bricks 14–17 are built; closing P3 needs the FMD evaluation with and without the transform. Pick up the next unfinished brick of the current phase,
 follow the phase protocol there, and update its status table when a phase closes. Read `docs/RESULTS.md` before
 changing training or the model: it records what actually works on real data.
 
@@ -72,11 +74,8 @@ before anything is built on top.** `./bricks.sh` runs the gates in order and sto
 | 13 | fmd-eval | `FmdBenchmark.cs`, `tools/experiments/`, `docs/RESULTS.md` | `Brick=13-fmd-eval`; RESULTS.md exists; with data: its recorded synthetic-model evaluation and noise-correlation blocks reproduce exactly |
 | 14 | n2v-diagnostic | `NoiseDiagnostics.cs`, CLI `diagnose` / `fmd-diagnose`, the bridge's noise check on load | `Brick=14-n2v-diagnostic` (independent vs smoothed synthetic noise); with data: the blind verdict matches the ground-truth verdict on all 48 raw test images |
 | 15 | structured-mask | `Data/BlindSpot.cs` (`MaskFootprint`), `ImagePair.Footprint`, `Training/StructuredMasking.cs`, CLI `--struct` / `--subset` / `--weights-correlated` | `Brick=15-structured-mask`; the recorded routed two-network results meet the bar set in advance (widefield ≥ +1 dB, confocal and two-photon ≥ −0.2 dB vs plain Noise2Void); with data + P3 weights: all three recorded blocks reproduce |
-| 16 | vst | (P3, not built yet) | `Brick=16-vst`: unit variance after the transform on synthetic data, exact unbiased inverse |
-| 17 | calibration | (P3, not built yet) | `Brick=17-calibration`: recovers the synthetic generator's gain, offset and read noise within 10% |
-
-Gates 16–17 stay red until their bricks are built (P3 is in progress), so a full run currently stops at the first of
-them. Rule 2 still applies: a brick is done when `./bricks.sh N` is green.
+| 16 | vst | `Data/Anscombe.cs` (`NoiseModel`, generalized Anscombe transform, Mäkitalo–Foi unbiased inverse) | `Brick=16-vst`: variance 0.98–1.05 after the transform at 5–200 photons, exact round trip, the unbiased inverse recovers the mean where the algebraic one is biased |
+| 17 | calibration | `NoiseCalibration.cs` | `Brick=17-calibration`: from one synthetic frame, gain within 10% and the predicted noise variance within 10% across its intensity range, for 6 camera settings |
 
 Gates 11–15 need the dataset (gate 15's reproduction also needs the weights from `tools/experiments/p3_struct.sh`) (`tools/fetch_fmd.sh`, about 9 GB into the gitignored `data/fmd/`). Without it, their
 data-dependent part reports SKIPPED (exit code 77) while the pins, unit tests and RESULTS.md checks still run. CI has

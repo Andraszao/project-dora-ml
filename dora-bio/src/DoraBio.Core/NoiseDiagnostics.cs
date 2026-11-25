@@ -86,7 +86,7 @@ public static class NoiseDiagnostics
     /// The tile minus its least-squares plane a + b·x + c·y. On a square grid with centred coordinates the three
     /// basis functions are orthogonal, so each coefficient is a separate projection: a = mean, b = Σv·x / Σx², c likewise.
     /// </summary>
-    private static double[] PlaneResidual(GrayImage image, int x0, int y0)
+    internal static double[] PlaneResidual(GrayImage image, int x0, int y0)
     {
         const double c = (TileSize - 1) / 2.0;
         var r = new double[TileSize * TileSize];

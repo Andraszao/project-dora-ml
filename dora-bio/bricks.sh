@@ -234,6 +234,7 @@ MUTATIONS=(
   '14|src/DoraBio.Core/NoiseDiagnostics.cs|b = r[(y + dy) * TileSize + x + dx];|b = r[(y + dy) * TileSize + x];'
   '15|src/DoraBio.Core/Data/BlindSpot.cs|do q = rng.Next(plane); while (hidden[q]);|q = rng.Next(plane);'
   '16|src/DoraBio.Core/Data/Anscombe.cs|- 11 / (8 * d * d)|- 11 / (8 * d)'
+  '17|src/DoraBio.Core/NoiseCalibration.cs|double gain = sxx > 0 ? sxy / sxx : 0;|double gain = sxx > 0 ? 0.8 * sxy / sxx : 0;'
 )
 
 self_test() {
