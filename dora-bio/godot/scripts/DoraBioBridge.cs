@@ -22,38 +22,91 @@ namespace DoraBio.GodotBridge;
 [GlobalClass]
 public partial class DoraBioBridge : Node
 {
+    // ---- Inspector settings -----------------------------------------------------------------------
+
+    /// <summary>Where trained or adapted weights are saved and loaded first. user:// stays writable in exported builds.</summary>
     [Export] public string UserWeightsPath { get; set; } = "user://dora_bio_weights.bin";
+
+    /// <summary>Read-only fallback model shipped inside the project (trained on synthetic data).</summary>
     [Export] public string BundledWeightsPath { get; set; } = "res://models/dora_bio_weights.bin";
+
+    /// <summary>Training-history JSON written by every training run started from the app.</summary>
     [Export] public string JournalPath { get; set; } = "user://dora_bio_journey.json";
+
+    /// <summary>Tile core size for inference (see <see cref="TiledInference.DefaultTileCore"/>).</summary>
     [Export] public int TileCore { get; set; } = TiledInference.DefaultTileCore;
+
+    /// <summary>Step size for "Adapt to sample"; kept small so adaptation refines rather than overwrites the model.</summary>
     [Export] public float AdaptLearningRate { get; set; } = 1e-4f;
 
+    // ---- Signals (GDScript: bridge.<Name>.connect(handler)). All are emitted on the main thread. ----
+
+    /// <summary>The loaded model changed (startup, training, adaptation, save). <c>description</c> = <see cref="DescribeModel"/>.</summary>
     [Signal] public delegate void ModelChangedEventHandler(string description);
+
+    /// <summary>
+    /// An image was decoded and normalized. <c>raw</c> is a 32-bit float (FORMAT_RF) image of the normalized data.
+    /// <c>displayLow</c>/<c>displayHigh</c> are its 0.5%/99.5% quantiles, the suggested shared display window.
+    /// <c>description</c> gives name, size and raw intensity range.
+    /// </summary>
     [Signal] public delegate void ImageLoadedEventHandler(Image raw, float displayLow, float displayHigh, string description);
+
+    /// <summary>
+    /// Denoising finished. <c>denoised</c> and <c>baseline</c> (bilateral) are FORMAT_RF images on the same scale as the raw image.
+    /// The three <c>noise*</c> values are Immerkær noise-σ estimates (raw, DORA, bilateral), and <c>seconds</c>
+    /// is DORA's inference time.
+    /// </summary>
     [Signal] public delegate void DenoiseFinishedEventHandler(Image denoised, Image baseline, float noiseRaw, float noiseDenoised, float noiseBaseline, float seconds);
+
+    /// <summary>
+    /// A training epoch finished. <c>valPsnr</c> and <c>psnrGain</c> are NaN without clean validation data.
+    /// <c>events</c> is the joined milestone text (new best, plateau, target hit/raised/mastered).
+    /// </summary>
     [Signal] public delegate void EpochCompletedEventHandler(int epoch, float valLoss, float valPsnr, float psnrGain, float learningRate, string events);
+
+    /// <summary>Training ended (any reason). <c>summary</c> says why and how well; the new weights are already loaded and saved.</summary>
     [Signal] public delegate void TrainingFinishedEventHandler(string summary);
+
+    /// <summary>
+    /// Adaptation finished. Blind-spot loss at the first and last step: a drop means the model fit this sample's noise.
+    /// Weights are now unsaved.
+    /// </summary>
     [Signal] public delegate void AdaptFinishedEventHandler(int steps, float firstLoss, float lastLoss);
+
+    /// <summary>A background job started (<c>busy</c> = true, <c>activity</c> names it) or ended (false, ""). Use it to disable buttons.</summary>
     [Signal] public delegate void BusyChangedEventHandler(bool busy, string activity);
+
+    /// <summary>Informational message for the log view (may contain emoji).</summary>
     [Signal] public delegate void LogEventHandler(string message);
+
+    /// <summary>A request failed or was refused (busy, no image, decode error…). <c>message</c> is user-facing.</summary>
     [Signal] public delegate void JobFailedEventHandler(string message);
+
+    // ---- State: touched only on the main thread, except that a running job reads its own captured copies ----
 
     private DenoisingNet _net = DenoisingNet.Create(NetConfig.Default);
     private ModelInfo? _info;
     private string _modelSource = "untrained";
-    private OnlineAdapter? _adapter;
+    private OnlineAdapter? _adapter;    // created on first Adapt, discarded when the model changes
     private GrayImage? _image;          // normalized
     private string _imageName = "";
     private CancellationTokenSource? _cancellation;
     private bool _busy;
     private bool _unsaved;
 
+    /// <summary>True while a denoise, adapt or training job runs. Only one job runs at a time.</summary>
     public bool IsBusy() => _busy;
+
+    /// <summary>True once an image has been loaded successfully.</summary>
     public bool HasImage() => _image is not null;
+
+    /// <summary>True after adaptation changed the weights since the last save or load.</summary>
     public bool HasUnsavedChanges() => _unsaved;
 
+    /// <summary>Loads weights only. Datasets load lazily, when training is requested.</summary>
     public override void _Ready() => LoadBestAvailableModel();
 
+    /// <summary>Asks any running job to stop when the node leaves the tree (e.g. the window closes).</summary>
     public override void _ExitTree() => _cancellation?.Cancel();
 
     /// <summary>One line about the current model, for the UI header.</summary>
@@ -176,6 +229,7 @@ public partial class DoraBioBridge : Node
             "8 synthetic 192px FOVs (generated in-app)", epochs, fromScratch);
     }
 
+    /// <summary>Requests cancellation of the running job (if any). Training stops after its current step and keeps its best weights.</summary>
     public void Cancel() => _cancellation?.Cancel();
 
     /// <summary>Saves the current weights (including online adaptation) to <see cref="UserWeightsPath"/>.</summary>
@@ -201,6 +255,12 @@ public partial class DoraBioBridge : Node
         }
     }
 
+    /// <summary>
+    /// Shared body of both training entry points. Trains a <em>copy</em> of the current model, so the on-screen model
+    /// stays intact if training is cancelled or fails, and swaps it in only when an epoch produced weights.
+    /// Fine-tuning uses a lower learning rate (3e-4) than training from scratch (1e-3).
+    /// Small per-epoch settings (30 steps × batch 8) keep the UI's progress updates frequent.
+    /// </summary>
     private void StartTraining(string activity, Func<IReadOnlyList<ImagePair>> loadData, string description, int epochs, bool fromScratch)
     {
         var net = fromScratch ? DenoisingNet.Create(_net.Config, seed: System.Environment.TickCount) : _net.Clone();
@@ -246,6 +306,7 @@ public partial class DoraBioBridge : Node
         });
     }
 
+    /// <summary>Installs a model and announces it. Main thread only.</summary>
     private void SetModel(DenoisingNet net, ModelInfo? info, string source)
     {
         _net = net;
