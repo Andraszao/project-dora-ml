@@ -14,8 +14,8 @@ settled first, and so every phase builds only on phases that are already green.
 | **P2** | Real-data truth (FMD) | performance on real microscopes is unmeasured | ✅ done: bricks 11–13, [results](docs/RESULTS.md) on 48 held-out FMD images |
 | **P3** | Noise-model fidelity | Noise2Void's assumptions failing on real cameras (measured in P2 on widefield) | ✅ done: bricks 14–17, [results](docs/RESULTS.md#p3-correlated-noise-and-structured-blind-spots) |
 | **P4** | Model capacity (U-Net) | the small CNN being the ceiling | ✅ done: bricks 18–21, [results](docs/RESULTS.md#p4-a-u-net-against-the-dilated-network) |
-| **P5** | Performance | **slowness on large frames and stacks** | 🚧 in progress: gates 22–24 defined |
-| **P6** | Stacks, time-lapse, batch | single 2-D frames only | planned |
+| **P5** | Performance | slowness on large frames and stacks | ✅ done: bricks 22–24 (2.1× faster denoise, bit-identical) |
+| **P6** | Stacks, time-lapse, batch | **single 2-D frames only** | ⏭ next |
 | **P7** | Analysis UX | can see but can't measure or export | planned |
 | **P8** | Model and session management | adaptation lost on restart; no way back to a known-good model | planned |
 | **P9** | Format coverage | "my file won't open" (LZW, OME-TIFF, HDF5) | planned |
@@ -146,6 +146,14 @@ default would be a new rule chosen after seeing the data, so it was left for a d
 | 24 `perf-budget` | loose time budgets (`tools/ci/perf_budget.json`), checked locally and in CI | fails if any `bench` timing is over budget |
 
 **Later, optional:** GPU inference via Godot compute shaders. Its gate would be numerical agreement with the CPU path.
+
+**Outcome:** done. Baseline (`dora-bio bench`, 4-core container): 512² denoise 0.573 s (dilated) / 0.701 s (U-Net),
+training step 0.20–0.24 s. The register-blocked kernels are bit-identical (every recorded FMD result from P2–P4
+reproduces exactly) and met the 1.5× bar: denoise 0.27 s (2.1×) / 0.30 s (2.4×), training step 0.12–0.14 s
+(1.5–1.8×). A first attempt reached only 1.45× on the denoise; replacing the scalar row tail with an overlapping
+last SIMD strip got it to 2.1×. The budget check times the blocked and reference kernels interleaved, because on
+this shared machine back-to-back timings drifted by up to 25% (disabling tiered compilation didn't help, so it
+wasn't kept).
 
 ## P6: Stacks, time-lapse and batch
 

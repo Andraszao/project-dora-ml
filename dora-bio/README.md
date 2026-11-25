@@ -17,9 +17,9 @@ All numbers come from this repo, run on a 4-core cloud VM with no GPU.
 
 | Check | Result |
 |---|---|
-| Core unit tests (`dotnet test`) | 147 passing in ~5 s, including finite-difference gradient checks for both architectures (mutation-tested) |
-| Brick gates (`./bricks.sh`) | all 22 green (gates 11–15 and 21 with the FMD data and experiment weights present); documentation of every public member is enforced by the build |
-| Gates can fail (`./bricks.sh --self-test`) | one planted bug per gate 0–7 and 11–21 (two for gate 0), all 20 caught (after a clean control copy passes) |
+| Core unit tests (`dotnet test`) | 163 passing in ~5 s, including finite-difference gradient checks for both architectures (mutation-tested) |
+| Brick gates (`./bricks.sh`) | all 25 green (gates 11–15 and 21 with the FMD data and experiment weights present); documentation of every public member is enforced by the build |
+| Gates can fail (`./bricks.sh --self-test`) | one planted bug per gate 0–7 and 11–24 (two for gate 0), all 23 caught (after a clean control copy passes) |
 | CI (GitHub Actions) | all gates incl. headless Godot, on PRs into `main`, pushes to `main` and manual runs (docs-only changes skipped): [run #1](https://github.com/Andraszao/project-dora-ml/actions/runs/45617118232) green in 150 s of runner time, 0 billable minutes (public repo) |
 | Codecs vs. independent encoders | TIFF/PNG fixtures written by Pillow, ImageMagick and libtiff decode exactly |
 | Tiled vs. whole-image inference | identical (≤1e-5) for ragged tiles, tiles smaller than the receptive field, etc. |
@@ -33,7 +33,8 @@ All numbers come from this repo, run on a 4-core cloud VM with no GPU.
 | Noise-model calibration (one image) | synthetic: gain within 5.1%, variance curve within 6.8%; real FMD: reliable on widefield only ([details](docs/RESULTS.md#variance-stabilization-and-calibration-bricks-1617)) |
 | Train/test leakage on FMD | `dora-bio fmd-check`: every test image is FOV 19 pixel for pixel, and FOV 19 never enters training |
 | Godot 4.5.1 .NET smoke test (headless) | loads model and sample, denoises off-thread, adapts, stays responsive; exit code 0 |
-| Speed | 512×384 frame in ~0.5 s (CLI and in-editor) |
+| Speed (`dora-bio bench`, 4 cores, no GPU) | 512×512 frame in **0.27 s** (dilated) / 0.30 s (U-Net); one training step (batch 16 at 64 px) 0.13 s. The register-blocked kernels are 2.1–2.4× (denoise) and 1.5–1.8× (training) faster than the original ones, and bit-identical to them |
+| Performance guard (gate 24) | budgets in `tools/ci/perf_budget.json`, plus a check that the blocked kernels stay ≥ 1.5× (denoise) and ≥ 1.25× (training step) faster than the reference kernels, timed interleaved in the same run so it holds on any machine |
 
 ## Quick start
 
@@ -145,9 +146,9 @@ The plan this rebuild started from had a few errors. Where the build differs fro
 ## Roadmap
 
 [`PATHWAY.md`](PATHWAY.md) lays out phases P0–P10: the foundation (P0), CI (P1), validation on real FMD data (P2),
-noise-model fidelity (P3: correlated-noise check, structured blind spots, variance stabilization) and a U-Net (P4)
-are done. Next come performance (P5), stacks, analysis tools, model management, more formats, and a release. Each
-phase is a set of gated bricks.
+noise-model fidelity (P3: correlated-noise check, structured blind spots, variance stabilization), a U-Net (P4) and
+performance (P5: benchmarks, faster bit-identical kernels, time budgets) are done. Next come stacks and batch (P6),
+analysis tools, model management, more formats, and a release. Each phase is a set of gated bricks.
 
 ## Honesty notes and limitations
 

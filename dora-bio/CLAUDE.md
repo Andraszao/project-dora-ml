@@ -47,8 +47,9 @@ godot/                         Godot 4.5 .NET project (open THIS folder in Godot
 ## Development pathway
 
 Work follows [`PATHWAY.md`](PATHWAY.md): phases **P0 → P10**, each a group of bricks with gates. P0 (bricks 0–8),
-P1 (bricks 9–10, CI), P2 (bricks 11–13, real FMD data), P3 (bricks 14–17, noise-model fidelity) and P4 (bricks 18–21,
-U-Net) are done. **The current phase is P5 (performance)**, starting with brick 22 (`bench`). Pick up the next unfinished brick of the current phase,
+P1 (bricks 9–10, CI), P2 (bricks 11–13, real FMD data), P3 (bricks 14–17, noise-model fidelity), P4 (bricks 18–21,
+U-Net) and P5 (bricks 22–24, performance) are done. **The current phase is P6 (stacks, time-lapse and batch)**,
+starting with brick 25 (`tiff-stack-write`). Pick up the next unfinished brick of the current phase,
 follow the phase protocol there, and update its status table when a phase closes. Read `docs/RESULTS.md` before
 changing training or the model: it records what actually works on real data.
 
@@ -152,6 +153,9 @@ cd godot && dotnet build && godot --headless --path . --import \
    or inference (clamping the noise tails biases a denoiser).
 4. **Gradients are tested.** Any change to `ConvLayer`, `DenoisingNet` or the loss must keep
    `GradientTests` (finite differences) passing. Mutation-checked: a mirrored-tap bug fails all 3 cases.
+   The register-blocked kernels (`ConvLayer.Blocked.cs`) must stay **bit-identical** to the reference row kernels
+   (`ForwardReference`/`BackwardReference`): same terms, same order per output value, separate multiply and add.
+   Never use a fused multiply-add there; it would change results and break the recorded FMD reproductions.
 5. **Tiled inference must equal whole-image inference** (`TiledInference` margin = receptive radius,
    clipped at image edges). Covered by `TiledInferenceMatchesWholeImage`.
 6. **Optimizer state persists** across online adaptation (`OnlineAdapter`). A fresh Adam at t = 1 is a sign-step
