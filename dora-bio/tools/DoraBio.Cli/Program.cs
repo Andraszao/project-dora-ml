@@ -31,6 +31,13 @@ public static class Program
           info     --weights WEIGHTS.bin
         """;
 
+    /// <summary>Entry point: <c>dora-bio &lt;command&gt; [--option value]…</c>.</summary>
+    /// <returns>0 on success, 1 for usage (no arguments), 2 for a user-facing error (bad option, missing or unsupported file).</returns>
+    /// <remarks>
+    /// Expected failures (bad input) print one "error: …" line instead of a stack trace. Anything else is a bug and
+    /// is allowed to crash loudly. Numbers are parsed and printed with the invariant culture, so a German-locale
+    /// machine still reads "0.001" correctly.
+    /// </remarks>
     public static int Main(string[] args)
     {
         CultureInfo.DefaultThreadCurrentCulture = CultureInfo.InvariantCulture;
@@ -61,6 +68,10 @@ public static class Program
         }
     }
 
+    /// <summary>
+    /// <c>synth</c>: writes noisy (uint16) and clean (float32) TIFF pairs in the noisy/ + clean/ layout that
+    /// <see cref="DatasetLoader"/> reads. Each frame uses seed + 7919·i, so frames differ but the set is reproducible.
+    /// </summary>
     private static int Synth(Options o)
     {
         string outDir = o.Required("out");
@@ -81,6 +92,11 @@ public static class Program
         return 0;
     }
 
+    /// <summary>
+    /// <c>train</c>: loads a dataset folder and trains through <see cref="TrainingJob"/>, which handles journaling and
+    /// best-weight checkpointing. Mode defaults to supervised only when every image has a clean partner.
+    /// <c>--init</c> fine-tunes existing weights instead of starting from a fresh network.
+    /// </summary>
     private static int Train(Options o)
     {
         string dataDir = o.Required("data");
@@ -138,6 +154,11 @@ public static class Program
         return 0;
     }
 
+    /// <summary>
+    /// <c>denoise</c>: normalize, denoise with tiled inference, then map back to the input's own intensity units and
+    /// write float32 TIFF. Writing float rather than 16-bit keeps sub-count precision, which downstream intensity
+    /// measurements need. <c>--baseline</c> also writes the bilateral result for comparison.
+    /// </summary>
     private static int Denoise(Options o)
     {
         var (net, info) = WeightsFile.Load(o.Required("weights"));
@@ -163,6 +184,10 @@ public static class Program
         return 0;
     }
 
+    /// <summary>
+    /// <c>eval</c>: per-image PSNR/SSIM of noisy, bilateral and DORA against clean. Run it on FOVs the model never
+    /// trained on; images from the training set score optimistically.
+    /// </summary>
     private static int Eval(Options o)
     {
         var (net, info) = WeightsFile.Load(o.Required("weights"));
@@ -192,6 +217,7 @@ public static class Program
         return 0;
     }
 
+    /// <summary><c>info</c>: prints a weights file's version, architecture, size, save time and provenance.</summary>
     private static int Info(Options o)
     {
         var (net, info) = WeightsFile.Load(o.Required("weights"));
@@ -203,6 +229,7 @@ public static class Program
         return 0;
     }
 
+    /// <summary>One console line per epoch: losses, PSNR/SSIM (if clean data exists), learning rate, time and milestone events.</summary>
     private static string FormatEpoch(EpochReport r)
     {
         string psnr = r.ValPsnr is { } p ? $" | val PSNR {p:0.00} dB (+{r.ValPsnrGain:0.00}) SSIM {r.ValSsim:0.000}" : "";
@@ -210,8 +237,13 @@ public static class Program
         return $"📊 epoch {r.Epoch,3} | train {r.TrainLoss:0.00000} | val {r.ValLoss:0.00000}{psnr} | lr {r.LearningRate:G3} | {r.Elapsed:mm\\:ss}{events}";
     }
 
+    /// <summary>Shortens <paramref name="s"/> to <paramref name="n"/> characters, keeping the end (file names differ at the end).</summary>
     private static string Truncate(string s, int n) => s.Length <= n ? s : "…" + s[^(n - 1)..];
 
+    /// <summary>
+    /// Minimal "--key value" parser with no dependencies. Every option takes exactly one value; there are no flags.
+    /// Unknown keys are accepted and ignored, so typos surface as "required" errors or as defaults.
+    /// </summary>
     private sealed class Options
     {
         private readonly Dictionary<string, string> _values = new(StringComparer.Ordinal);
