@@ -26,7 +26,8 @@ public enum TiffSampleType
 /// Not supported (a clear <see cref="NotSupportedException"/> is thrown): LZW, JPEG, tiles, BigTIFF, palettes,
 /// planar RGB. Most microscope software can save uncompressed or Deflate TIFF.
 ///
-/// Writes: little-endian, single strip, uncompressed or Deflate, UInt8/UInt16/Float32.
+/// Writes: little-endian, one strip per page, uncompressed or Deflate, UInt8/UInt16/Float32; single pages or
+/// multi-page stacks (<see cref="EncodeStack"/>).
 ///
 /// <para><b>TIFF in one paragraph.</b> An 8-byte header gives the byte order ("II" = little-endian,
 /// "MM" = big-endian), the magic number 42, and the offset of the first IFD (image file directory). An IFD
@@ -85,7 +86,55 @@ public static class TiffCodec
     /// <param name="sampleType">Storage format. Use <see cref="TiffSampleType.Float32"/> to keep values exactly.</param>
     /// <param name="deflate">Compress the strip with zlib/Deflate (lossless; readable by ImageJ/Fiji, Python and libtiff).</param>
     /// <returns>The complete file contents. File layout: header | pixel strip | IFD.</returns>
-    public static byte[] Encode(GrayImage image, TiffSampleType sampleType = TiffSampleType.UInt16, bool deflate = false)
+    public static byte[] Encode(GrayImage image, TiffSampleType sampleType = TiffSampleType.UInt16, bool deflate = false) =>
+        EncodeStack([image], sampleType, deflate);
+
+    /// <summary>
+    /// Writes a multi-page stack (time-lapse frames or z-slices), one page per image, in order. Pages may differ in
+    /// size. Layout: header | strip₀ | IFD₀ | strip₁ | IFD₁ | …, where each IFD's last 4 bytes hold the offset of the
+    /// next IFD (0 after the last page). A one-page stack is byte for byte what <see cref="Encode"/> writes.
+    /// </summary>
+    /// <param name="pages">The images, first page first (at least one).</param>
+    /// <param name="sampleType">Storage format for every page.</param>
+    /// <param name="deflate">Compress each page's strip with zlib/Deflate.</param>
+    /// <returns>The complete file contents.</returns>
+    /// <exception cref="ArgumentException">No pages, or the file would exceed TIFF's 4 GB offset limit.</exception>
+    public static byte[] EncodeStack(IReadOnlyList<GrayImage> pages, TiffSampleType sampleType = TiffSampleType.UInt16, bool deflate = false)
+    {
+        if (pages.Count == 0) throw new ArgumentException("A TIFF needs at least one page.", nameof(pages));
+        using var file = new MemoryStream();
+        Span<byte> header = stackalloc byte[8];
+        "II"u8.CopyTo(header);
+        BinaryPrimitives.WriteUInt16LittleEndian(header[2..], 42);
+        file.Write(header);   // the first-IFD offset (bytes 4–7) is patched once IFD₀'s position is known
+
+        long pointerAt = 4;   // where the offset of the next IFD goes: the header for page 0, then each IFD's tail
+        foreach (var page in pages)
+        {
+            var (strip, ifd) = EncodePage(page, sampleType, deflate, (uint)file.Length);
+            file.Write(strip);
+            if (file.Length % 2 == 1) file.WriteByte(0);   // IFDs start on a word boundary
+            long ifdOffset = file.Length;
+            if (ifdOffset + ifd.Length > uint.MaxValue) throw new ArgumentException("Stack is too large for a TIFF (4 GB).", nameof(pages));
+            file.Write(ifd);
+            Patch(file, pointerAt, (uint)ifdOffset);
+            pointerAt = ifdOffset + ifd.Length - 4;     // stays 0 if this is the last page
+        }
+        return file.ToArray();
+    }
+
+    private static void Patch(MemoryStream file, long at, uint value)
+    {
+        Span<byte> bytes = stackalloc byte[4];
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes, value);
+        long end = file.Position;
+        file.Position = at;
+        file.Write(bytes);
+        file.Position = end;
+    }
+
+    /// <summary>One page's pixel strip and its IFD (next-IFD offset 0), with the strip to be written at <paramref name="stripOffset"/>.</summary>
+    private static (byte[] Strip, byte[] Ifd) EncodePage(GrayImage image, TiffSampleType sampleType, bool deflate, uint stripOffset)
     {
         int bytesPerSample = sampleType switch { TiffSampleType.UInt8 => 1, TiffSampleType.UInt16 => 2, _ => 4 };
         var pixelBytes = new byte[image.Length * bytesPerSample];
@@ -107,10 +156,6 @@ public static class TiffCodec
         }
 
         byte[] strip = deflate ? Deflate(pixelBytes) : pixelBytes;
-        const int dataOffset = 8;
-        int ifdOffset = dataOffset + strip.Length;
-        if (ifdOffset % 2 == 1) ifdOffset++;   // IFDs start on a word boundary
-
         var entries = new (ushort Tag, ushort Type, uint Value)[]
         {
             (TagImageWidth, 4, (uint)image.Width),
@@ -118,31 +163,25 @@ public static class TiffCodec
             (TagBitsPerSample, 3, (uint)(bytesPerSample * 8)),
             (TagCompression, 3, deflate ? CompressionDeflate : CompressionNone),
             (TagPhotometric, 3, 1),                  // BlackIsZero
-            (TagStripOffsets, 4, dataOffset),
+            (TagStripOffsets, 4, stripOffset),
             (TagSamplesPerPixel, 3, 1),
             (TagRowsPerStrip, 4, (uint)image.Height),
             (TagStripByteCounts, 4, (uint)strip.Length),
             (TagSampleFormat, 3, sampleType == TiffSampleType.Float32 ? 3u : 1u),
         };
 
-        var file = new byte[ifdOffset + 2 + entries.Length * 12 + 4];
-        "II"u8.CopyTo(file);
-        BinaryPrimitives.WriteUInt16LittleEndian(file.AsSpan(2), 42);
-        BinaryPrimitives.WriteUInt32LittleEndian(file.AsSpan(4), (uint)ifdOffset);
-        strip.CopyTo(file, dataOffset);
-
-        BinaryPrimitives.WriteUInt16LittleEndian(file.AsSpan(ifdOffset), (ushort)entries.Length);
+        var ifd = new byte[2 + entries.Length * 12 + 4];
+        BinaryPrimitives.WriteUInt16LittleEndian(ifd, (ushort)entries.Length);
         for (int e = 0; e < entries.Length; e++)
         {
-            var span = file.AsSpan(ifdOffset + 2 + e * 12, 12);
+            var span = ifd.AsSpan(2 + e * 12, 12);
             BinaryPrimitives.WriteUInt16LittleEndian(span, entries[e].Tag);
             BinaryPrimitives.WriteUInt16LittleEndian(span[2..], entries[e].Type);
             BinaryPrimitives.WriteUInt32LittleEndian(span[4..], 1);
             if (entries[e].Type == 3) BinaryPrimitives.WriteUInt16LittleEndian(span[8..], (ushort)entries[e].Value);
             else BinaryPrimitives.WriteUInt32LittleEndian(span[8..], entries[e].Value);
         }
-        // Next-IFD offset stays 0: single page.
-        return file;
+        return (strip, ifd);   // next-IFD offset: 0 until EncodeStack patches it
     }
 
     /// <summary>Validates the 8-byte header and returns a reader for its byte order, plus the first IFD's offset.</summary>

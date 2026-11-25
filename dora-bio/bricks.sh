@@ -24,7 +24,7 @@ export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_SKIP_FIRST_TIME_EXPE
 
 NAMES=(scaffold nn data io inference training cli godot-build godot-smoke ci-core ci-godot fmd-fetch fmd-loader fmd-eval
        n2v-diagnostic structured-mask vst calibration pool-upsample unet unet-tiling arch-eval
-       bench blocked-conv perf-budget q1-recipe)
+       bench blocked-conv perf-budget q1-recipe tiff-stack-write)
 CHECKS=(
   "solution builds (warnings are errors, missing XML docs included); every test class belongs to exactly one brick"
   "ConvLayer/DenoisingNet/Adam/Simd: finite-difference gradient checks, optimizer behavior"
@@ -52,6 +52,7 @@ CHECKS=(
   "register-blocked convolution: bit-identical to the reference kernels (forward, weight and input gradients, whole nets)"
   "dora-bio bench stays within the time budgets in tools/ci/perf_budget.json"
   "quality pass Q1: the recorded verdict follows the pre-registered rule; with data + weights the blocks reproduce"
+  "multi-page TIFF stacks round-trip in every sample type; Pillow (an independent reader) reads a written stack exactly"
 )
 LAST=$((${#NAMES[@]} - 1))
 LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dora-bricks.XXXXXX")"
@@ -258,6 +259,16 @@ gate_25() {   # q1-recipe (quality pass Q1, pre-registered in PATHWAY.md before 
   reproduces q1-ablation fmd-eval --weights $w/unet_levels30.bin --root "$FMD" --levels raw,avg2,avg4,avg8,avg16 || return 1
 }
 
+gate_26() (   # tiff-stack-write (subshell: set -e stops only this gate)
+  set -e
+  test_gate 26-tiff-stack-write
+  python3 -I -c "import PIL" 2>/dev/null || { echo "unit tests passed; independent-reader check skipped (Pillow not installed)"; exit 77; }
+  dotnet build tools/DoraBio.Cli -c Release >/dev/null
+  local t="$LOG_DIR/stack"
+  dotnet "$CLI_DLL" synth --out "$t" --count 3 --width 37 --height 21 --seed 4 --stack "$t/stack.tif"
+  python3 -I tools/ci/check_tiff_stack.py "$t/stack.tif" "$t/noisy"
+)
+
 gate_21() {   # arch-eval
   test_gate 21-arch-eval || return 1
   # The rule was set before measuring (PATHWAY.md, P4): the U-Net becomes the default only if, at the same training
@@ -334,6 +345,7 @@ MUTATIONS=(
   '23|src/DoraBio.Core/Nn/ConvLayer.Blocked.cs|a7 += new Vector<float>(Unsafe.Add(ref weights, t + 7 * ic9)) * v;|a7 += new Vector<float>(Unsafe.Add(ref weights, t + 6 * ic9)) * v;'
   '24|src/DoraBio.Core/Nn/DenoisingNet.cs|    internal bool ReferenceKernels { get; set; }|    internal bool ReferenceKernels { get; set; } = true;'
   '25|docs/RESULTS.md|<!-- q1-verdict: not-adopted -->|<!-- q1-verdict: adopted -->'
+  '26|src/DoraBio.Core/IO/TiffCodec.cs|pointerAt = ifdOffset + ifd.Length - 4;|pointerAt = 4;'
 )
 
 self_test() {

@@ -18,7 +18,8 @@ public static class Program
         dora-bio: DORA v2 fluorescence denoiser (headless)
 
         Commands:
-          synth    --out DIR [--count 8] [--size 256 | --width W --height H] [--seed 1] [--peak 25]
+          synth    --out DIR [--count 8] [--size 256 | --width W --height H] [--seed 1] [--peak 25] [--stack FILE.tif]
+                   (--stack also writes the noisy frames as one multi-page uint16 TIFF)
                    Write a synthetic dataset: DIR/noisy/*.tif (uint16) and DIR/clean/*.tif (float32).
           train    --data DIR --out WEIGHTS.bin [--mode n2v|supervised] [--epochs 30] [--steps 50]
                    [--batch 16] [--patch 64] [--lr 0.001] [--journey FILE.json] [--seed 1234]
@@ -111,12 +112,19 @@ public static class Program
         Directory.CreateDirectory(Path.Combine(outDir, "noisy"));
         Directory.CreateDirectory(Path.Combine(outDir, "clean"));
 
+        var noisyFrames = new List<GrayImage>();
         for (int i = 0; i < count; i++)
         {
             var frame = SyntheticFluorescence.Generate(width, height, seed + 7919 * i, synthOptions);
             string name = $"synthetic_{i:D3}.tif";
             File.WriteAllBytes(Path.Combine(outDir, "noisy", name), TiffCodec.Encode(frame.Noisy, TiffSampleType.UInt16));
             File.WriteAllBytes(Path.Combine(outDir, "clean", name), TiffCodec.Encode(frame.Clean, TiffSampleType.Float32));
+            noisyFrames.Add(frame.Noisy);
+        }
+        if (o.StringOrNull("stack") is { } stackPath)
+        {
+            File.WriteAllBytes(stackPath, TiffCodec.EncodeStack(noisyFrames, TiffSampleType.UInt16));
+            Console.WriteLine($"🗂 wrote the {count} noisy frames as one {count}-page stack: {stackPath}");
         }
         Console.WriteLine($"🧪 wrote {count} synthetic {width}×{height} frames (peak {synthOptions.PeakPhotons} photons) to {outDir}");
         return 0;

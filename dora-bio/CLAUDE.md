@@ -86,6 +86,7 @@ before anything is built on top.** `./bricks.sh` runs the gates in order and sto
 | 23 | blocked-conv | `Nn/ConvLayer.cs` (register-blocked kernels) | `Brick=23-blocked-conv`: bit-identical to the reference row kernels; bar set before building: ≥ 1.5× faster on the 512² denoise and the training step |
 | 24 | perf-budget | `tools/ci/perf_budget.json` | `Brick=24-perf-budget`; a full `bench` stays within the budgets |
 | 25 | q1-recipe (quality pass) | `tools/experiments/q1_supervised.sh`, `docs/RESULTS.md` | Q1's recorded verdict follows its pre-registered rule (`<!-- q1-verdict -->`); with data + weights the blocks reproduce |
+| 26 | tiff-stack-write | `IO/TiffCodec.cs` (`EncodeStack`), CLI `synth --stack`, `tools/ci/check_tiff_stack.py` | `Brick=26-tiff-stack-write` (3-page round trips, every sample type, ±Deflate); Pillow reads a written stack exactly (SKIPPED without Pillow; CI installs it) |
 
 Gates 11–15 and 21 need the dataset (the reproductions in gates 15 and 21 also need the weights from `tools/experiments/`) (`tools/fetch_fmd.sh`, about 9 GB into the gitignored `data/fmd/`). Without it, their
 data-dependent part reports SKIPPED (exit code 77) while the pins, unit tests and RESULTS.md checks still run. CI has
@@ -201,6 +202,8 @@ cd godot && dotnet build && godot --headless --path . --import \
   saved-UTC ticks, architecture byte (0 dilated, 1 U-Net), then features + layer count + dilations[] (dilated) or
   features + depth (U-Net), parameter count, float32 LE[], CRC-32. Format 1 (no architecture byte, always dilated:
   the bundled model) still loads. v1 JSON `.dat` files are rejected with a clear message.
+- **Images out:** TIFF, uint8/uint16/float32, uncompressed or Deflate, single pages or multi-page stacks
+  (`TiffCodec.EncodeStack`).
 - **Images in:** TIFF (8/16/32-bit int/float; none/Deflate/PackBits; predictor 2; LE/BE; strips; multi-page)
   and PNG (8/16-bit gray/RGB(A), all filters). Not supported, each with a clear error: LZW, tiled TIFF,
   BigTIFF, palettes, interlaced PNG, **HDF5**.

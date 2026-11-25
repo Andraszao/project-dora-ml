@@ -15,7 +15,7 @@ settled first, and so every phase builds only on phases that are already green.
 | **P3** | Noise-model fidelity | Noise2Void's assumptions failing on real cameras (measured in P2 on widefield) | ✅ done: bricks 14–17, [results](docs/RESULTS.md#p3-correlated-noise-and-structured-blind-spots) |
 | **P4** | Model capacity (U-Net) | the small CNN being the ceiling | ✅ done: bricks 18–21, [results](docs/RESULTS.md#p4-a-u-net-against-the-dilated-network) |
 | **P5** | Performance | slowness on large frames and stacks | ✅ done: bricks 22–24 (2.1× faster denoise, bit-identical) |
-| **P6** | Stacks, time-lapse, batch | **single 2-D frames only** | 🚧 in progress: quality pass 25 (Q1) done; next brick 26 `tiff-stack-write` |
+| **P6** | Stacks, time-lapse, batch | **single 2-D frames only** | 🚧 in progress: 25 (quality, Q1) and 26 `tiff-stack-write` done; next 27 (quality, Q10) |
 | **P7** | Analysis UX | can see but can't measure or export | planned |
 | **P8** | Model and session management | adaptation lost on restart; no way back to a known-good model | planned |
 | **P9** | Format coverage | "my file won't open" (LZW, OME-TIFF, HDF5) | planned |
@@ -175,7 +175,7 @@ wasn't kept).
 
 | Brick | Delivers | Gate |
 |---|---|---|
-| `tiff-stack-write` | multi-page TIFF writer (the reader already handles pages) | round-trip 3-page stacks in every sample type |
+| 26 `tiff-stack-write` ✅ | multi-page TIFF writer (the reader already handles pages) | round-trip 3-page stacks in every sample type; Pillow reads a written stack exactly |
 | `cli-batch` | `denoise` over stacks and folders, streaming one frame at a time with bounded memory | gate 6 denoises a 3-page synthetic stack; peak memory checked |
 | `ui-stack` | page/frame slider in the UI, denoising the current frame or the whole stack (cancellable) | smoke test loads a stack, steps pages, denoises one frame |
 
@@ -226,7 +226,7 @@ bar and adoption rule are written here **before** it is measured.
 | # | Item | Evidence | Status |
 |---|---|---|---|
 | Q1 | **Best supervised recipe**: U-Net + all five FMD noise levels + a longer budget | U-Net +0.98 dB supervised and still improving at the 30-epoch cap (P4); all-level training +0.5 to +3.0 dB on cleaner inputs for supervised models (P2) | ✅ brick 25, **measured, not adopted** ([results](docs/RESULTS.md#quality-pass-q1-the-best-supervised-recipe)). Pre-registered bar: raw within 0.1 dB of 34.73, avg2–avg16 +0.5 dB on average, no level −0.1. Result: raw **−0.47** (34.26), avg2–avg16 **+2.39** on average (avg16 40.15, the first model above the untouched image). Raw missed, so nothing shipped |
-| Q10 | **Noise-level routing**: pick the raw-trained or the all-level model per image from its estimated noise level | Q1: −0.47 dB at raw, +0.1 to +4.9 dB on cleaner inputs; P3's correlation routing worked | next: top of the backlog (also the best candidate for Q3) |
+| Q10 | **Noise-level routing**: pick the raw-trained or the all-level model per image from its estimated noise level | Q1: −0.47 dB at raw, +0.1 to +4.9 dB on cleaner inputs; P3's correlation routing worked | 🚧 brick 27. **Pre-registered:** models A = P4's supervised U-Net on raw frames (`runs/p4/unet_sup.bin`) and B = Q1's all-level U-Net (`runs/q1/unet_levels60.bin`); no new training. Router: Immerkær's noise σ of the normalized noisy image; above a threshold → A, otherwise → B. **The threshold is chosen on the 46 validation FOVs both models held out** (seed 2026 split; one frame per FOV at each of the 5 levels), never on test_mix, by maximizing their mean PSNR. **Bar** (test_mix, all 48): at raw, ≥ A's 34.73 − 0.1; the mean over avg2–avg16 ≥ B's (37.66) − 0.2. **Rule:** if met, `dora-bio denoise` gets `--weights-clean B` routing with that threshold as its default, documented as the supervised recipe for data with averaged frames; if not, only the evaluation tooling stays and nothing is recommended |
 | Q2 | **U-Net Noise2Void training**: its run stopped early (best epoch 4) and lost 0.47 dB | P4 | open |
 | Q3 | **"Do no harm" on clean inputs**: every model scores below the untouched image on 16-frame averages (bundled model −4.2 dB) | P2, P3, P4 level tables; Q1's all-level U-Net is the first to beat the untouched image overall (40.15 vs 39.70) | open; Q10 is its best candidate |
 | Q4 | **Per-mode default architecture** (U-Net when training with ground truth) | P4 rule kept the dilated default; **needs the owner's decision** | waiting for a decision |
