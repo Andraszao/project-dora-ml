@@ -10,13 +10,23 @@ namespace DoraBio.Core.IO;
 /// Supports 8- and 16-bit gray, gray+alpha, RGB and RGBA (color is averaged to gray, alpha is ignored),
 /// all five scanline filters, and CRC checks on every chunk.
 /// Not supported: interlacing, palettes, bit depths below 8.
+///
+/// <para><b>PNG in one paragraph.</b> An 8-byte signature, then chunks: [length (4, big-endian)]
+/// [type (4 ASCII)] [data] [CRC-32 of type + data]. IHDR gives the size and pixel format. The IDAT chunks,
+/// concatenated, form one zlib stream. Decompressed, it is one row after another, each prefixed with a
+/// filter-type byte. Each filter predicts every byte from its left, upper and upper-left neighbors and stores
+/// only the difference, which compresses better. IEND ends the file. Multi-byte samples are big-endian.</para>
 /// </summary>
 public static class PngDecoder
 {
     private static ReadOnlySpan<byte> Signature => [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
 
+    /// <summary>True if the data starts with the 8-byte PNG signature.</summary>
     public static bool HasPngSignature(ReadOnlySpan<byte> data) => data.Length >= 8 && data[..8].SequenceEqual(Signature);
 
+    /// <summary>Decodes a PNG file into gray sample values (0–255 or 0–65535; no normalization).</summary>
+    /// <exception cref="NotSupportedException">Interlaced, palette or sub-8-bit images.</exception>
+    /// <exception cref="InvalidDataException">Corrupt data, including any chunk whose CRC doesn't match.</exception>
     public static GrayImage Decode(ReadOnlySpan<byte> data)
     {
         if (!HasPngSignature(data)) throw new InvalidDataException("Not a PNG file.");
@@ -26,6 +36,7 @@ public static class PngDecoder
         int pos = 8;
         bool sawEnd = false;
 
+        // Walk the chunk list. Ancillary chunks (text, gamma, physical size, …) are CRC-checked and then ignored.
         while (pos + 12 <= data.Length && !sawEnd)
         {
             int length = checked((int)BinaryPrimitives.ReadUInt32BigEndian(data[pos..]));
@@ -89,6 +100,16 @@ public static class PngDecoder
         return image;
     }
 
+    /// <summary>
+    /// Reverses the per-row PNG filters. For each byte, with a = the byte one pixel to the left,
+    /// b = the byte above, c = the byte above-left (0 outside the image):
+    /// None: x · Sub: x + a · Up: x + b · Average: x + ⌊(a + b) / 2⌋ · Paeth: x + Paeth(a, b, c),
+    /// all mod 256. Filters work on bytes, not samples, so 16-bit data is unfiltered byte by byte.
+    /// </summary>
+    /// <param name="filtered">Decompressed data: each row is a filter-type byte followed by <paramref name="rowBytes"/> bytes.</param>
+    /// <param name="height">Number of rows.</param>
+    /// <param name="rowBytes">Bytes per row, excluding the filter-type byte.</param>
+    /// <param name="bytesPerPixel">Distance to the "left" neighbor: bytes per complete pixel (at least 1).</param>
     internal static byte[] Unfilter(byte[] filtered, int height, int rowBytes, int bytesPerPixel)
     {
         var output = new byte[height * rowBytes];
@@ -119,6 +140,10 @@ public static class PngDecoder
         return output;
     }
 
+    /// <summary>
+    /// The Paeth predictor (PNG spec §9.4): estimate p = a + b − c, then return whichever of a, b, c is closest
+    /// to p, breaking ties in the order a, b, c. The tie order matters for bit-exact decoding.
+    /// </summary>
     internal static int Paeth(int a, int b, int c)
     {
         int p = a + b - c;
@@ -127,6 +152,7 @@ public static class PngDecoder
         return pb <= pc ? b : c;
     }
 
+    /// <summary>Decompresses the concatenated IDAT stream, insisting on exactly the size IHDR implies.</summary>
     private static byte[] Inflate(byte[] compressed, int expectedLength)
     {
         using var input = new MemoryStream(compressed);

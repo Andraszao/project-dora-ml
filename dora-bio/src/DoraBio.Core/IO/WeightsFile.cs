@@ -5,6 +5,13 @@ using DoraBio.Core.Nn;
 namespace DoraBio.Core.IO;
 
 /// <summary>Information stored alongside the parameters.</summary>
+/// <param name="Config">Architecture the parameters belong to.</param>
+/// <param name="ModelVersion">Format/model generation that wrote the file, e.g. "2.0.0-bio".</param>
+/// <param name="Provenance">
+/// Free text saying what the weights were trained on and how well they scored. Shown in the UI and by
+/// <c>dora-bio info</c>, so users can tell synthetic-data weights from weights trained on their own data.
+/// </param>
+/// <param name="SavedUtc">When the file was written.</param>
 public sealed record ModelInfo(NetConfig Config, string ModelVersion, string Provenance, DateTime SavedUtc);
 
 /// <summary>
@@ -22,16 +29,25 @@ public sealed record ModelInfo(NetConfig Config, string ModelVersion, string Pro
 /// </summary>
 public static class WeightsFile
 {
+    /// <summary>Model version written into new files. Readers accept any "2.x" version.</summary>
     public const string ModelVersion = "2.0.0-bio";
     private const ushort FormatVersion = 1;
     private static ReadOnlySpan<byte> Magic => "DORABIO\0"u8;
 
+    /// <summary>Serializes the network to a stream (timestamped now).</summary>
+    /// <param name="stream">Destination; written at its current position and left open.</param>
+    /// <param name="net">The network whose architecture and parameters are stored.</param>
+    /// <param name="provenance">What the weights were trained on (see <see cref="ModelInfo.Provenance"/>).</param>
     public static void Save(Stream stream, DenoisingNet net, string provenance)
     {
         byte[] bytes = Serialize(net, provenance, DateTime.UtcNow);
         stream.Write(bytes);
     }
 
+    /// <summary>Saves to a file atomically, creating the directory if needed.</summary>
+    /// <param name="path">Destination file; replaced only once the new file is fully written.</param>
+    /// <param name="net">The network whose architecture and parameters are stored.</param>
+    /// <param name="provenance">What the weights were trained on (see <see cref="ModelInfo.Provenance"/>).</param>
     public static void Save(string path, DenoisingNet net, string provenance)
     {
         // Write to a temp file and then rename, so a crash never leaves a half-written model behind.
@@ -42,8 +58,14 @@ public static class WeightsFile
         File.Move(temp, fullPath, overwrite: true);
     }
 
+    /// <summary>Reads and validates a weights file from disk.</summary>
     public static (DenoisingNet Net, ModelInfo Info) Load(string path) => Load(File.ReadAllBytes(path));
 
+    /// <summary>
+    /// Parses and validates an in-memory weights file: magic, CRC, version, architecture, and that the parameter
+    /// count matches the architecture. Returns a ready-to-use network.
+    /// </summary>
+    /// <exception cref="InvalidDataException">Not a v2 weights file, corrupted, or internally inconsistent.</exception>
     public static (DenoisingNet Net, ModelInfo Info) Load(ReadOnlySpan<byte> bytes)
     {
         if (bytes.Length < Magic.Length + 6 || !bytes[..Magic.Length].SequenceEqual(Magic))
@@ -87,6 +109,7 @@ public static class WeightsFile
         return (DenoisingNet.FromParameters(config, parameters), new ModelInfo(config, modelVersion, provenance, saved));
     }
 
+    /// <summary>Builds the complete file contents, CRC included. Internal so tests can pin the timestamp.</summary>
     internal static byte[] Serialize(DenoisingNet net, string provenance, DateTime savedUtc)
     {
         using var memory = new MemoryStream();

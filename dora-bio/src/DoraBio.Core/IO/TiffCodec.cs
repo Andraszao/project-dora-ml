@@ -4,10 +4,16 @@ using DoraBio.Core.Data;
 
 namespace DoraBio.Core.IO;
 
+/// <summary>Sample format used when writing a TIFF.</summary>
 public enum TiffSampleType
 {
+    /// <summary>8-bit unsigned integer; values are rounded and clamped to 0–255.</summary>
     UInt8,
+
+    /// <summary>16-bit unsigned integer, the usual raw-camera format; values are rounded and clamped to 0–65535.</summary>
     UInt16,
+
+    /// <summary>32-bit IEEE float, stored exactly. Use for denoised output and anything normalized.</summary>
     Float32,
 }
 
@@ -21,20 +27,31 @@ public enum TiffSampleType
 /// planar RGB. Most microscope software can save uncompressed or Deflate TIFF.
 ///
 /// Writes: little-endian, single strip, uncompressed or Deflate, UInt8/UInt16/Float32.
+///
+/// <para><b>TIFF in one paragraph.</b> An 8-byte header gives the byte order ("II" = little-endian,
+/// "MM" = big-endian), the magic number 42, and the offset of the first IFD (image file directory). An IFD
+/// is a count followed by 12-byte entries (tag, type, value count, then the value itself if it fits in 4 bytes,
+/// otherwise an offset to it), and then the offset of the next IFD (0 = last page). The pixel data lives in
+/// "strips" of whole rows, located by the StripOffsets and StripByteCounts tags. Everything else
+/// (bit depth, compression, sample format) is just more tags.</para>
 /// </summary>
 public static class TiffCodec
 {
+    // Tag numbers from the TIFF 6.0 specification (and the SampleFormat extension).
     private const ushort TagImageWidth = 256, TagImageLength = 257, TagBitsPerSample = 258, TagCompression = 259,
         TagPhotometric = 262, TagStripOffsets = 273, TagSamplesPerPixel = 277, TagRowsPerStrip = 278,
         TagStripByteCounts = 279, TagPlanarConfig = 284, TagPredictor = 317, TagTileWidth = 322, TagSampleFormat = 339;
 
+    // Compression codes. 32946 is the older "Adobe Deflate" code, still written by some tools; the data is identical.
     private const ushort CompressionNone = 1, CompressionLzw = 5, CompressionDeflate = 8,
         CompressionPackBits = 32773, CompressionAdobeDeflate = 32946;
 
+    /// <summary>True if the data starts with a classic TIFF header in either byte order.</summary>
     public static bool HasTiffSignature(ReadOnlySpan<byte> data) =>
         data.Length >= 4 && ((data[0] == 'I' && data[1] == 'I' && data[2] == 42 && data[3] == 0) ||
                              (data[0] == 'M' && data[1] == 'M' && data[2] == 0 && data[3] == 42));
 
+    /// <summary>Number of pages (IFDs) in the file. Microscope stacks store one frame or z-slice per page.</summary>
     public static int CountPages(ReadOnlySpan<byte> data)
     {
         var reader = OpenHeader(data, out uint ifd);
@@ -48,6 +65,10 @@ public static class TiffCodec
     }
 
     /// <summary>Decodes one page into raw sample values (no normalization).</summary>
+    /// <param name="data">The whole TIFF file.</param>
+    /// <param name="page">Zero-based page index for multi-page stacks.</param>
+    /// <exception cref="NotSupportedException">The file uses a feature this decoder deliberately omits (see class docs).</exception>
+    /// <exception cref="InvalidDataException">The file is truncated or inconsistent.</exception>
     public static GrayImage Decode(ReadOnlySpan<byte> data, int page = 0)
     {
         var reader = OpenHeader(data, out uint ifd);
@@ -59,6 +80,11 @@ public static class TiffCodec
         return DecodePage(reader, ifd);
     }
 
+    /// <summary>Writes a single-page, single-strip, little-endian grayscale TIFF.</summary>
+    /// <param name="image">Pixel values in the units to store (integers are rounded and clamped for UInt8/UInt16).</param>
+    /// <param name="sampleType">Storage format. Use <see cref="TiffSampleType.Float32"/> to keep values exactly.</param>
+    /// <param name="deflate">Compress the strip with zlib/Deflate (lossless; readable by ImageJ/Fiji, Python and libtiff).</param>
+    /// <returns>The complete file contents. File layout: header | pixel strip | IFD.</returns>
     public static byte[] Encode(GrayImage image, TiffSampleType sampleType = TiffSampleType.UInt16, bool deflate = false)
     {
         int bytesPerSample = sampleType switch { TiffSampleType.UInt8 => 1, TiffSampleType.UInt16 => 2, _ => 4 };
@@ -119,8 +145,10 @@ public static class TiffCodec
         return file;
     }
 
+    /// <summary>Validates the 8-byte header and returns a reader for its byte order, plus the first IFD's offset.</summary>
     private static TiffReader OpenHeader(ReadOnlySpan<byte> data, out uint firstIfd)
     {
+        // BigTIFF uses magic 43 and 64-bit offsets. Reject it explicitly rather than misreading it.
         if (data.Length >= 4 && (data[2] == 43 || data[3] == 43))
             throw new NotSupportedException("BigTIFF files are not supported.");
         if (!HasTiffSignature(data)) throw new InvalidDataException("Not a TIFF file.");
@@ -129,8 +157,14 @@ public static class TiffCodec
         return reader;
     }
 
+    /// <summary>
+    /// Decodes the page described by the IFD at <paramref name="ifd"/> in four steps: read the tags, reject
+    /// unsupported variants up front, then reassemble and decompress the strips into one raw byte buffer.
+    /// Finally undo the predictor and convert samples to float gray values.
+    /// </summary>
     private static GrayImage DecodePage(TiffReader r, uint ifd)
     {
+        // 1. Tags. Missing optional tags take their TIFF-spec defaults.
         int width = (int)r.Tag(ifd, TagImageWidth, required: true)[0];
         int height = (int)r.Tag(ifd, TagImageLength, required: true)[0];
         int samplesPerPixel = (int)(r.Tag(ifd, TagSamplesPerPixel).FirstOrDefault(1u));
@@ -142,6 +176,7 @@ public static class TiffCodec
         uint sampleFormat = r.Tag(ifd, TagSampleFormat).FirstOrDefault(1u);
         uint rowsPerStrip = r.Tag(ifd, TagRowsPerStrip).FirstOrDefault((uint)height);
 
+        // 2. Fail fast, with an actionable message, on anything outside the supported subset.
         if (r.Tag(ifd, TagTileWidth).Length > 0) throw new NotSupportedException("Tiled TIFFs are not supported; save as strips.");
         if (bits is not (8 or 16 or 32)) throw new NotSupportedException($"{bits}-bit TIFF samples are not supported.");
         if (sampleFormat == 3 && bits != 32) throw new NotSupportedException("Only 32-bit floating-point TIFF is supported.");
@@ -154,6 +189,8 @@ public static class TiffCodec
         if (compression is not (CompressionNone or CompressionDeflate or CompressionAdobeDeflate or CompressionPackBits))
             throw new NotSupportedException($"TIFF compression {compression} is not supported.");
 
+        // 3. Strips: each holds RowsPerStrip whole rows (the last may hold fewer), stored or compressed on its own.
+        //    Decode them in order into one contiguous buffer of height × rowBytes.
         int bytesPerSample = bits / 8;
         int rowSamples = width * samplesPerPixel;
         int rowBytes = rowSamples * bytesPerSample;
@@ -181,6 +218,7 @@ public static class TiffCodec
         }
         if (written != raw.Length) throw new InvalidDataException("TIFF strips do not cover the whole image.");
 
+        // 4. Undo the predictor (it applies after decompression), then convert samples to gray floats.
         if (predictor == 2) UndoHorizontalPredictor(raw, height, rowSamples, samplesPerPixel, bytesPerSample, r.LittleEndian);
 
         var image = new GrayImage(width, height);
@@ -199,6 +237,7 @@ public static class TiffCodec
         return image;
     }
 
+    /// <summary>Reads one sample of the given width and format (1 = unsigned, 2 = signed, 3 = float) in the file's byte order.</summary>
     private static double ReadSample(byte[] raw, int offset, int bits, uint format, bool little)
     {
         var s = raw.AsSpan(offset);
@@ -246,6 +285,10 @@ public static class TiffCodec
         }
     }
 
+    /// <summary>
+    /// PackBits run-length decoding (TIFF 6.0 §9). Each control byte n means: 0..127 → copy the next n+1
+    /// bytes literally; −127..−1 → repeat the next byte 1−n times; −128 → no-op.
+    /// </summary>
     internal static byte[] UnpackBits(ReadOnlySpan<byte> src, int expectedLength)
     {
         var output = new byte[expectedLength];
@@ -271,6 +314,7 @@ public static class TiffCodec
         return output;
     }
 
+    /// <summary>Decompresses a zlib-wrapped Deflate stream (TIFF compression 8 and 32946).</summary>
     private static byte[] Inflate(ReadOnlySpan<byte> compressed)
     {
         using var input = new MemoryStream(compressed.ToArray());
@@ -280,6 +324,7 @@ public static class TiffCodec
         return output.ToArray();
     }
 
+    /// <summary>Compresses to a zlib-wrapped Deflate stream, the inverse of <see cref="Inflate"/>.</summary>
     private static byte[] Deflate(byte[] data)
     {
         using var output = new MemoryStream();
@@ -288,9 +333,16 @@ public static class TiffCodec
         return output.ToArray();
     }
 
+    /// <summary>
+    /// Bounds-checked, byte-order-aware reads from the file. Every offset in a TIFF comes from the file
+    /// itself, so every access is checked: a corrupt or malicious file raises <see cref="InvalidDataException"/>
+    /// rather than reading out of bounds.
+    /// </summary>
     private readonly ref struct TiffReader
     {
         private readonly ReadOnlySpan<byte> _data;
+
+        /// <summary>True for "II" files, false for "MM" (big-endian) files.</summary>
         public bool LittleEndian { get; }
 
         public TiffReader(ReadOnlySpan<byte> data, bool littleEndian)
@@ -299,18 +351,21 @@ public static class TiffCodec
             LittleEndian = littleEndian;
         }
 
+        /// <summary>Unsigned 16-bit value at <paramref name="offset"/>, in the file's byte order.</summary>
         public ushort U16(long offset)
         {
             var s = Slice(offset, 2);
             return LittleEndian ? BinaryPrimitives.ReadUInt16LittleEndian(s) : BinaryPrimitives.ReadUInt16BigEndian(s);
         }
 
+        /// <summary>Unsigned 32-bit value at <paramref name="offset"/>, in the file's byte order.</summary>
         public uint U32(long offset)
         {
             var s = Slice(offset, 4);
             return LittleEndian ? BinaryPrimitives.ReadUInt32LittleEndian(s) : BinaryPrimitives.ReadUInt32BigEndian(s);
         }
 
+        /// <summary>A checked view of <paramref name="length"/> bytes at <paramref name="offset"/>.</summary>
         public ReadOnlySpan<byte> Slice(long offset, long length)
         {
             if (offset < 0 || length < 0 || offset + length > _data.Length)
@@ -318,9 +373,14 @@ public static class TiffCodec
             return _data.Slice((int)offset, (int)length);
         }
 
+        /// <summary>Offset of the IFD after this one (0 if this is the last page): it follows the entry table.</summary>
         public uint NextIfd(uint ifd) => U32(ifd + 2 + U16(ifd) * 12L);
 
         /// <summary>Values of an integer tag (BYTE/SHORT/LONG); empty if absent.</summary>
+        /// <remarks>
+        /// Entry layout: tag (2 bytes), type (2), count (4), value-or-offset (4). The values sit inline in the
+        /// last 4 bytes when count × size ≤ 4, otherwise those bytes hold their file offset.
+        /// </remarks>
         public uint[] Tag(uint ifd, ushort tag, bool required = false)
         {
             int count = U16(ifd);
