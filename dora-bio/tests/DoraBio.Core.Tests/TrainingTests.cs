@@ -89,6 +89,25 @@ public class TrainingTests
     }
 
     [Fact]
+    public void ValidationPatchesCoverEveryHeldOutFovBeforeRepeatingOne()
+    {
+        // Listed FOV by FOV, the way real datasets are. P2's validation took every patch from the first FOVs in the list.
+        var images = new List<ImagePair>();
+        foreach (var fov in Enumerable.Range(0, 6))
+            foreach (var frame in Enumerable.Range(0, 3))
+                images.Add(new ImagePair(TestUtil.RandomImage(32, 32, seed: fov * 10 + frame), null, $"fov{fov}", $"fov{fov}/{frame}"));
+
+        var six = new ValidationSet(images, QuickConfig(TrainingMode.Noise2Void) with { ValidationPatches = 6 });
+        Assert.Equal(6, six.PatchSources.Distinct().Count());
+
+        var fifteen = new ValidationSet(images, QuickConfig(TrainingMode.Noise2Void) with { ValidationPatches = 15 });
+        var counts = fifteen.PatchSources.GroupBy(s => s).Select(g => g.Count()).ToList();
+        Assert.Equal(6, counts.Count);
+        Assert.InRange(counts.Min(), 2, 3);   // 15 patches over 6 FOVs: every FOV gets 2 or 3
+        Assert.InRange(counts.Max(), 2, 3);
+    }
+
+    [Fact]
     public void TrainingIsReproducibleForAFixedSeed()
     {
         var config = QuickConfig(TrainingMode.Supervised) with { MaxEpochs = 2, StepsPerEpoch = 5 };

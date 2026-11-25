@@ -28,8 +28,13 @@ Fluorescence Microscopy Images"*, CVPR 2019 ([arXiv:1812.10366](https://arxiv.or
   Validation uses a fifth of the *training* FOVs, never FOV 19. Same 26,497-parameter network as the bundled model.
   CPU only, about 4–5 minutes per run. Raw-frame runs use 4 raw frames of each of the 228 training FOVs
   (12 categories × 19 FOVs, 912 images).
-- **Reproduce:** `tools/fetch_fmd.sh && tools/experiments/p2_fmd.sh`. Training is deterministic, so the same seed
-  gives the same weights and the same tables.
+- **Reproduce:** `tools/fetch_fmd.sh && tools/experiments/p2_fmd.sh` at commit `d2be16e`. Training is
+  deterministic, so the same seed gives the same weights and the same tables at that commit.
+- **Known flaw in these runs, found in P3:** the 16 validation patches all came from 4 FOVs of one category
+  (Confocal_BPAE_B), because they cycled through the held-out images in list order. So every training decision
+  (best epoch, learning-rate decay, early stopping, progressive targets) was made on confocal data alone. The test
+  numbers are unaffected in kind (test_mix was never involved), but some runs might have stopped at a better epoch
+  for widefield or two-photon. Since P3 the validation patches cover every held-out FOV; P3 retrains its baselines.
 
 ## Results at FMD's hardest noise level (single raw captures)
 

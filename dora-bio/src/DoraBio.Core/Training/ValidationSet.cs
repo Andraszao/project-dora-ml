@@ -33,10 +33,19 @@ internal sealed class ValidationSet
     /// <summary>PSNR of the noisy input itself against clean, i.e. the "do nothing" baseline.</summary>
     public double? NoisyPsnr { get; }
 
+    /// <summary>The field of view (<see cref="ImagePair.GroupId"/>) each patch was cut from, in patch order.</summary>
+    internal IReadOnlyList<string> PatchSources { get; }
+
     /// <summary>
-    /// Extracts <see cref="TrainerConfig.ValidationPatches"/> patches, cycling through the held-out images,
-    /// at positions drawn from a seed derived from <see cref="TrainerConfig.Seed"/>.
+    /// Extracts <see cref="TrainerConfig.ValidationPatches"/> patches spread over the held-out fields of view: the FOVs
+    /// are visited in a seeded random order, one patch each (from a random frame of that FOV), starting over once every
+    /// FOV has one. Positions and choices come from a seed derived from <see cref="TrainerConfig.Seed"/>.
     /// </summary>
+    /// <remarks>
+    /// Until P3 the patches cycled through the images in list order. Datasets are listed by category, so on FMD all
+    /// 16 patches came from 4 FOVs of a single confocal category, and every training decision (best epoch, learning
+    /// rate decay, early stopping, targets) was made without seeing a two-photon or widefield image.
+    /// </remarks>
     public ValidationSet(IReadOnlyList<ImagePair> images, TrainerConfig config)
     {
         _mode = config.Mode;
@@ -45,9 +54,14 @@ internal sealed class ValidationSet
         if (_size < 16) throw new ArgumentException("Validation images must be at least 16×16.");
 
         var rng = new Random(config.Seed ^ 0x5EED);
+        var fovs = images.GroupBy(i => i.GroupId).OrderBy(g => g.Key, StringComparer.Ordinal)
+            .Select(g => g.ToList()).OrderBy(_ => rng.Next()).ToList();
+        var sources = new List<string>();
         for (int k = 0; k < config.ValidationPatches; k++)
         {
-            var image = images[k % images.Count];
+            var fov = fovs[k % fovs.Count];
+            var image = fov[rng.Next(fov.Count)];
+            sources.Add(image.GroupId);
             int x = rng.Next(image.Noisy.Width - _size + 1);
             int y = rng.Next(image.Noisy.Height - _size + 1);
             var noisy = image.Noisy.Crop(x, y, _size, _size).Pixels;
@@ -58,6 +72,7 @@ internal sealed class ValidationSet
             _patches.Add(new Patch(noisy, masked, mask, clean));
         }
 
+        PatchSources = sources;
         HasClean = _patches.All(p => p.Clean is not null);
         if (_mode == TrainingMode.Supervised && !HasClean)
             throw new ArgumentException("Supervised training needs clean validation images.");

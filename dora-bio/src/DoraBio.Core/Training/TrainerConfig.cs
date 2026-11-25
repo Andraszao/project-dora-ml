@@ -67,8 +67,11 @@ public sealed record TrainerConfig
     /// <summary>Share of fields of view held out for validation (by FOV group; spatial split if there is only one).</summary>
     public double ValidationFraction { get; init; } = 0.2;
 
-    /// <summary>Number of fixed validation patches scored after every epoch.</summary>
-    public int ValidationPatches { get; init; } = 16;
+    /// <summary>
+    /// Number of fixed validation patches scored after every epoch, spread over the held-out fields of view (one per
+    /// FOV before any FOV gets a second). 48 covers all 46 held-out FMD FOVs.
+    /// </summary>
+    public int ValidationPatches { get; init; } = 48;
 
     /// <summary>
     /// Seeds the split, patch sampling, masking and validation patches. Together with
