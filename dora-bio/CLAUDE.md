@@ -23,9 +23,11 @@ src/DoraBio.Core/              ALL ML/IO code. net8.0. No Godot, no NuGet depend
   IO/        TiffCodec, PngDecoder, ImageLoader, WeightsFile, Crc32
   Training/  Trainer (+BatchStepper), ValidationSet, ProgressiveTargets, TrainingJob, JourneyLog,
              OnlineAdapter, TrainerConfig
-  Metrics.cs, TiledInference.cs, BilateralBaseline.cs, FmdBenchmark.cs (held-out FMD scores, noise correlation)
+  Metrics.cs, TiledInference.cs, BilateralBaseline.cs, FmdBenchmark.cs (held-out FMD scores, noise correlation),
+  NoiseDiagnostics.cs (is the noise pixel-independent? from the noisy image alone)
 tests/DoraBio.Core.Tests/      xunit. Fixtures/ written by Pillow/ImageMagick (make_fixtures.py)
-tools/DoraBio.Cli/             `dora-bio` CLI: synth | train | denoise | eval | info | fmd-check | fmd-eval | fmd-noise
+tools/DoraBio.Cli/             `dora-bio` CLI: synth | train | denoise | eval | info | diagnose | fmd-check | fmd-eval |
+                               fmd-noise | fmd-diagnose
 tools/fetch_fmd.sh             downloads + verifies the real FMD dataset into data/fmd/ (gitignored)
 tools/experiments/p2_fmd.sh    every P2 training run and evaluation behind docs/RESULTS.md
 docs/RESULTS.md                measured results on real microscope data (FMD), with reproducible blocks
@@ -68,8 +70,15 @@ before anything is built on top.** `./bricks.sh` runs the gates in order and sto
 | 11 | fmd-fetch | `tools/fetch_fmd.sh` | all 13 FMD archives pinned (Drive id, size, SHA-256); with data: every archive's digest and image count match |
 | 12 | fmd-loader | `Data/FmdDataset.cs` | `Brick=12-fmd` (miniature real-layout tree); with data: `dora-bio fmd-check` (structure + test_mix = FOV 19 pixel for pixel, FOV 19 never in training) |
 | 13 | fmd-eval | `FmdBenchmark.cs`, `tools/experiments/`, `docs/RESULTS.md` | `Brick=13-fmd-eval`; RESULTS.md exists; with data: its recorded synthetic-model evaluation and noise-correlation blocks reproduce exactly |
+| 14 | n2v-diagnostic | `NoiseDiagnostics.cs`, CLI `diagnose` / `fmd-diagnose`, the bridge's noise check on load | `Brick=14-n2v-diagnostic` (independent vs smoothed synthetic noise); with data: the blind verdict matches the ground-truth verdict on all 48 raw test images |
+| 15 | structured-mask | `Data/BlindSpot.cs`, `Data/PatchSampler.cs` | `Brick=15-structured-mask`; recorded FMD results meet the bar set in advance (widefield ≥ +1 dB, confocal and two-photon ≥ −0.2 dB vs plain Noise2Void); with data + weights: they reproduce |
+| 16 | vst | (P3, not built yet) | `Brick=16-vst`: unit variance after the transform on synthetic data, exact unbiased inverse |
+| 17 | calibration | (P3, not built yet) | `Brick=17-calibration`: recovers the synthetic generator's gain, offset and read noise within 10% |
 
-Gates 11–13 need the dataset (`tools/fetch_fmd.sh`, about 9 GB into the gitignored `data/fmd/`). Without it, their
+Gates 15–17 stay red until their bricks are built (P3 is in progress), so a full run currently stops at the first of
+them. Rule 2 still applies: a brick is done when `./bricks.sh N` is green.
+
+Gates 11–15 need the dataset (`tools/fetch_fmd.sh`, about 9 GB into the gitignored `data/fmd/`). Without it, their
 data-dependent part reports SKIPPED (exit code 77) while the pins, unit tests and RESULTS.md checks still run. CI has
 no data and must not download it.
 
@@ -109,7 +118,8 @@ tools/fetch_fmd.sh                                        # FMD dataset, ~9 GB, 
 dotnet tools/DoraBio.Cli/bin/Release/net8.0/dora-bio.dll fmd-eval --weights W.bin --root data/fmd   # held-out test_mix
 tools/experiments/p2_fmd.sh                               # retrain + evaluate every P2 model (~45 min CPU)
 dotnet tools/DoraBio.Cli/bin/Release/net8.0/dora-bio.dll fmd-noise --root data/fmd   # is the real noise pixel-independent?
-dotnet test DoraBio.sln                                   # all 85 tests at once, ~5 s
+dotnet tools/DoraBio.Cli/bin/Release/net8.0/dora-bio.dll diagnose --in IMAGE          # the same question, without ground truth
+dotnet test DoraBio.sln                                   # all tests at once, ~5 s
 dotnet run --project tools/DoraBio.Cli -c Release -- synth --out data/synth --count 10 --size 256
 dotnet run --project tools/DoraBio.Cli -c Release -- train --data data/synth --out runs/w.bin --mode n2v
 cd godot && dotnet build && godot --headless --path . --import \

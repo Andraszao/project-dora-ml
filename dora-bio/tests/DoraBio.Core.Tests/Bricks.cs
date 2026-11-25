@@ -20,13 +20,18 @@ internal static class Bricks
     public const string Training = "5-training";   // Trainer, ValidationSet, ProgressiveTargets, JourneyLog, OnlineAdapter, DatasetLoader
     public const string Fmd = "12-fmd";            // FmdDataset: real FMD layouts, test-FOV exclusion, leakage guard
     public const string FmdEval = "13-fmd-eval";   // FmdBenchmark: test_mix protocol (8-bit scale, per-modality summary)
+    public const string NoiseDiagnostic = "14-n2v-diagnostic";   // NoiseDiagnostics: correlated noise, from the noisy image alone
+    public const string StructuredMask = "15-structured-mask";   // structured blind spots for correlated noise
+    public const string Vst = "16-vst";                          // generalized Anscombe transform and its inverse
+    public const string Calibration = "17-calibration";          // gain, offset and read noise from the image
 }
 
 [Trait(Bricks.Trait, Bricks.Scaffold)]
 public class BrickWiringTests
 {
     private static readonly HashSet<string> Known =
-        [Bricks.Scaffold, Bricks.Nn, Bricks.Data, Bricks.IO, Bricks.Inference, Bricks.Training, Bricks.Fmd, Bricks.FmdEval];
+        [Bricks.Scaffold, Bricks.Nn, Bricks.Data, Bricks.IO, Bricks.Inference, Bricks.Training, Bricks.Fmd, Bricks.FmdEval,
+         Bricks.NoiseDiagnostic, Bricks.StructuredMask, Bricks.Vst, Bricks.Calibration];
 
     /// <summary>An untagged test would silently run in no gate, so treat a missing or unknown brick as a build error.</summary>
     [Xunit.Fact]

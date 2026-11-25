@@ -89,6 +89,7 @@ public partial class DoraBioBridge : Node
     private string _modelSource = "untrained";
     private OnlineAdapter? _adapter;    // created on first Adapt, discarded when the model changes
     private GrayImage? _image;          // normalized
+    private NoiseDiagnosis? _noise;     // the loaded image's noise check; null if it was too small to judge
     private string _imageName = "";
     private CancellationTokenSource? _cancellation;
     private bool _busy;
@@ -102,6 +103,12 @@ public partial class DoraBioBridge : Node
 
     /// <summary>True after adaptation changed the weights since the last save or load.</summary>
     public bool HasUnsavedChanges() => _unsaved;
+
+    /// <summary>
+    /// The loaded image's noise check (<see cref="NoiseDiagnostics"/>): whether its noise looks independent between
+    /// pixels, as Noise2Void and "Adapt to sample" assume. Empty if no image is loaded or it was too small to judge.
+    /// </summary>
+    public string DescribeNoise() => _noise?.ToString() ?? "";
 
     /// <summary>Loads weights only. Datasets load lazily, when training is requested.</summary>
     public override void _Ready() => LoadBestAvailableModel();
@@ -157,8 +164,13 @@ public partial class DoraBioBridge : Node
             Array.Sort(sorted);
             float low = Normalization.Quantile(sorted, 0.005), high = Normalization.Quantile(sorted, 0.995);
             var (rawMin, rawMax) = raw.Range();
+            // Milliseconds even for large frames, so it runs here rather than as a job.
+            try { _noise = NoiseDiagnostics.Diagnose(_image); }
+            catch (ArgumentException) { _noise = null; }
             EmitSignal(SignalName.ImageLoaded, ToGodotImage(_image), low, high,
                 $"{_imageName} · {raw.Width}×{raw.Height} · raw range {rawMin:0.#}–{rawMax:0.#}");
+            WriteLog(_noise is null ? "🔎 noise check skipped: image too small"
+                : (_noise.Correlated ? "⚠️ " : "🔎 ") + _noise);
             return true;
         }
         catch (Exception e)
@@ -200,6 +212,8 @@ public partial class DoraBioBridge : Node
         if (patch < 16) { EmitSignal(SignalName.JobFailed, "Image is too small to adapt on (need at least 16×16)."); return; }
         _adapter ??= new OnlineAdapter(_net, AdaptLearningRate, patchSize: patch);
         var adapter = _adapter;
+        if (_noise?.Correlated == true)
+            WriteLog("⚠️ adapting anyway, but this image's noise is correlated between pixels: Noise2Void will keep part of it");
 
         RunJob("Adapting to sample", token =>
         {

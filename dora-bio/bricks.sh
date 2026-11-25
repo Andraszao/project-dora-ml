@@ -22,7 +22,8 @@ set -uo pipefail
 cd "$(dirname "$0")"
 export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1
 
-NAMES=(scaffold nn data io inference training cli godot-build godot-smoke ci-core ci-godot fmd-fetch fmd-loader fmd-eval)
+NAMES=(scaffold nn data io inference training cli godot-build godot-smoke ci-core ci-godot fmd-fetch fmd-loader fmd-eval
+       n2v-diagnostic structured-mask vst calibration)
 CHECKS=(
   "solution builds (warnings are errors, missing XML docs included); every test class belongs to exactly one brick"
   "ConvLayer/DenoisingNet/Adam/Simd: finite-difference gradient checks, optimizer behavior"
@@ -38,13 +39,17 @@ CHECKS=(
   "FMD fetch script pins every archive (Drive id, size, SHA-256); downloaded data matches the pins"
   "FMD loader unit tests (real layouts, test-FOV exclusion); with data: counts + no train/test leakage"
   "benchmark unit tests; docs/RESULTS.md exists; with data: the recorded synthetic-model evaluation and noise measurement reproduce exactly"
+  "correlated-noise check from the noisy image alone; with data: agrees with the ground-truth measurement on every raw test image"
+  "structured blind spots; recorded FMD results meet the bar set in advance (widefield +1 dB, others -0.2 dB at worst); with data + weights: they reproduce"
+  "generalized Anscombe transform: unit variance across intensities on synthetic data, exact unbiased inverse"
+  "gain, offset and read-noise estimation: recovers the synthetic generator's settings within 10%"
 )
 LAST=$((${#NAMES[@]} - 1))
 LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dora-bricks.XXXXXX")"
 trap 'rm -rf "$LOG_DIR"' EXIT
 
 list() {
-  for i in $(seq 0 $LAST); do printf "  %d  %-12s %s\n" "$i" "${NAMES[$i]}" "${CHECKS[$i]}"; done
+  for i in $(seq 0 $LAST); do printf "  %d  %-15s %s\n" "$i" "${NAMES[$i]}" "${CHECKS[$i]}"; done
 }
 
 # Runs one brick's xunit tests; fails if any test fails OR if the filter matched nothing.
@@ -156,11 +161,46 @@ gate_13() {   # fmd-eval
   reproduces fmd-noise fmd-noise --root "$FMD" --levels raw || return 1
 }
 
-# reproduces <marker> <cli args...>: the ```text block between <!-- marker --> and <!-- /marker --> in RESULTS.md is
-# the verbatim output of `dora-bio <cli args...>`, and a fresh run must print exactly the same.
+gate_14() {   # n2v-diagnostic
+  test_gate 14-n2v-diagnostic || return 1
+  [[ -f "$FMD/test_mix/.complete" ]] || { echo "unit tests passed; real-data check skipped (no FMD data)"; return 77; }
+  dotnet build tools/DoraBio.Cli -c Release >/dev/null || return 1
+  # The blind check (noisy image only) must give the same verdict as the ground-truth measurement on every image.
+  dotnet "$CLI_DLL" fmd-diagnose --root "$FMD" --levels raw
+}
+
+gate_15() {   # structured-mask
+  test_gate 15-structured-mask || return 1
+  # The bar was set before the brick was built (PATHWAY.md, P3): on FMD test_mix (raw), structured masking must gain
+  # at least 1 dB over plain Noise2Void on widefield, and lose at most 0.2 dB on confocal and on two-photon.
+  local m plain struct bar
+  for m in WideField Confocal TwoPhoton; do
+    plain="$(recorded_block p3-n2v-plain | awk -v m="$m" '$1 == m { print $9 }')"
+    struct="$(recorded_block p3-n2v-struct | awk -v m="$m" '$1 == m { print $9 }')"
+    [[ -n "$plain" && -n "$struct" ]] || { echo ">> docs/RESULTS.md needs p3-n2v-plain and p3-n2v-struct fmd-eval blocks"; return 1; }
+    bar=$([[ "$m" == WideField ]] && echo 1.0 || echo -0.2)
+    awk -v a="$struct" -v b="$plain" -v n="$bar" 'BEGIN { exit !(a - b >= n - 1e-9) }' \
+      || { echo ">> $m: structured $struct dB vs plain $plain dB misses the bar ($bar dB)"; return 1; }
+    echo ">> $m: structured $struct dB vs plain $plain dB, bar $bar dB: met"
+  done
+  [[ -f "$FMD/test_mix/.complete" && -f runs/p2/n2v_raw.bin && -f runs/p3/n2v_struct.bin ]] \
+    || { echo "bar met by the recorded results; reproduction skipped (needs FMD data and tools/experiments weights)"; return 77; }
+  dotnet build tools/DoraBio.Cli -c Release >/dev/null || return 1
+  reproduces p3-n2v-plain fmd-eval --weights runs/p2/n2v_raw.bin --root "$FMD" --levels raw || return 1
+  reproduces p3-n2v-struct fmd-eval --weights runs/p3/n2v_struct.bin --root "$FMD" --levels raw || return 1
+}
+
+gate_16() { test_gate 16-vst; }           # vst
+gate_17() { test_gate 17-calibration; }   # calibration
+
+# recorded_block <marker>: the contents of the ```text block between <!-- marker --> and <!-- /marker --> in RESULTS.md.
+recorded_block() { sed -n "/<!-- $1 -->/,/<!-- \/$1 -->/p" docs/RESULTS.md | sed '1,2d;$d' | sed '$d'; }
+
+# reproduces <marker> <cli args...>: the recorded block is the verbatim output of `dora-bio <cli args...>`, and a
+# fresh run must print exactly the same.
 reproduces() {
   local marker="$1" recorded fresh; shift
-  recorded="$(sed -n "/<!-- $marker -->/,/<!-- \/$marker -->/p" docs/RESULTS.md | sed '1,2d;$d' | sed '$d')"
+  recorded="$(recorded_block "$marker")"
   [[ -n "$recorded" ]] || { echo ">> no <!-- $marker --> block in docs/RESULTS.md"; return 1; }
   fresh="$(dotnet "$CLI_DLL" "$@")" || return 1
   if [[ "$recorded" != "$fresh" ]]; then
@@ -170,7 +210,7 @@ reproduces() {
 }
 
 # ---- gate self-test ---------------------------------------------------------
-# A gate that can't fail proves nothing. For each of gates 0-7, plant one known bug in a fresh scratch copy of
+# A gate that can't fail proves nothing. For each gate that has code of its own, plant one known bug in a fresh scratch copy of
 # this folder and check that exactly that gate turns red. Mutations are exact string replacements that must
 # match once. If the code moves on and a mutation no longer applies, the self-test fails and says so.
 MUTATIONS=(
@@ -187,6 +227,7 @@ MUTATIONS=(
   '11|tools/fetch_fmd.sh|d7a14d3be17368dbfe24a5cfe8ed0d40d403d7902d70fe914d04303e4aa8f2f6"|"'
   '12|src/DoraBio.Core/Data/FmdDataset.cs|public IReadOnlyCollection<int> ExcludedFovs { get; init; } = [FmdDataset.TestFov];|public IReadOnlyCollection<int> ExcludedFovs { get; init; } = [];'
   '13|docs/RESULTS.md||<DELETE-FILE>'
+  '14|src/DoraBio.Core/NoiseDiagnostics.cs|b = r[(y + dy) * TileSize + x + dx];|b = r[(y + dy) * TileSize + x];'
 )
 
 self_test() {
@@ -262,7 +303,7 @@ declare -a SUMMARY=()
 STATUS=0
 for i in $(seq "$FIRST" "$UPTO"); do
   log="$LOG_DIR/brick$i.log"
-  printf "▶ brick %d %-12s " "$i" "${NAMES[$i]}"
+  printf "▶ brick %d %-15s " "$i" "${NAMES[$i]}"
   start=$SECONDS
   "gate_$i" >"$log" 2>&1; code=$?
   took=$((SECONDS - start))

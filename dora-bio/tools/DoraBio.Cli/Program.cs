@@ -32,12 +32,16 @@ public static class Program
           eval     --weights WEIGHTS.bin --data DIR
                    Per-image PSNR/SSIM of noisy, bilateral and DORA against clean (needs clean images).
           info     --weights WEIGHTS.bin
+          diagnose --in IMAGE
+                   Does the image's noise look independent between pixels, as Noise2Void assumes? (no ground truth needed)
           fmd-check --root data/fmd
                    Verify a downloaded FMD dataset: structure, test_mix, and no train/test leakage.
           fmd-eval  --weights WEIGHTS.bin --root data/fmd [--levels raw,avg2,...] [--per-image]
                    PSNR/SSIM (8-bit scale) on FMD's held-out test_mix: noisy vs bilateral vs DORA, per microscope type.
           fmd-noise --root data/fmd [--levels raw,avg2,...]
                    How correlated test_mix's real noise is between neighbouring pixels (Noise2Void assumes 0).
+          fmd-diagnose --root data/fmd [--levels raw]
+                   Checks `diagnose` (noisy image only) against fmd-noise's ground truth; exit 1 on any disagreement.
         """;
 
     /// <summary>Entry point: <c>dora-bio &lt;command&gt; [--option value]…</c>.</summary>
@@ -69,6 +73,8 @@ public static class Program
                 "fmd-check" => FmdCheck(options),
                 "fmd-eval" => FmdEval(options),
                 "fmd-noise" => FmdNoise(options),
+                "fmd-diagnose" => FmdDiagnose(options),
+                "diagnose" => Diagnose(options),
                 _ => throw new ArgumentException($"Unknown command '{args[0]}'."),
             };
         }
@@ -148,6 +154,8 @@ public static class Program
             var defaults = NetConfig.Default;
             net = DenoisingNet.Create(new NetConfig(o.Int("features", defaults.Features), defaults.Dilations), config.Seed);
         }
+
+        if (mode == TrainingMode.Noise2Void) ReportNoiseCheck(dataset);
 
         int withClean = dataset.Count(d => d.HasClean);
         string cleanUse = withClean == 0 ? "no clean images"
@@ -300,6 +308,70 @@ public static class Program
         if (problems.Count > 0) return 1;
         Console.WriteLine($"✓ {summary}");
         return 0;
+    }
+
+    /// <summary>
+    /// Before Noise2Void training: how many training images have noise that is correlated between pixels, which
+    /// Noise2Void can't remove (see <see cref="NoiseDiagnostics"/>). A warning, never an error.
+    /// </summary>
+    private static void ReportNoiseCheck(IReadOnlyList<ImagePair> dataset)
+    {
+        var verdicts = new bool?[dataset.Count];
+        Parallel.For(0, dataset.Count, i =>
+        {
+            try { verdicts[i] = NoiseDiagnostics.Diagnose(dataset[i].Noisy).Correlated; }
+            catch (ArgumentException) { verdicts[i] = null; }   // too small to judge
+        });
+        int judged = verdicts.Count(v => v is not null), correlated = verdicts.Count(v => v == true);
+        Console.WriteLine($"🔎 noise check: {correlated} of {judged} training images have noise correlated between pixels");
+        if (correlated > 0)
+            Console.WriteLine("⚠️ Noise2Void assumes independent noise and will keep part of the correlated noise in those images. " +
+                              "Use --mode supervised if you have clean targets (see docs/RESULTS.md).");
+    }
+
+    /// <summary><c>diagnose</c>: the noise check for one image, from the noisy image alone.</summary>
+    private static int Diagnose(Options o)
+    {
+        var image = ImageLoader.Load(o.Required("in"));
+        var d = NoiseDiagnostics.Diagnose(image);
+        Console.WriteLine($"{Path.GetFileName(o.Required("in"))}: {image.Width}×{image.Height}, median over {d.TilesUsed} flat {NoiseDiagnostics.TileSize}px tiles");
+        Console.WriteLine($"noise correlation: right 1 {d.Right1:0.000}  down 1 {d.Down1:0.000}  diagonal {d.Diagonal1:0.000}  right 2 {d.Right2:0.000}  down 2 {d.Down2:0.000}");
+        Console.WriteLine((d.Correlated ? "⚠️ " : "✓ ") + d);
+        return 0;
+    }
+
+    /// <summary>
+    /// <c>fmd-diagnose</c>: on every test_mix image, the blind check (noisy image only) must reach the same verdict as
+    /// the ground-truth measurement, using the same threshold on the true one-pixel correlation. Exit 1 if any image
+    /// disagrees (bricks.sh gate 14).
+    /// </summary>
+    private static int FmdDiagnose(Options o)
+    {
+        string testMix = Path.Combine(o.Required("root"), "test_mix");
+        int disagreements = 0;
+        foreach (string level in o.String("levels", "raw").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var truth = FmdBenchmark.MeasureNoise(testMix, level).ToDictionary(s => s.Name);
+            var rows = new List<(string Modality, bool Truth, bool Blind, double Estimate)>();
+            foreach (var p in FmdDataset.PlanTestMix(testMix, level))
+            {
+                var d = NoiseDiagnostics.Diagnose(ImageLoader.Load(p.NoisyPath));
+                var t = truth[p.Name];
+                bool truthCorrelated = Math.Max(t.Right1, t.Down1) >= NoiseDiagnostics.CorrelatedThreshold;
+                rows.Add((FmdBenchmark.ModalityOf(p.GroupId), truthCorrelated, d.Correlated, Math.Max(d.Right1, d.Down1)));
+                if (truthCorrelated != d.Correlated)
+                {
+                    disagreements++;
+                    Console.WriteLine($"✗ {p.Name}: blind estimate {Math.Max(d.Right1, d.Down1):0.000}, truth {Math.Max(t.Right1, t.Down1):0.000}");
+                }
+            }
+            Console.WriteLine($"test_mix level {level}: correlated-noise verdicts, blind (noisy image only) vs ground truth");
+            Console.WriteLine($"{"modality",-10} {"n",3}  {"truth",5} {"blind",5}  {"blind estimate min-max",22}");
+            foreach (var g in rows.GroupBy(r => r.Modality).OrderBy(g => g.Key, StringComparer.Ordinal))
+                Console.WriteLine($"{g.Key,-10} {g.Count(),3}  {g.Count(r => r.Truth),5} {g.Count(r => r.Blind),5}  {$"{g.Min(r => r.Estimate):0.000}-{g.Max(r => r.Estimate):0.000}",22}");
+        }
+        Console.WriteLine(disagreements == 0 ? "✓ every verdict agrees with the ground truth" : $"✗ {disagreements} verdicts disagree");
+        return disagreements == 0 ? 0 : 1;
     }
 
     /// <summary><c>info</c>: prints a weights file's version, architecture, size, save time and provenance.</summary>

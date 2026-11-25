@@ -1,7 +1,7 @@
 extends Node
 ## Headless end-to-end check of the Godot shell. Build the C# assembly, then run:
 ##   cd godot && dotnet build && godot --headless --path . res://tests/smoke_test.tscn
-## Loads Main.tscn, loads the bundled sample, denoises it, runs a short adaptation, and exits
+## Loads Main.tscn, loads the bundled sample, checks its noise, denoises it, runs a short adaptation, and exits
 ## with code 0 on success or 1 on failure. A watchdog fails the run if any step hangs.
 
 const TIMEOUT_SECONDS := 180.0
@@ -28,6 +28,8 @@ func _ready() -> void:
 	var raw: Texture2D = main.raw_view.texture
 	if not _check(raw != null, "raw texture shown after loading the sample"): return
 	if not _check(raw.get_image().get_format() == Image.FORMAT_RF, "raw image stays 32-bit float (FORMAT_RF)"): return
+	print("noise check: ", bridge.DescribeNoise())
+	if not _check(bridge.DescribeNoise().contains("independent"), "noise check ran on load (the synthetic sample's noise is independent)"): return
 
 	main._on_denoise_pressed()
 	if not _check(bridge.IsBusy(), "denoise runs as a background job"): return
