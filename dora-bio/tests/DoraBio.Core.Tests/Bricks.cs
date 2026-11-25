@@ -28,6 +28,9 @@ internal static class Bricks
     public const string UNet = "19-unet";                        // U-Net architecture, weights format 2
     public const string UNetTiling = "20-unet-tiling";           // exact tiled inference for the U-Net
     public const string ArchEval = "21-arch-eval";               // dilated CNN vs U-Net on FMD
+    public const string Bench = "22-bench";                      // timings for denoise and training steps
+    public const string BlockedConv = "23-blocked-conv";         // register-blocked convolution kernels
+    public const string PerfBudget = "24-perf-budget";           // time budgets that fail on regressions
 }
 
 [Trait(Bricks.Trait, Bricks.Scaffold)]
@@ -36,7 +39,8 @@ public class BrickWiringTests
     private static readonly HashSet<string> Known =
         [Bricks.Scaffold, Bricks.Nn, Bricks.Data, Bricks.IO, Bricks.Inference, Bricks.Training, Bricks.Fmd, Bricks.FmdEval,
          Bricks.NoiseDiagnostic, Bricks.StructuredMask, Bricks.Vst, Bricks.Calibration,
-         Bricks.PoolUpsample, Bricks.UNet, Bricks.UNetTiling, Bricks.ArchEval];
+         Bricks.PoolUpsample, Bricks.UNet, Bricks.UNetTiling, Bricks.ArchEval,
+         Bricks.Bench, Bricks.BlockedConv, Bricks.PerfBudget];
 
     /// <summary>An untagged test would silently run in no gate, so treat a missing or unknown brick as a build error.</summary>
     [Xunit.Fact]

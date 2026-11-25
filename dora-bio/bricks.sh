@@ -23,7 +23,8 @@ cd "$(dirname "$0")"
 export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1
 
 NAMES=(scaffold nn data io inference training cli godot-build godot-smoke ci-core ci-godot fmd-fetch fmd-loader fmd-eval
-       n2v-diagnostic structured-mask vst calibration pool-upsample unet unet-tiling arch-eval)
+       n2v-diagnostic structured-mask vst calibration pool-upsample unet unet-tiling arch-eval
+       bench blocked-conv perf-budget)
 CHECKS=(
   "solution builds (warnings are errors, missing XML docs included); every test class belongs to exactly one brick"
   "ConvLayer/DenoisingNet/Adam/Simd: finite-difference gradient checks, optimizer behavior"
@@ -47,6 +48,9 @@ CHECKS=(
   "U-Net: whole-network finite-difference gradients; weights format 2 round-trips both architectures; format-1 files still load"
   "U-Net tiled inference equals whole-image inference for ragged sizes (tiles on the 2^depth grid)"
   "recorded FMD results for both architectures reproduce; the default follows the rule set before measuring"
+  "dora-bio bench: denoise and train-step timings for both architectures, as JSON that passes the schema check"
+  "register-blocked convolution: bit-identical to the reference kernels (forward, weight and input gradients, whole nets)"
+  "dora-bio bench stays within the time budgets in tools/ci/perf_budget.json"
 )
 LAST=$((${#NAMES[@]} - 1))
 LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dora-bricks.XXXXXX")"
@@ -204,6 +208,24 @@ gate_18() { test_gate 18-pool-upsample; } # pool-upsample
 gate_19() { test_gate 19-unet; }          # unet
 gate_20() { test_gate 20-unet-tiling; }   # unet-tiling
 
+gate_22() (   # bench (subshell: set -e stops only this gate)
+  set -e
+  test_gate 22-bench
+  dotnet build tools/DoraBio.Cli -c Release >/dev/null
+  dotnet "$CLI_DLL" bench --quick --json "$LOG_DIR/bench.json"
+  python3 tools/ci/check_bench.py "$LOG_DIR/bench.json"
+)
+
+gate_23() { test_gate 23-blocked-conv; }   # blocked-conv
+
+gate_24() (   # perf-budget
+  set -e
+  test_gate 24-perf-budget
+  dotnet build tools/DoraBio.Cli -c Release >/dev/null
+  dotnet "$CLI_DLL" bench --json "$LOG_DIR/bench-full.json"
+  python3 tools/ci/check_bench.py "$LOG_DIR/bench-full.json" --budget tools/ci/perf_budget.json
+)
+
 gate_21() {   # arch-eval
   test_gate 21-arch-eval || return 1
   # The rule was set before measuring (PATHWAY.md, P4): the U-Net becomes the default only if, at the same training
@@ -276,6 +298,7 @@ MUTATIONS=(
   '19|src/DoraBio.Core/Nn/DenoisingNet.UNet.cs|Simd.Axpy(1f, ws.SkipGrad[l].AsSpan(0, gOut.Length), gOut);|Simd.Axpy(0f, ws.SkipGrad[l].AsSpan(0, gOut.Length), gOut);'
   $'20|src/DoraBio.Core/TiledInference.cs|        tileCore = RoundUp(tileCore, align);\n|'
   '21|src/DoraBio.Core/Nn/DenoisingNet.cs|public static NetConfig Default => new(24, [1, 2, 4, 8, 4, 2, 1]);|public static NetConfig Default => UNet();'
+  '22|src/DoraBio.Core/PerformanceBench.cs|? "unet" : "dilated";|? "u-net" : "dilated";'
 )
 
 self_test() {

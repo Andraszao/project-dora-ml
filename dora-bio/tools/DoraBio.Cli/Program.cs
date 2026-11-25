@@ -39,6 +39,8 @@ public static class Program
           eval     --weights WEIGHTS.bin --data DIR
                    Per-image PSNR/SSIM of noisy, bilateral and DORA against clean (needs clean images).
           info     --weights WEIGHTS.bin   |   info --default-arch   (prints dilated or unet)
+          bench    [--quick] [--json OUT.json]
+                   Timings: denoise a frame and one training step, for both architectures (see PerformanceBench).
           diagnose --in IMAGE
                    Does the image's noise look independent between pixels, as Noise2Void assumes? (no ground truth needed)
           fmd-check --root data/fmd
@@ -84,6 +86,7 @@ public static class Program
                 "fmd-noise" => FmdNoise(options),
                 "fmd-diagnose" => FmdDiagnose(options),
                 "diagnose" => Diagnose(options),
+                "bench" => Bench(options),
                 _ => throw new ArgumentException($"Unknown command '{args[0]}'."),
             };
         }
@@ -415,6 +418,45 @@ public static class Program
             ? "   Use --struct auto (structured blind spots: +3.8 dB on FMD widefield), or --mode supervised if you have clean targets."
             : "   Mixed data: one network does worse on the independent images. Train two, with --subset independent and with " +
               "--subset correlated --struct auto, then route with --weights-correlated (see docs/RESULTS.md, P3).");
+    }
+
+    /// <summary>
+    /// <c>bench</c>: <see cref="PerformanceBench.Run"/>, printed as a table and optionally written as JSON
+    /// (schema 1, checked by tools/ci/check_bench.py; gate 24 compares it with tools/ci/perf_budget.json).
+    /// </summary>
+    private static int Bench(Options o)
+    {
+        bool quick = o.Has("quick");
+        var timings = PerformanceBench.Run(quick);
+        Console.WriteLine($"{"operation",-22} {"architecture",-12} {"detail",-20} {"median s",9} {"min s",9}");
+        foreach (var t in timings)
+            Console.WriteLine($"{t.Name,-22} {t.Architecture,-12} {t.Detail,-20} {t.MedianSeconds,9:0.0000} {t.MinSeconds,9:0.0000}");
+
+        if (o.StringOrNull("json") is { } path)
+        {
+            var report = new Dictionary<string, object>
+            {
+                ["schema"] = 1,
+                ["model_version"] = WeightsFile.ModelVersion,
+                ["quick"] = quick,
+                ["machine"] = new Dictionary<string, object>
+                {
+                    ["cores"] = Environment.ProcessorCount,
+                    ["simd_floats"] = System.Numerics.Vector<float>.Count,
+                    ["simd_accelerated"] = System.Numerics.Vector.IsHardwareAccelerated,
+                    ["os"] = System.Runtime.InteropServices.RuntimeInformation.OSDescription,
+                    ["dotnet"] = Environment.Version.ToString(),
+                },
+                ["timings"] = timings.Select(t => new Dictionary<string, object>
+                {
+                    ["name"] = t.Name, ["architecture"] = t.Architecture, ["detail"] = t.Detail,
+                    ["median_seconds"] = t.MedianSeconds, ["min_seconds"] = t.MinSeconds, ["runs"] = t.Runs,
+                }).ToList(),
+            };
+            File.WriteAllText(path, System.Text.Json.JsonSerializer.Serialize(report, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+            Console.WriteLine($"📝 {path}");
+        }
+        return 0;
     }
 
     /// <summary><c>diagnose</c>: the noise check for one image, from the noisy image alone.</summary>

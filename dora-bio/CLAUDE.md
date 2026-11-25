@@ -81,6 +81,9 @@ before anything is built on top.** `./bricks.sh` runs the gates in order and sto
 | 19 | unet | `Nn/DenoisingNet.UNet.cs`, `NetConfig.UNet`, `IO/WeightsFile.cs` (format 2) | `Brick=19-unet`: whole-network finite-difference gradients (4 shapes, incl. unaligned), unaligned = hand-padded bit for bit, format 2 round-trips both architectures, format 1 loads, learns through the trainer |
 | 20 | unet-tiling | `TiledInference.cs` | `Brick=20-unet-tiling`: tiled U-Net inference equals whole-image inference for ragged sizes |
 | 21 | arch-eval | `tools/experiments/p4_arch.sh`, `docs/RESULTS.md` | `Brick=21-arch-eval`; the default architecture follows the rule set before measuring; with data + weights: the recorded blocks reproduce |
+| 22 | bench | `PerformanceBench.cs`, CLI `bench`, `tools/ci/check_bench.py` | `Brick=22-bench`; `dora-bio bench --quick --json` passes the schema-1 check |
+| 23 | blocked-conv | `Nn/ConvLayer.cs` (register-blocked kernels) | `Brick=23-blocked-conv`: bit-identical to the reference row kernels; bar set before building: ≥ 1.5× faster on the 512² denoise and the training step |
+| 24 | perf-budget | `tools/ci/perf_budget.json` | `Brick=24-perf-budget`; a full `bench` stays within the budgets |
 
 Gates 11–15 and 21 need the dataset (the reproductions in gates 15 and 21 also need the weights from `tools/experiments/`) (`tools/fetch_fmd.sh`, about 9 GB into the gitignored `data/fmd/`). Without it, their
 data-dependent part reports SKIPPED (exit code 77) while the pins, unit tests and RESULTS.md checks still run. CI has
@@ -126,6 +129,7 @@ tools/experiments/p3_vst.sh                               # P3: with and without
 tools/experiments/p4_arch.sh                              # P4: U-Net vs dilated network (~21 min CPU)
 dotnet tools/DoraBio.Cli/bin/Release/net8.0/dora-bio.dll fmd-noise --root data/fmd   # is the real noise pixel-independent?
 dotnet tools/DoraBio.Cli/bin/Release/net8.0/dora-bio.dll diagnose --in IMAGE          # the same question, without ground truth
+dotnet tools/DoraBio.Cli/bin/Release/net8.0/dora-bio.dll bench --json bench.json   # timings (~1 min; --quick: seconds)
 dotnet test DoraBio.sln                                   # all tests at once, ~5 s
 dotnet run --project tools/DoraBio.Cli -c Release -- synth --out data/synth --count 10 --size 256
 dotnet run --project tools/DoraBio.Cli -c Release -- train --data data/synth --out runs/w.bin --mode n2v

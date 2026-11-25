@@ -14,7 +14,7 @@ settled first, and so every phase builds only on phases that are already green.
 | **P2** | Real-data truth (FMD) | performance on real microscopes is unmeasured | ✅ done: bricks 11–13, [results](docs/RESULTS.md) on 48 held-out FMD images |
 | **P3** | Noise-model fidelity | Noise2Void's assumptions failing on real cameras (measured in P2 on widefield) | ✅ done: bricks 14–17, [results](docs/RESULTS.md#p3-correlated-noise-and-structured-blind-spots) |
 | **P4** | Model capacity (U-Net) | the small CNN being the ceiling | ✅ done: bricks 18–21, [results](docs/RESULTS.md#p4-a-u-net-against-the-dilated-network) |
-| **P5** | Performance | **slowness on large frames and stacks** | ⏭ next |
+| **P5** | Performance | **slowness on large frames and stacks** | 🚧 in progress: gates 22–24 defined |
 | **P6** | Stacks, time-lapse, batch | single 2-D frames only | planned |
 | **P7** | Analysis UX | can see but can't measure or export | planned |
 | **P8** | Model and session management | adaptation lost on restart; no way back to a known-good model | planned |
@@ -141,9 +141,9 @@ default would be a new rule chosen after seeing the data, so it was left for a d
 
 | Brick | Delivers | Gate |
 |---|---|---|
-| 22 `bench` | `dora-bio bench`: denoise and train-step timings as JSON | runs in gate 6; JSON schema validated |
-| 23 `intra-image-parallel` | parallelize within a single large tile (by output channel); optional im2col + blocked matrix multiply | bit-exact against the current path on the tiling and gradient tests; faster in `bench` |
-| 24 `perf-budget` | loose regression budgets in CI (e.g. 512² denoise ≤ 1.0 s, train step ≤ 0.5 s on the CI runner) | fails if over budget |
+| 22 `bench` | `dora-bio bench`: denoise and train-step timings as JSON (both architectures, both training modes) | runs in gate 22; JSON schema validated (`tools/ci/check_bench.py`) |
+| 23 `blocked-conv` | register-blocked direct convolution: 8 output channels × 8 pixels of accumulators in registers, so each input value is loaded once per tap instead of once per output channel (forward, weight gradients, input gradients). Tiles are already parallel, so this attacks the real limit: memory traffic, at about 8% of the CPU's arithmetic peak | **bit-identical** to the current kernels, kept as a test reference (same per-pixel summation order, no fused multiply-add); **bar set before building:** at least 1.5× faster on the 512² denoise and on the training step, median of `bench` on the same machine |
+| 24 `perf-budget` | loose time budgets (`tools/ci/perf_budget.json`), checked locally and in CI | fails if any `bench` timing is over budget |
 
 **Later, optional:** GPU inference via Godot compute shaders. Its gate would be numerical agreement with the CPU path.
 
