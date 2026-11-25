@@ -17,15 +17,17 @@ All numbers come from this repo, run on a 4-core cloud VM with no GPU.
 
 | Check | Result |
 |---|---|
-| Core unit tests (`dotnet test`) | 70 passing in ~4 s, including finite-difference gradient checks (mutation-tested) |
-| Brick gates (`./bricks.sh`) | all 11 green; documentation of every public member is enforced by the build |
-| Gates can fail (`./bricks.sh --self-test`) | one planted bug per gate 0–7, all 9 caught (after a clean control copy passes) |
+| Core unit tests (`dotnet test`) | 85 passing in ~5 s, including finite-difference gradient checks (mutation-tested) |
+| Brick gates (`./bricks.sh`) | all 14 green (gates 11–13 with the FMD data present); documentation of every public member is enforced by the build |
+| Gates can fail (`./bricks.sh --self-test`) | one planted bug per gate 0–7 and 11–13 (two for gate 0), all 12 caught (after a clean control copy passes) |
 | CI (GitHub Actions) | all gates incl. headless Godot, on PRs into `main`, pushes to `main` and manual runs (docs-only changes skipped): [run #1](https://github.com/Andraszao/project-dora-ml/actions/runs/45617118232) green in 150 s of runner time, 0 billable minutes (public repo) |
 | Codecs vs. independent encoders | TIFF/PNG fixtures written by Pillow, ImageMagick and libtiff decode exactly |
 | Tiled vs. whole-image inference | identical (≤1e-5) for ragged tiles, tiles smaller than the receptive field, etc. |
 | Training reproducibility | two runs with the same seed produce bit-identical weights |
 | Bundled model training | Noise2Void on 10 synthetic 256 px frames, reached the 8 dB "mastery" target at epoch 25 in 5 min |
 | Held-out evaluation (4 unseen synthetic FOVs) | noisy **20.89 dB / SSIM 0.223** → bilateral **28.43 / 0.677** → DORA **30.21 / 0.809** |
+| **Real microscope data** (FMD, 48 held-out images, raw noise level; [details](docs/RESULTS.md)) | noisy **27.22 dB / 0.543** → bilateral **30.22 / 0.752** → DORA supervised **33.47 / 0.873**. Noise2Void (no ground truth) **31.63 / 0.771**; the bundled synthetic model **32.15 / 0.818** |
+| Train/test leakage on FMD | `dora-bio fmd-check`: every test image is FOV 19 pixel for pixel, and FOV 19 never enters training |
 | Godot 4.5.1 .NET smoke test (headless) | loads model and sample, denoises off-thread, adapts, stays responsive; exit code 0 |
 | Speed | 512×384 frame in ~0.5 s (CLI and in-editor) |
 
@@ -50,7 +52,7 @@ and CI runs them all on PRs into `main`:
 ```bash
 cd dora-bio
 ./bricks.sh --list       # what each gate checks
-./bricks.sh              # run gates 0..8 in order, stop at the first red one
+./bricks.sh              # run every gate in order, stop at the first red one
 ./bricks.sh --only 5     # iterate on a single brick
 ./bricks.sh --self-test  # prove the gates can fail: one planted bug per gate, each must turn red
 ```
@@ -69,8 +71,18 @@ dora-bio denoise --weights godot/models/dora_bio_weights.bin --in my_image.tif -
 
 **Your own data.** Use TIFF (8/16/32-bit) or PNG. A training folder can be:
 - `noisy/` with optional `clean/`, matched by file name. Supervised training if every image has a clean match, otherwise Noise2Void.
-- The FMD dataset layout: `raw/<fov>/*.png` with `gt/<fov>/avg50.png`. This follows the published layout but **hasn't been tested on the real download yet**.
+- The [FMD dataset](docs/RESULTS.md#data) (`tools/fetch_fmd.sh` downloads it): the dataset root, one category, or `test_mix`. FMD's test FOV (19) is never used for training.
 - A flat folder of noisy images (Noise2Void only).
+
+**Real microscope data (FMD).** About 9 GB, downloaded and checksum-verified into the gitignored `data/fmd/`:
+
+```bash
+tools/fetch_fmd.sh                                   # needs drive.usercontent.google.com
+dora-bio fmd-check --root data/fmd                   # structure, and no train/test leakage
+dora-bio train     --data data/fmd --out runs/fmd.bin --mode supervised --seed 2026
+dora-bio fmd-eval  --weights runs/fmd.bin --root data/fmd    # held-out test_mix, per microscope type
+tools/experiments/p2_fmd.sh                          # every run in docs/RESULTS.md (~45 min CPU)
+```
 
 ## How it works
 
@@ -128,18 +140,26 @@ The plan this rebuild started from had a few errors. Where the build differs fro
 
 ## Roadmap
 
-[`PATHWAY.md`](PATHWAY.md) lays out phases P0–P10, from today's foundation (P0, done) through CI, validation on
-real FMD data, noise-model fidelity, a U-Net, performance, stacks, analysis tools, model management, more formats,
-and a release. Each phase is a set of gated bricks.
+[`PATHWAY.md`](PATHWAY.md) lays out phases P0–P10: the foundation (P0), CI (P1) and validation on real FMD data (P2)
+are done. Next come noise-model fidelity (P3, now aimed at the correlated noise P2 found), a U-Net, performance,
+stacks, analysis tools, model management, more formats, and a release. Each phase is a set of gated bricks.
 
 ## Honesty notes and limitations
 
 - **Everything shipped here is synthetic.** `godot/samples/synthetic_cells.tif` and the bundled weights come from
-  `SyntheticFluorescence` (procedural cells, filaments and puncta with Poisson–Gaussian noise). The held-out
-  numbers above are on synthetic data. **Performance on real microscopes has not been measured.** Use
-  **Adapt to sample**, or train on your data, and check with `dora-bio eval` on held-out FOVs that have ground truth.
-- Noise2Void assumes pixel-independent, zero-mean noise. Correlated noise (some sCMOS patterns, structured
-  artifacts) breaks this assumption and leaves residual structure.
+  `SyntheticFluorescence` (procedural cells, filaments and puncta with Poisson–Gaussian noise). Weights trained on
+  FMD aren't shipped (the data is CC BY-SA 4.0); `tools/experiments/p2_fmd.sh` retrains them.
+- **Real-data performance is measured on one public dataset (FMD), with one seed per configuration and a small
+  CPU-trained network** ([RESULTS.md](docs/RESULTS.md)). It is not a claim about your microscope: check with
+  `dora-bio eval` on held-out FOVs that have ground truth.
+- **Noise2Void fails on correlated noise, and real cameras produce it.** On FMD's widefield images neighbouring
+  pixels' noise is 0.6 correlated, and Noise2Void trained on them (27.78 dB) does worse than the synthetic model
+  (31.45 dB) and far worse than supervised training (32.28 dB). **Adapt to sample** uses Noise2Void, so the same
+  applies to it. There is no warning for this yet (P3 brick 14). If you have averaged frames as ground truth,
+  supervised training is the safer choice.
+- **DORA can make clean images worse.** On FMD's 16-frame averages, every DORA model scored below the unprocessed
+  input (the bundled model by 4.2 dB). It has no notion of "this image is already clean". Training on all noise
+  levels reduces the harm a lot for supervised models ([RESULTS.md](docs/RESULTS.md#2-graded-noise-progressive-noise)).
 - The "estimated noise σ" in the UI is Immerkær's white-noise estimate: a rough image-wide figure, not calibrated.
 - C# Godot projects **cannot export to the web** (Godot 4.5), so v2 targets desktop and mobile only.
 - CPU only. That's fine for 512² frames and small models; large stacks or 3D volumes would need GPU work.
