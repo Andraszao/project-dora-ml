@@ -275,15 +275,16 @@ The code prints "Panel actual size" at startup, so check that line before relyin
   None of the v1 scripts, MNIST data or `.dat` weights are used. v1 weights are rejected by v2's loader.
 - **Isolation:** `dora-bio/.gdignore` stops v1's Godot project from importing it, and `dora-bio/godot/project.godot`
   is a separate Godot project. Open that folder, not the repo root, to run v2.
-- **Built brick by brick:** `cd dora-bio && ./bricks.sh` runs 14 ordered gates (scaffold → nn → data → io →
-  inference → training → cli → godot-build → godot-smoke → ci-core → ci-godot → fmd-fetch → fmd-loader → fmd-eval)
-  and stops at the first failure. Gates 11–13 check the real FMD dataset when `dora-bio/tools/fetch_fmd.sh` has
+- **Built brick by brick:** `cd dora-bio && ./bricks.sh` runs 18 ordered gates (scaffold → nn → data → io →
+  inference → training → cli → godot-build → godot-smoke → ci-core → ci-godot → fmd-fetch → fmd-loader → fmd-eval →
+  n2v-diagnostic → structured-mask → vst → calibration) and stops at the first failure. P3 is in progress, so
+  gates 16–17 are red until their bricks are built. Gates 11–13 check the real FMD dataset when `dora-bio/tools/fetch_fmd.sh` has
   downloaded it (about 9 GB, gitignored); without it, their data checks report SKIPPED.
   CI (`.github/workflows/dora-bio.yml`) runs them all, with headless Godot, on PRs into `main`, pushes to `main`
   and manual runs (not on working-branch pushes or docs-only changes). Work on one brick at a time
   and commit only on green (rules in `dora-bio/CLAUDE.md`). In the cloud container the .NET 8 SDK comes from
   `apt install dotnet-sdk-8.0`. Gate 8 needs the Godot 4.5 .NET binary (`GODOT=…`), otherwise it is reported SKIPPED.
-- **Roadmap:** `dora-bio/PATHWAY.md` (phases P0–P10; P0, P1 and P2 done, P3 next).
+- **Roadmap:** `dora-bio/PATHWAY.md` (phases P0–P10; P0, P1 and P2 done, P3 in progress: bricks 14–15 done).
 - **Real-data results:** `dora-bio/docs/RESULTS.md`. On FMD's 48 held-out images, supervised DORA scores 33.47 dB
   against 30.22 for a bilateral filter. Noise2Void fails on widefield, whose noise is correlated between pixels.
 - **Rules, file map and gotchas:** `dora-bio/CLAUDE.md`. **Limitations:** `dora-bio/README.md`.

@@ -152,11 +152,13 @@ stacks, analysis tools, model management, more formats, and a release. Each phas
 - **Real-data performance is measured on one public dataset (FMD), with one seed per configuration and a small
   CPU-trained network** ([RESULTS.md](docs/RESULTS.md)). It is not a claim about your microscope: check with
   `dora-bio eval` on held-out FOVs that have ground truth.
-- **Noise2Void fails on correlated noise, and real cameras produce it.** On FMD's widefield images neighbouring
-  pixels' noise is 0.6 correlated, and Noise2Void trained on them (27.78 dB) does worse than the synthetic model
-  (31.45 dB) and far worse than supervised training (32.28 dB). **Adapt to sample** uses Noise2Void, so the same
-  applies to it. There is no warning for this yet (P3 brick 14). If you have averaged frames as ground truth,
-  supervised training is the safer choice.
+- **Plain Noise2Void fails on correlated noise, and real cameras produce it.** On FMD's widefield images
+  neighbouring pixels' noise is 0.6 correlated, and plain Noise2Void scores 27.97 dB there against 33.02 for
+  supervised training. DORA now detects this from the image alone (`dora-bio diagnose`, and on every image the app
+  loads). Structured blind spots (`--struct auto`) recover most of the gap on noisy input (31.76 dB), but they are
+  opt-in: they lose on clean input, and mixed data needs two networks
+  ([RESULTS.md](docs/RESULTS.md#p3-correlated-noise-and-structured-blind-spots)). **Adapt to sample** uses them
+  automatically on flagged images. If you have averaged frames as ground truth, supervised training is still best.
 - **DORA can make clean images worse.** On FMD's 16-frame averages, every DORA model scored below the unprocessed
   input (the bundled model by 4.2 dB). It has no notion of "this image is already clean". Training on all noise
   levels reduces the harm a lot for supervised models ([RESULTS.md](docs/RESULTS.md#2-graded-noise-progressive-noise)).

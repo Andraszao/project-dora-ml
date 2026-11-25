@@ -14,6 +14,13 @@ public sealed record ImagePair(GrayImage Noisy, GrayImage? Clean, string GroupId
     /// <summary>True when ground truth is available.</summary>
     public bool HasClean => Clean is not null;
 
+    /// <summary>
+    /// Structured blind-spot footprint for Noise2Void on this image, or null for a plain blind spot (the right choice
+    /// when its noise is independent between pixels). <see cref="Training.StructuredMasking"/> sets it on the images whose
+    /// noise <see cref="NoiseDiagnostics"/> finds correlated. Ignored by supervised training.
+    /// </summary>
+    public MaskFootprint? Footprint { get; init; }
+
     /// <summary>Throws if the clean image's size differs from the noisy one's.</summary>
     public void Validate()
     {
@@ -27,8 +34,13 @@ public sealed record ImagePair(GrayImage Noisy, GrayImage? Clean, string GroupId
     /// The suffix gives the train and validation halves of a spatially split FOV different group ids,
     /// so they stay apart.
     /// </remarks>
-    public ImagePair Crop(int x, int y, int w, int h, string suffix) =>
-        new(Noisy.Crop(x, y, w, h), Clean?.Crop(x, y, w, h), GroupId + suffix, Name + suffix);
+    public ImagePair Crop(int x, int y, int w, int h, string suffix) => this with
+    {
+        Noisy = Noisy.Crop(x, y, w, h),
+        Clean = Clean?.Crop(x, y, w, h),
+        GroupId = GroupId + suffix,
+        Name = Name + suffix,
+    };
 
     /// <summary>
     /// Normalizes both images with the map computed from the noisy image, because only the noisy image

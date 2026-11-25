@@ -113,6 +113,19 @@ public class FmdBenchmarkTests : IDisposable
     }
 
     [Fact]
+    public void ARoutedEvaluationPicksAModelPerImage()
+    {
+        // Routing to the same model for every image must score exactly like the single-model call.
+        int calls = 0;
+        var net = IdentityNet();
+        var routed = FmdBenchmark.Evaluate(noisy => { calls++; Assert.True(noisy.Length > 0); return net; },
+            Path.Combine(_root, "test_mix"), "raw");
+        var single = FmdBenchmark.Evaluate(net, Path.Combine(_root, "test_mix"), "raw");
+        Assert.Equal(4, calls);
+        Assert.Equal(single, routed);
+    }
+
+    [Fact]
     public void SummaryGroupsByModalityThenAll()
     {
         var summary = FmdBenchmark.Summarize(FmdBenchmark.Evaluate(IdentityNet(), Path.Combine(_root, "test_mix"), "raw"));

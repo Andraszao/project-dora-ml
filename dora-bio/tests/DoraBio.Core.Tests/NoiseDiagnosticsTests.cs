@@ -11,10 +11,10 @@ namespace DoraBio.Core.Tests;
 [Trait(Bricks.Trait, Bricks.NoiseDiagnostic)]
 public class NoiseDiagnosticsTests
 {
-    private static readonly SyntheticFluorescence.Frame Frame = SyntheticFluorescence.Generate(256, 256, seed: 11);
+    internal static readonly SyntheticFluorescence.Frame Frame = SyntheticFluorescence.Generate(256, 256, seed: 11);
 
     /// <summary>The frame's clean image plus its own noise smoothed along x (and, if asked, along y).</summary>
-    private static GrayImage SmoothedNoise(bool alongY)
+    internal static GrayImage SmoothedNoise(bool alongY)
     {
         var (noisy, clean) = (Frame.Noisy, Frame.Clean);
         int w = noisy.Width, h = noisy.Height;

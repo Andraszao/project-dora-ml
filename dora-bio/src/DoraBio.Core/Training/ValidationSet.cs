@@ -68,7 +68,8 @@ internal sealed class ValidationSet
             var clean = image.Clean?.Crop(x, y, _size, _size).Pixels;
             var masked = new float[noisy.Length];
             var mask = new float[noisy.Length];
-            BlindSpot.Apply(noisy, masked, mask, _size, config.MaskRatio, rng);
+            // The same blind spot as in training, so the Noise2Void validation loss scores what training optimizes.
+            BlindSpot.Apply(noisy, masked, mask, _size, config.MaskRatio, rng, footprint: image.Footprint);
             _patches.Add(new Patch(noisy, masked, mask, clean));
         }
 
@@ -78,6 +79,19 @@ internal sealed class ValidationSet
             throw new ArgumentException("Supervised training needs clean validation images.");
         if (HasClean)
             NoisyPsnr = Metrics.PsnrFromMse(_patches.Average(p => Metrics.Mse(p.Noisy, p.Clean!)));
+    }
+
+    /// <summary>Mean number of input pixels the blind spots changed per blind spot (1 for plain, more for structured).</summary>
+    internal double HiddenPixelsPerBlindSpot()
+    {
+        double changed = 0, centres = 0;
+        foreach (var p in _patches)
+            for (int i = 0; i < p.Noisy.Length; i++)
+            {
+                if (p.MaskedInput[i] != p.Noisy[i]) changed++;
+                if (p.Mask[i] == 1f) centres++;
+            }
+        return changed / Math.Max(1, centres);
     }
 
     /// <summary>Scores the network on every patch in parallel. Read-only with respect to the network.</summary>

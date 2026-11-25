@@ -45,7 +45,7 @@ godot/                         Godot 4.5 .NET project (open THIS folder in Godot
 
 Work follows [`PATHWAY.md`](PATHWAY.md): phases **P0 → P10**, each a group of bricks with gates. P0 (bricks 0–8),
 P1 (bricks 9–10, CI) and P2 (bricks 11–13, real FMD data) are done. **The current phase is P3 (noise-model
-fidelity)**, starting with brick 14 (`n2v-diagnostic`). Pick up the next unfinished brick of the current phase,
+fidelity)**: bricks 14–15 are done, 16 (`vst`) is next. Pick up the next unfinished brick of the current phase,
 follow the phase protocol there, and update its status table when a phase closes. Read `docs/RESULTS.md` before
 changing training or the model: it records what actually works on real data.
 
@@ -71,14 +71,14 @@ before anything is built on top.** `./bricks.sh` runs the gates in order and sto
 | 12 | fmd-loader | `Data/FmdDataset.cs` | `Brick=12-fmd` (miniature real-layout tree); with data: `dora-bio fmd-check` (structure + test_mix = FOV 19 pixel for pixel, FOV 19 never in training) |
 | 13 | fmd-eval | `FmdBenchmark.cs`, `tools/experiments/`, `docs/RESULTS.md` | `Brick=13-fmd-eval`; RESULTS.md exists; with data: its recorded synthetic-model evaluation and noise-correlation blocks reproduce exactly |
 | 14 | n2v-diagnostic | `NoiseDiagnostics.cs`, CLI `diagnose` / `fmd-diagnose`, the bridge's noise check on load | `Brick=14-n2v-diagnostic` (independent vs smoothed synthetic noise); with data: the blind verdict matches the ground-truth verdict on all 48 raw test images |
-| 15 | structured-mask | `Data/BlindSpot.cs`, `Data/PatchSampler.cs` | `Brick=15-structured-mask`; recorded FMD results meet the bar set in advance (widefield ≥ +1 dB, confocal and two-photon ≥ −0.2 dB vs plain Noise2Void); with data + weights: they reproduce |
+| 15 | structured-mask | `Data/BlindSpot.cs` (`MaskFootprint`), `ImagePair.Footprint`, `Training/StructuredMasking.cs`, CLI `--struct` / `--subset` / `--weights-correlated` | `Brick=15-structured-mask`; the recorded routed two-network results meet the bar set in advance (widefield ≥ +1 dB, confocal and two-photon ≥ −0.2 dB vs plain Noise2Void); with data + P3 weights: all three recorded blocks reproduce |
 | 16 | vst | (P3, not built yet) | `Brick=16-vst`: unit variance after the transform on synthetic data, exact unbiased inverse |
 | 17 | calibration | (P3, not built yet) | `Brick=17-calibration`: recovers the synthetic generator's gain, offset and read noise within 10% |
 
-Gates 15–17 stay red until their bricks are built (P3 is in progress), so a full run currently stops at the first of
+Gates 16–17 stay red until their bricks are built (P3 is in progress), so a full run currently stops at the first of
 them. Rule 2 still applies: a brick is done when `./bricks.sh N` is green.
 
-Gates 11–15 need the dataset (`tools/fetch_fmd.sh`, about 9 GB into the gitignored `data/fmd/`). Without it, their
+Gates 11–15 need the dataset (gate 15's reproduction also needs the weights from `tools/experiments/p3_struct.sh`) (`tools/fetch_fmd.sh`, about 9 GB into the gitignored `data/fmd/`). Without it, their
 data-dependent part reports SKIPPED (exit code 77) while the pins, unit tests and RESULTS.md checks still run. CI has
 no data and must not download it.
 
@@ -117,6 +117,7 @@ cd dora-bio
 tools/fetch_fmd.sh                                        # FMD dataset, ~9 GB, into data/fmd/ (needs drive.usercontent.google.com)
 dotnet tools/DoraBio.Cli/bin/Release/net8.0/dora-bio.dll fmd-eval --weights W.bin --root data/fmd   # held-out test_mix
 tools/experiments/p2_fmd.sh                               # retrain + evaluate every P2 model (~45 min CPU)
+tools/experiments/p3_struct.sh                            # P3: plain vs structured blind spots (~50 min CPU)
 dotnet tools/DoraBio.Cli/bin/Release/net8.0/dora-bio.dll fmd-noise --root data/fmd   # is the real noise pixel-independent?
 dotnet tools/DoraBio.Cli/bin/Release/net8.0/dora-bio.dll diagnose --in IMAGE          # the same question, without ground truth
 dotnet test DoraBio.sln                                   # all tests at once, ~5 s
@@ -150,11 +151,14 @@ cd godot && dotnet build && godot --headless --path . --import \
 8. **Validation is held out by FOV** (`ImagePair.GroupId`). Frames of one field of view never straddle the split.
 9. **Journey log lifecycle:** a session opens only when training starts. Every epoch is appended and saved.
    The session ends as `completed` or `failed: …`. Inference-only launches write nothing.
-10. **Never train on FMD's test FOV (19).** `FmdOptions.ExcludedFovs` defaults to it, the CLI doesn't expose it, and
+10. **Structured blind spots are opt-in** (`--struct auto`): on FMD they win on noisy input and lose on clean input,
+    and one network trained on mixed data loses on the independent images (docs/RESULTS.md, P3). Don't make them a
+    default without new held-out evidence. Choose footprints on validation data, never on test_mix.
+11. **Never train on FMD's test FOV (19).** `FmdOptions.ExcludedFovs` defaults to it, the CLI doesn't expose it, and
     gate 12 proves test_mix is FOV 19 and absent from the training plan. Report results on test_mix only.
-11. **Don't commit FMD data, or weights trained on it, without a license decision.** The data is CC BY-SA 4.0;
+12. **Don't commit FMD data, or weights trained on it, without a license decision.** The data is CC BY-SA 4.0;
     data/ and runs/ are gitignored. Credit Zhang et al., CVPR 2019 wherever FMD numbers appear.
-12. **Label synthetic things as synthetic.** The bundled sample and weights come from `SyntheticFluorescence`.
+13. **Label synthetic things as synthetic.** The bundled sample and weights come from `SyntheticFluorescence`.
     Don't describe them as real microscope data, and don't claim real-data accuracy that hasn't been measured.
 
 ## Godot ⇄ C# gotchas

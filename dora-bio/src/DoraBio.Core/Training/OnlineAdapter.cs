@@ -49,13 +49,21 @@ public sealed class OnlineAdapter
     }
 
     /// <summary>Runs <paramref name="steps"/> blind-spot steps on a normalized image; returns the loss per step.</summary>
-    public IReadOnlyList<double> Adapt(GrayImage normalizedImage, int steps, CancellationToken cancellation = default)
+    /// <param name="normalizedImage">The sample on screen, normalized like every DORA input.</param>
+    /// <param name="steps">Optimizer steps to run.</param>
+    /// <param name="cancellation">Checked between steps.</param>
+    /// <param name="footprint">
+    /// Structured blind spots for an image whose noise is correlated (see <see cref="NoiseDiagnostics"/>), or null for
+    /// plain ones. One image means one microscope, so this avoids the mixing problem RESULTS.md describes for P3.
+    /// </param>
+    public IReadOnlyList<double> Adapt(GrayImage normalizedImage, int steps, CancellationToken cancellation = default,
+        MaskFootprint? footprint = null)
     {
         if (steps < 1) throw new ArgumentOutOfRangeException(nameof(steps));
         if (normalizedImage.Width < PatchSize || normalizedImage.Height < PatchSize)
             throw new ArgumentException($"Image must be at least {PatchSize}×{PatchSize} to adapt on.");
 
-        var sampler = new PatchSampler([new ImagePair(normalizedImage, null, "current", "current")],
+        var sampler = new PatchSampler([new ImagePair(normalizedImage, null, "current", "current") { Footprint = footprint }],
             PatchSize, TrainingMode.Noise2Void, _maskRatio, _rng);
         var losses = new List<double>(steps);
         for (int s = 0; s < steps && !cancellation.IsCancellationRequested; s++)

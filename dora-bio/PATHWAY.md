@@ -12,7 +12,7 @@ settled first, and so every phase builds only on phases that are already green.
 | **P0** | Foundation | "does any of it work?" | ✅ done (`41e2c6f`): bricks 0–8 green, docs enforced |
 | **P1** | Continuous gates (CI) | regressions slipping in between sessions | ✅ done: bricks 9–10, [CI run #1](https://github.com/Andraszao/project-dora-ml/actions/runs/45617118232) green |
 | **P2** | Real-data truth (FMD) | performance on real microscopes is unmeasured | ✅ done: bricks 11–13, [results](docs/RESULTS.md) on 48 held-out FMD images |
-| **P3** | Noise-model fidelity | **Noise2Void's assumptions failing on real cameras** (measured in P2 on widefield) | 🚧 in progress: gates 14–17 defined |
+| **P3** | Noise-model fidelity | **Noise2Void's assumptions failing on real cameras** (measured in P2 on widefield) | 🚧 in progress: bricks 14–15 done ([results](docs/RESULTS.md#p3-correlated-noise-and-structured-blind-spots)), 16–17 next |
 | **P4** | Model capacity (U-Net) | the small CNN being the ceiling | planned |
 | **P5** | Performance | slowness on large frames and stacks | planned |
 | **P6** | Stacks, time-lapse, batch | single 2-D frames only | planned |
@@ -98,6 +98,7 @@ at all five FMD noise levels, not only on raw frames.
 |---|---|---|
 | 14 `n2v-diagnostic` | noise autocorrelation estimated from the noisy image alone (no ground truth); warn in the CLI and UI when neighbouring pixels' noise is correlated | flags correlated synthetic noise, stays quiet on i.i.d. noise; with data: same verdict as the ground-truth measurement on every raw test_mix image (`dora-bio fmd-diagnose`) |
 | 15 `structured-mask` | blind spot that also hides the correlated neighbours (structured Noise2Void masking, after Broaddus et al. 2020), applied automatically to the training images brick 14 flags, with its size picked on validation data (never on test_mix) | masking tests; **bar set before building:** on FMD test_mix (raw), +1 dB or more over plain Noise2Void on widefield, and no more than 0.2 dB lost on confocal or on two-photon. Gate 15 checks the bar on the recorded results and, with data and weights, that they reproduce |
+| 15 follow-up (bar set 2026-11-25, after the first design missed) | the first design (one network, structured blind spots on the flagged images) met the widefield bar (+3.41 dB) but lost 1.15 dB on confocal. Second design: **two networks routed by the noise check**: plain Noise2Void trained on the images the check calls independent, structured (diamond-2, the footprint validation chose) on the ones it calls correlated; at inference each image goes to the network its own noise check picks | **the same bar, unchanged:** vs the one plain Noise2Void network, widefield +1 dB or more, confocal and two-photon −0.2 dB at worst. Disclosed in RESULTS.md as a second look at test_mix |
 | 16 `vst` | generalized Anscombe transform (Poisson–Gaussian) with exact unbiased inverse, as an optional preprocessing step | after the transform, residual variance ≈ 1 across intensity bins on synthetic data; round-trip error ≤ 1e-4 |
 | 17 `calibration` | estimate gain, offset and read noise from the image (or from a dark/flat frame) | recovers `SyntheticOptions` gain/offset/read noise within 10% |
 

@@ -165,6 +165,89 @@ v1's rising-rate schedule is the one choice that could be measured the same way;
 carry over is v1's milestone loop (progressive targets). It ran in every training here and never declared mastery
 on real data (see below).
 
+## P3: correlated noise and structured blind spots
+
+Phase P3 of [`PATHWAY.md`](../PATHWAY.md), measured 2026-11-25 with P2's budget and seed (30 epochs × 50 steps ×
+batch 16 × 64 px, seed 2026, 4 raw frames per FOV, FOV 19 never trained on) and P3's validation fix.
+Reproduce: `tools/experiments/p3_struct.sh`.
+
+### Spotting correlated noise without ground truth (brick 14)
+
+`dora-bio diagnose --in IMAGE` estimates the noise correlation from the noisy image alone: 16 px tiles, each tile's
+best-fit plane removed, the flattest quarter kept, the median correlation per offset. Noise counts as correlated at
+0.4 or more one pixel away. On the 48 raw test images it agrees with the ground-truth measurement every time:
+widefield estimates 0.557–0.578 (truth 0.58–0.65), confocal 0.262 at most and two-photon 0.155 at most. Gate 14
+re-checks this whenever the data is present. The Godot app runs the check on every loaded image.
+
+Limits: small tiles keep cell structure out but bias the estimate low, about half the truth at two pixels. On
+cleaner inputs the check false-alarms on densely stained images: on 16-frame averages it reads 0.57 on
+Confocal_BPAE_G, where even the flattest tiles contain structure. (There the ground truth isn't reliable either: the
+leftover noise is so small that the difference from the 50-frame average likely includes drift between captures.)
+
+### The validation set was one category (fixed)
+
+P2's 16 validation patches all came from 4 FOVs of Confocal_BPAE_B, so every training decision (best epoch,
+learning-rate decay, early stopping) was made on confocal data alone. They now cover all 46 held-out FOVs (48 patches).
+Retrained with the fix, the same supervised recipe scores **33.75 dB** on test_mix (was 33.47), with widefield
+**33.02** (was 32.28). Plain Noise2Void barely moves: 31.68 (was 31.63).
+
+### Structured blind spots (brick 15)
+
+A structured blind spot hides the pixel's correlated neighbours too, and fills every hidden pixel from a pixel that
+no footprint hides. It only goes on the training images the noise check flags. **The bar was set before anything was
+built and never changed** (PATHWAY.md): vs one plain Noise2Void network on test_mix (raw), widefield +1 dB or more,
+confocal and two-photon −0.2 dB at worst.
+
+The footprint was chosen on validation PSNR (held-out *training* FOVs), never on test_mix: square-1 26.78 dB,
+**diamond-2 26.87 dB**, square-2 26.76 dB, against 25.39 dB for plain blind spots. Diamond-2 hides the 12 nearest
+neighbours, which covers every offset where widefield noise is correlated by 0.17 or more.
+
+| Noise2Void on raw test_mix | Networks | Confocal (20) | Two-photon (16) | Widefield (12) | All 48 |
+|---|---|---|---|---|---|
+| Plain blind spots | 1 | 33.77 / 0.881 | 31.85 / 0.800 | 27.97 / 0.563 | 31.68 / 0.774 |
+| Design 1: structured blind spots on the flagged images | 1 | 32.62 / 0.855 | 31.75 / 0.812 | 31.38 / 0.792 | 32.02 / 0.825 |
+| **Design 2: two networks, routed by the noise check** | 2 | **34.09 / 0.886** | **32.46 / 0.819** | **31.76 / 0.807** | **32.97 / 0.844** |
+| Supervised, for reference (needs ground truth) | 1 | 34.38 / 0.898 | 33.52 / 0.878 | 33.02 / 0.852 | 33.75 / 0.880 |
+
+- **Design 1 missed the bar.** Widefield gained 3.41 dB, but confocal lost 1.15 dB although no confocal image was
+  masked differently. One network has to learn when to trust a pixel's nearest neighbours, and it can't fully tell
+  the two kinds of image apart.
+- **Design 2 meets it:** widefield +3.79 dB, confocal +0.32 dB, two-photon +0.61 dB. One network trains with plain
+  blind spots on the images the noise check calls independent, the other with structured ones (diamond-2) on the
+  images it calls correlated. Each test image goes to the network its own noise check picks (12 of 48 routed to the
+  correlated one, exactly the widefield images). Confocal and two-photon gain too: their network never has to
+  accommodate widefield.
+- **Disclosed:** design 2 was devised after seeing design 1's test results, so test_mix was looked at twice under the
+  same bar. It also costs twice the training (two networks, each with the full step budget).
+- **Without any ground truth, Noise2Void is now within 0.8 dB of supervised training** (32.97 vs 33.75 dB), and the
+  widefield gap shrinks from 5.05 to 1.26 dB. It beats the bilateral filter by 2.75 dB and the bundled synthetic
+  model by 0.82 dB.
+- Every footprint candidate was also scored on test_mix, for completeness only (not used to choose): with design 1,
+  square-1 gives 31.89 dB overall (widefield 30.69), square-2 32.16 (31.42).
+
+### At cleaner inputs, structured blind spots hurt
+
+Mean PSNR (dB) / SSIM over all 48 test images at each test noise level:
+
+| Model | raw (1 capture) | avg2 | avg4 | avg8 | avg16 |
+|---|---|---|---|---|---|
+| Noisy input | 27.22 / 0.543 | 30.08 / 0.680 | 32.86 / 0.798 | 36.03 / 0.889 | 39.70 / 0.949 |
+| Bilateral filter | 30.22 / 0.752 | 32.45 / 0.830 | 34.88 / 0.894 | 37.39 / 0.935 | 40.57 / 0.964 |
+| Noise2Void, plain (1 network) | 31.68 / 0.774 | 33.21 / 0.841 | 34.89 / 0.891 | 36.33 / 0.920 | 37.89 / 0.938 |
+| Noise2Void, routed (2 networks) | 32.97 / 0.844 | 33.85 / 0.879 | 34.67 / 0.885 | 35.13 / 0.894 | 35.49 / 0.884 |
+| Supervised, raw frames only (reference) | 33.75 / 0.880 | 34.19 / 0.895 | 35.04 / 0.903 | 35.32 / 0.903 | 35.83 / 0.904 |
+
+The routed pair wins at raw and avg2 and loses from avg4 up, for two reasons. A structured network can't use the
+nearest pixels, so it over-smooths once the noise is small: on widefield at avg16 it scores 36.13 dB, where plain
+Noise2Void scores 40.10. And the noise check's false alarms grow as the noise shrinks, so more dense confocal and
+two-photon images get routed to that network (16 of 48 at avg4 and avg8, 20 at avg16).
+
+**Verdict:** structured blind spots are worth it for noisy images with correlated noise, the case Noise2Void is
+for. They are opt-in rather than the default, because they lose on cleaner inputs. The CLI recommends
+`--struct auto` when the noise check flags the training images, and the two-network recipe when the data is mixed.
+"Adapt to sample" uses them automatically on images the check flags (one image is one microscope, so the mixing
+problem doesn't arise).
+
 ## What these results do and don't show
 
 - **One seed per configuration.** Differences of a few tenths of a dB may be run-to-run variation rather than real
@@ -182,10 +265,10 @@ on real data (see below).
 - **Weights trained on FMD are not published** (CC BY-SA terms for derived models are a separate decision). The
   bundled model stays the synthetic one.
 
-## Reproducibility check (gate 13)
+## Reproducibility checks (gates 13 and 15)
 
-The blocks above marked `fmd-noise` and below marked `fmd-eval-synthetic` are verbatim program output.
-`bricks.sh` gate 13 re-runs both whenever the data is present and requires an exact match. The block below is
+The blocks marked `fmd-noise` above and the blocks below are verbatim program output. `bricks.sh` gate 13 re-runs
+the first two whenever the data is present and requires an exact match. The block below is
 `dora-bio fmd-eval --weights godot/models/dora_bio_weights.bin --root data/fmd --levels raw` for the bundled
 synthetic model:
 
@@ -199,3 +282,46 @@ WideField   12   25.23 / 0.374   26.53 / 0.466   31.45 / 0.775
 all         48   27.22 / 0.543   30.22 / 0.752   32.15 / 0.818
 ```
 <!-- /fmd-eval-synthetic -->
+
+Gate 15 checks the bar on the last two blocks, and re-runs all three when the P3 weights are present (they come
+from `tools/experiments/p3_struct.sh` and stay in the gitignored `runs/p3/`). Plain Noise2Void,
+`fmd-eval --weights runs/p3/n2v_plain.bin`:
+
+<!-- p3-n2v-plain -->
+```text
+test_mix level raw: mean PSNR (dB) / SSIM vs ground truth, 8-bit scale
+modality     n  noisy           bilateral       DORA           
+Confocal    20   29.13 / 0.701   31.74 / 0.872   33.77 / 0.881
+TwoPhoton   16   26.32 / 0.473   31.07 / 0.816   31.85 / 0.800
+WideField   12   25.23 / 0.374   26.53 / 0.466   27.97 / 0.563
+all         48   27.22 / 0.543   30.22 / 0.752   31.68 / 0.774
+```
+<!-- /p3-n2v-plain -->
+
+Design 1, one network with structured blind spots on the flagged images, `fmd-eval --weights runs/p3/n2v_struct.bin`:
+
+<!-- p3-n2v-shared -->
+```text
+test_mix level raw: mean PSNR (dB) / SSIM vs ground truth, 8-bit scale
+modality     n  noisy           bilateral       DORA           
+Confocal    20   29.13 / 0.701   31.74 / 0.872   32.62 / 0.855
+TwoPhoton   16   26.32 / 0.473   31.07 / 0.816   31.75 / 0.812
+WideField   12   25.23 / 0.374   26.53 / 0.466   31.38 / 0.792
+all         48   27.22 / 0.543   30.22 / 0.752   32.02 / 0.825
+```
+<!-- /p3-n2v-shared -->
+
+Design 2, two networks routed by the noise check,
+`fmd-eval --weights runs/p3/n2v_indep.bin --weights-correlated runs/p3/n2v_corr.bin`:
+
+<!-- p3-n2v-routed -->
+```text
+test_mix level raw: mean PSNR (dB) / SSIM vs ground truth, 8-bit scale
+modality     n  noisy           bilateral       DORA           
+Confocal    20   29.13 / 0.701   31.74 / 0.872   34.09 / 0.886
+TwoPhoton   16   26.32 / 0.473   31.07 / 0.816   32.46 / 0.819
+WideField   12   25.23 / 0.374   26.53 / 0.466   31.76 / 0.807
+all         48   27.22 / 0.543   30.22 / 0.752   32.97 / 0.844
+routed by the noise check: 12 of 48 images to the correlated-noise model
+```
+<!-- /p3-n2v-routed -->

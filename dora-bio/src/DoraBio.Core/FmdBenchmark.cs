@@ -56,6 +56,17 @@ public static class FmdBenchmark
     /// <param name="level">Noise level: raw, avg2, avg4, avg8 or avg16.</param>
     /// <param name="tileCore">Tile core size for inference.</param>
     public static List<FmdScore> Evaluate(DenoisingNet net, string testMixDir, string level = "raw",
+        int tileCore = TiledInference.DefaultTileCore) => Evaluate(_ => net, testMixDir, level, tileCore);
+
+    /// <summary>
+    /// Like <see cref="Evaluate(DenoisingNet, string, string, int)"/>, but <paramref name="pickNet"/> chooses the model for
+    /// each image from the noisy image alone (for example by its noise check), the way a deployed system would have to.
+    /// </summary>
+    /// <param name="pickNet">Given an image's noisy pixels (original units), returns the model that denoises it.</param>
+    /// <param name="testMixDir">The test_mix folder.</param>
+    /// <param name="level">Noise level: raw, avg2, avg4, avg8 or avg16.</param>
+    /// <param name="tileCore">Tile core size for inference.</param>
+    public static List<FmdScore> Evaluate(Func<GrayImage, DenoisingNet> pickNet, string testMixDir, string level = "raw",
         int tileCore = TiledInference.DefaultTileCore)
     {
         var scores = new List<FmdScore>();
@@ -65,7 +76,7 @@ public static class FmdBenchmark
             var clean = ImageLoader.Load(p.CleanPath);
             var map = Normalization.FromPercentiles(noisy.Pixels);
             var input = Normalization.Apply(noisy, map);
-            var dora = ToSensorUnits(TiledInference.Denoise(net, input, tileCore), map);
+            var dora = ToSensorUnits(TiledInference.Denoise(pickNet(noisy), input, tileCore), map);
             var bilateral = ToSensorUnits(BilateralBaseline.FilterAuto(input), map);
 
             scores.Add(new FmdScore(p.Name, p.GroupId, ModalityOf(p.GroupId),

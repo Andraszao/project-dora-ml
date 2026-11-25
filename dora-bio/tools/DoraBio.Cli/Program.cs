@@ -25,9 +25,13 @@ public static class Program
                    [--init WEIGHTS.bin]   (fine-tune existing weights instead of starting fresh)
                    [--describe TEXT]      (what the data is; stored in the weights' provenance)
                    [--augment dihedral|v1] (v1 = v1's ±15° rotation + 0.85-1.15 scale, nearest neighbour; for comparison)
+                   [--struct off|auto|always] [--footprint diamond-2]  (Noise2Void: structured blind spots for
+                    correlated noise; auto = only on images whose noise check flags them)
+                   [--subset correlated|independent]  (train only on the images whose noise check says so)
                    FMD folders: [--fmd-frames 4] [--fmd-levels raw,avg2,avg4,avg8,avg16] [--fmd-categories A,B]
                    (FOV 19, FMD's test FOV, is always excluded from training)
           denoise  --weights WEIGHTS.bin --in IMAGE --out OUT.tif [--baseline BASELINE.tif] [--tile 128]
+                   [--weights-correlated W2.bin]  (used instead if the image's noise check says correlated)
                    Output is float32 TIFF in the input's original intensity units.
           eval     --weights WEIGHTS.bin --data DIR
                    Per-image PSNR/SSIM of noisy, bilateral and DORA against clean (needs clean images).
@@ -37,6 +41,7 @@ public static class Program
           fmd-check --root data/fmd
                    Verify a downloaded FMD dataset: structure, test_mix, and no train/test leakage.
           fmd-eval  --weights WEIGHTS.bin --root data/fmd [--levels raw,avg2,...] [--per-image]
+                   [--weights-correlated W2.bin]  (images whose noise check says correlated go to W2 instead)
                    PSNR/SSIM (8-bit scale) on FMD's held-out test_mix: noisy vs bilateral vs DORA, per microscope type.
           fmd-noise --root data/fmd [--levels raw,avg2,...]
                    How correlated test_mix's real noise is between neighbouring pixels (Noise2Void assumes 0).
@@ -155,14 +160,49 @@ public static class Program
             net = DenoisingNet.Create(new NetConfig(o.Int("features", defaults.Features), defaults.Dilations), config.Seed);
         }
 
-        if (mode == TrainingMode.Noise2Void) ReportNoiseCheck(dataset);
+        string structure = "";
+        // --subset: train only on the images the noise check calls correlated (or independent), for P3's routed design.
+        if (o.StringOrNull("subset") is { } subset)
+        {
+            bool wantCorrelated = subset switch
+            {
+                "correlated" => true,
+                "independent" => false,
+                _ => throw new ArgumentException($"Unknown --subset '{subset}' (use correlated or independent)."),
+            };
+            var all = StructuredMasking.Diagnose(dataset);
+            dataset = dataset.Where((_, i) => all[i] == wantCorrelated).ToList();
+            if (dataset.Count == 0) throw new ArgumentException($"No training image's noise check says {subset}.");
+            structure += $"; only the {dataset.Count} images whose noise check says {subset}";
+            Console.WriteLine($"🔎 --subset {subset}: training on {dataset.Count} of {all.Length} images");
+        }
+        if (mode == TrainingMode.Noise2Void)
+        {
+            var verdicts = StructuredMasking.Diagnose(dataset);
+            ReportNoiseCheck(verdicts);
+            var structMode = o.String("struct", "off") switch
+            {
+                "off" => StructuredMaskMode.Off,
+                "auto" => StructuredMaskMode.Auto,
+                "always" => StructuredMaskMode.Always,
+                var s => throw new ArgumentException($"Unknown --struct '{s}' (use off, auto or always)."),
+            };
+            var footprint = o.StringOrNull("footprint") is { } f ? MaskFootprint.Parse(f) : StructuredMasking.DefaultFootprint;
+            dataset = StructuredMasking.Assign(dataset, structMode, footprint, verdicts);
+            int structured = dataset.Count(d => d.Footprint is not null);
+            if (structured > 0)
+            {
+                structure += $"; structured blind spots ({footprint}) on {structured} of {dataset.Count} images";
+                Console.WriteLine($"🧩 structured blind spots ({footprint}) on {structured} of {dataset.Count} training images");
+            }
+        }
 
         int withClean = dataset.Count(d => d.HasClean);
         string cleanUse = withClean == 0 ? "no clean images"
             : mode == TrainingMode.Noise2Void ? $"{withClean} clean images used only to score validation"
             : $"{withClean} clean targets";
-        string description = o.StringOrNull("describe")
-            ?? $"{dataset.Count} images from '{Path.GetFileName(Path.GetFullPath(dataDir))}' ({cleanUse})";
+        string description = (o.StringOrNull("describe")
+            ?? $"{dataset.Count} images from '{Path.GetFileName(Path.GetFullPath(dataDir))}' ({cleanUse})") + structure;
         Console.WriteLine($"🧬 {net.Config}, {net.ParameterCount:N0} parameters");
         Console.WriteLine($"📚 {description}; mode {mode}; {config.MaxEpochs} epochs × {config.StepsPerEpoch} steps × batch {config.BatchSize} @ {config.PatchSize}px");
 
@@ -191,6 +231,12 @@ public static class Program
         var raw = ImageLoader.Load(o.Required("in"));
         var map = Normalization.FromPercentiles(raw.Pixels);
         var input = Normalization.Apply(raw, map);
+        // --weights-correlated: route by the noise check, as fmd-eval does (P3's two-network design).
+        if (o.StringOrNull("weights-correlated") is { } correlatedPath && IsCorrelated(raw))
+        {
+            (net, info) = WeightsFile.Load(correlatedPath);
+            Console.WriteLine("🔎 noise check: correlated, so the --weights-correlated model is used");
+        }
 
         var clock = Stopwatch.StartNew();
         var denoised = TiledInference.Denoise(net, input, o.Int("tile", TiledInference.DefaultTileCore));
@@ -261,20 +307,39 @@ public static class Program
     private static int FmdEval(Options o)
     {
         var (net, _) = WeightsFile.Load(o.Required("weights"));
+        // --weights-correlated: a second model for the images whose noise check says correlated (P3's routed design).
+        var correlatedNet = o.StringOrNull("weights-correlated") is { } c ? WeightsFile.Load(c).Net : null;
+        int routed = 0;
+        DenoisingNet Pick(GrayImage noisy)
+        {
+            if (correlatedNet is null || !IsCorrelated(noisy)) return net;
+            routed++;
+            return correlatedNet;
+        }
         string testMix = Path.Combine(o.Required("root"), "test_mix");
         var levels = o.String("levels", "raw").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         foreach (string level in levels)
         {
-            var scores = FmdBenchmark.Evaluate(net, testMix, level);
+            routed = 0;
+            var scores = FmdBenchmark.Evaluate(Pick, testMix, level);
             Console.WriteLine($"test_mix level {level}: mean PSNR (dB) / SSIM vs ground truth, 8-bit scale");
             Console.WriteLine($"{"modality",-10} {"n",3}  {"noisy",-15} {"bilateral",-15} {"DORA",-15}");
             foreach (var (group, count, m) in FmdBenchmark.Summarize(scores))
                 Console.WriteLine($"{group,-10} {count,3}  {m.NoisyPsnr,6:0.00} / {m.NoisySsim:0.000}  {m.BilateralPsnr,6:0.00} / {m.BilateralSsim:0.000}  {m.DoraPsnr,6:0.00} / {m.DoraSsim:0.000}");
+            if (correlatedNet is not null)
+                Console.WriteLine($"routed by the noise check: {routed} of {scores.Count} images to the correlated-noise model");
             if (o.Has("per-image"))
                 foreach (var s in scores)
                     Console.WriteLine($"  {s.Name,-40} {s.NoisyPsnr,6:0.00} {s.BilateralPsnr,6:0.00} {s.DoraPsnr,6:0.00}");
         }
         return 0;
+    }
+
+    /// <summary>The noise check's verdict; images too small to judge count as independent.</summary>
+    private static bool IsCorrelated(GrayImage noisy)
+    {
+        try { return NoiseDiagnostics.Diagnose(noisy).Correlated; }
+        catch (ArgumentException) { return false; }
     }
 
     /// <summary>
@@ -314,19 +379,16 @@ public static class Program
     /// Before Noise2Void training: how many training images have noise that is correlated between pixels, which
     /// Noise2Void can't remove (see <see cref="NoiseDiagnostics"/>). A warning, never an error.
     /// </summary>
-    private static void ReportNoiseCheck(IReadOnlyList<ImagePair> dataset)
+    private static void ReportNoiseCheck(bool?[] verdicts)
     {
-        var verdicts = new bool?[dataset.Count];
-        Parallel.For(0, dataset.Count, i =>
-        {
-            try { verdicts[i] = NoiseDiagnostics.Diagnose(dataset[i].Noisy).Correlated; }
-            catch (ArgumentException) { verdicts[i] = null; }   // too small to judge
-        });
         int judged = verdicts.Count(v => v is not null), correlated = verdicts.Count(v => v == true);
         Console.WriteLine($"🔎 noise check: {correlated} of {judged} training images have noise correlated between pixels");
-        if (correlated > 0)
-            Console.WriteLine("⚠️ Noise2Void assumes independent noise and will keep part of the correlated noise in those images. " +
-                              "Use --mode supervised if you have clean targets (see docs/RESULTS.md).");
+        if (correlated == 0) return;
+        Console.WriteLine("⚠️ Noise2Void assumes independent noise and will keep part of the correlated noise in those images.");
+        Console.WriteLine(correlated == judged
+            ? "   Use --struct auto (structured blind spots: +3.8 dB on FMD widefield), or --mode supervised if you have clean targets."
+            : "   Mixed data: one network does worse on the independent images. Train two, with --subset independent and with " +
+              "--subset correlated --struct auto, then route with --weights-correlated (see docs/RESULTS.md, P3).");
     }
 
     /// <summary><c>diagnose</c>: the noise check for one image, from the noisy image alone.</summary>

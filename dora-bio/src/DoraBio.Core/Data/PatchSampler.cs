@@ -56,7 +56,8 @@ public sealed class TrainingBatch
 /// <summary>
 /// Draws random patches with random dihedral augmentation, choosing each image with probability
 /// proportional to its area.
-/// Noise2Void: input = masked noisy, target = noisy, mask = blind spots.
+/// Noise2Void: input = masked noisy, target = noisy, mask = blind spots (structured if the image has a
+/// <see cref="ImagePair.Footprint"/>).
 /// Supervised: input = noisy, target = clean, mask = all ones.
 /// </summary>
 public sealed class PatchSampler
@@ -165,7 +166,7 @@ public sealed class PatchSampler
         else
         {
             _noisyPatch.CopyTo(target);
-            BlindSpot.Apply(_noisyPatch, input, mask, PatchSize, MaskRatio, _rng);
+            BlindSpot.Apply(_noisyPatch, input, mask, PatchSize, MaskRatio, _rng, footprint: image.Footprint);
         }
     }
 

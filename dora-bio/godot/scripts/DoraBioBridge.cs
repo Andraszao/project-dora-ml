@@ -212,12 +212,14 @@ public partial class DoraBioBridge : Node
         if (patch < 16) { EmitSignal(SignalName.JobFailed, "Image is too small to adapt on (need at least 16×16)."); return; }
         _adapter ??= new OnlineAdapter(_net, AdaptLearningRate, patchSize: patch);
         var adapter = _adapter;
-        if (_noise?.Correlated == true)
-            WriteLog("⚠️ adapting anyway, but this image's noise is correlated between pixels: Noise2Void will keep part of it");
+        // Correlated noise: structured blind spots, which hide the correlated neighbours too (P3, docs/RESULTS.md).
+        var footprint = _noise?.Correlated == true ? StructuredMasking.DefaultFootprint : null;
+        if (footprint is not null)
+            WriteLog($"🧩 this image's noise is correlated between pixels, so adaptation uses structured blind spots ({footprint})");
 
         RunJob("Adapting to sample", token =>
         {
-            var losses = adapter.Adapt(image, Math.Max(1, steps), token);
+            var losses = adapter.Adapt(image, Math.Max(1, steps), token, footprint);
             return () =>
             {
                 _unsaved = true;

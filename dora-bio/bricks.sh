@@ -171,23 +171,27 @@ gate_14() {   # n2v-diagnostic
 
 gate_15() {   # structured-mask
   test_gate 15-structured-mask || return 1
-  # The bar was set before the brick was built (PATHWAY.md, P3): on FMD test_mix (raw), structured masking must gain
-  # at least 1 dB over plain Noise2Void on widefield, and lose at most 0.2 dB on confocal and on two-photon.
-  local m plain struct bar
+  # The bar was set before building (PATHWAY.md, P3) and never changed: on FMD test_mix (raw), vs one plain Noise2Void
+  # network, widefield must gain at least 1 dB and confocal and two-photon lose at most 0.2 dB. The first design (one
+  # network, structured blind spots on the flagged images) missed it and stays recorded as p3-n2v-shared; the bar is
+  # checked on the second design, two networks routed by the noise check (p3-n2v-routed).
+  local m plain routed bar
   for m in WideField Confocal TwoPhoton; do
     plain="$(recorded_block p3-n2v-plain | awk -v m="$m" '$1 == m { print $9 }')"
-    struct="$(recorded_block p3-n2v-struct | awk -v m="$m" '$1 == m { print $9 }')"
-    [[ -n "$plain" && -n "$struct" ]] || { echo ">> docs/RESULTS.md needs p3-n2v-plain and p3-n2v-struct fmd-eval blocks"; return 1; }
+    routed="$(recorded_block p3-n2v-routed | awk -v m="$m" '$1 == m { print $9 }')"
+    [[ -n "$plain" && -n "$routed" ]] || { echo ">> docs/RESULTS.md needs p3-n2v-plain and p3-n2v-routed fmd-eval blocks"; return 1; }
     bar=$([[ "$m" == WideField ]] && echo 1.0 || echo -0.2)
-    awk -v a="$struct" -v b="$plain" -v n="$bar" 'BEGIN { exit !(a - b >= n - 1e-9) }' \
-      || { echo ">> $m: structured $struct dB vs plain $plain dB misses the bar ($bar dB)"; return 1; }
-    echo ">> $m: structured $struct dB vs plain $plain dB, bar $bar dB: met"
+    awk -v a="$routed" -v b="$plain" -v n="$bar" 'BEGIN { exit !(a - b >= n - 1e-9) }' \
+      || { echo ">> $m: routed $routed dB vs plain $plain dB misses the bar ($bar dB)"; return 1; }
+    echo ">> $m: routed $routed dB vs plain $plain dB, bar $bar dB: met"
   done
-  [[ -f "$FMD/test_mix/.complete" && -f runs/p2/n2v_raw.bin && -f runs/p3/n2v_struct.bin ]] \
-    || { echo "bar met by the recorded results; reproduction skipped (needs FMD data and tools/experiments weights)"; return 77; }
+  local w=runs/p3
+  [[ -f "$FMD/test_mix/.complete" && -f $w/n2v_plain.bin && -f $w/n2v_struct.bin && -f $w/n2v_indep.bin && -f $w/n2v_corr.bin ]] \
+    || { echo "bar met by the recorded results; reproduction skipped (needs FMD data and the weights from tools/experiments/p3_struct.sh)"; return 77; }
   dotnet build tools/DoraBio.Cli -c Release >/dev/null || return 1
-  reproduces p3-n2v-plain fmd-eval --weights runs/p2/n2v_raw.bin --root "$FMD" --levels raw || return 1
-  reproduces p3-n2v-struct fmd-eval --weights runs/p3/n2v_struct.bin --root "$FMD" --levels raw || return 1
+  reproduces p3-n2v-plain fmd-eval --weights $w/n2v_plain.bin --root "$FMD" --levels raw || return 1
+  reproduces p3-n2v-shared fmd-eval --weights $w/n2v_struct.bin --root "$FMD" --levels raw || return 1
+  reproduces p3-n2v-routed fmd-eval --weights $w/n2v_indep.bin --weights-correlated $w/n2v_corr.bin --root "$FMD" --levels raw || return 1
 }
 
 gate_16() { test_gate 16-vst; }           # vst
@@ -228,6 +232,7 @@ MUTATIONS=(
   '12|src/DoraBio.Core/Data/FmdDataset.cs|public IReadOnlyCollection<int> ExcludedFovs { get; init; } = [FmdDataset.TestFov];|public IReadOnlyCollection<int> ExcludedFovs { get; init; } = [];'
   '13|docs/RESULTS.md||<DELETE-FILE>'
   '14|src/DoraBio.Core/NoiseDiagnostics.cs|b = r[(y + dy) * TileSize + x + dx];|b = r[(y + dy) * TileSize + x];'
+  '15|src/DoraBio.Core/Data/BlindSpot.cs|do q = rng.Next(plane); while (hidden[q]);|q = rng.Next(plane);'
 )
 
 self_test() {
