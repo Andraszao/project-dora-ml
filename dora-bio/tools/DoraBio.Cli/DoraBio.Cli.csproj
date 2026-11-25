@@ -5,6 +5,8 @@
     <AssemblyName>dora-bio</AssemblyName>
     <RootNamespace>DoraBio.Cli</RootNamespace>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <!-- XML docs are required here too (gate 0). -->
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <InvariantGlobalization>true</InvariantGlobalization>
   </PropertyGroup>
   <ItemGroup>

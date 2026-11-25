@@ -17,7 +17,8 @@ All numbers come from this repo, run on a 4-core cloud VM with no GPU.
 
 | Check | Result |
 |---|---|
-| Core unit tests (`dotnet test`) | 69 passing in ~4 s, including finite-difference gradient checks (mutation-tested) |
+| Core unit tests (`dotnet test`) | 70 passing in ~4 s, including finite-difference gradient checks (mutation-tested) |
+| Brick gates (`./bricks.sh`) | all 9 green; documentation of every public member is enforced by the build |
 | Codecs vs. independent encoders | TIFF/PNG fixtures written by Pillow, ImageMagick and libtiff decode exactly |
 | Tiled vs. whole-image inference | identical (≤1e-5) for ragged tiles, tiles smaller than the receptive field, etc. |
 | Training reproducibility | two runs with the same seed produce bit-identical weights |

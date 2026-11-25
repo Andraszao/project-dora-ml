@@ -17,14 +17,14 @@ export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_SKIP_FIRST_TIME_EXPE
 
 NAMES=(scaffold nn data io inference training cli godot-build godot-smoke)
 CHECKS=(
-  "solution builds (warnings are errors); every test class belongs to exactly one brick"
+  "solution builds (warnings are errors, missing XML docs included); every test class belongs to exactly one brick"
   "ConvLayer/DenoisingNet/Adam/Simd: finite-difference gradient checks, optimizer behavior"
   "GrayImage, Normalization, Dihedral, BlindSpot, PatchSampler, Synthetic: data invariants"
   "TIFF/PNG decoders vs Pillow/ImageMagick fixtures, TIFF round-trip, weights file + CRC"
   "Metrics (PSNR/SSIM/noise σ), exact tiled inference, bilateral baseline"
   "Trainer, validation, progressive targets, journey log, online adapter, dataset loader"
   "dora-bio CLI end to end: synth → train → info → denoise → eval, plus the bundled model and sample"
-  "Godot C# assembly compiles against Godot.NET.Sdk 4.5.1"
+  "Godot C# assembly compiles against Godot.NET.Sdk 4.5.1; every member in godot/scripts/*.cs is documented"
   "headless Godot: Main.tscn loads, sample → denoise → adapt, main thread never blocked"
 )
 LAST=$((${#NAMES[@]} - 1))
@@ -70,7 +70,15 @@ gate_6() (   # subshell body: `set -e` aborts only this gate, never the runner
   $cli denoise --weights godot/models/dora_bio_weights.bin --in godot/samples/synthetic_cells.tif --out "$t/sample.tif"
 )
 
-gate_7() { dotnet build godot/DoraBio.Godot.csproj; }
+gate_7() {
+  dotnet build godot/DoraBio.Godot.csproj || return 1
+  # Our C# in godot/scripts must be fully documented. Godot's source generators emit undocumented public
+  # members (EmitSignal…), so the compiler can't enforce this; filter to our files instead.
+  local missing
+  missing="$(dotnet build godot/DoraBio.Godot.csproj -p:GenerateDocumentationFile=true --no-incremental 2>&1 \
+    | grep -E "warning CS(1591|157[0-4])" | grep "/godot/scripts/" | sort -u)"
+  if [[ -n "$missing" ]]; then echo "$missing"; echo ">> undocumented members in godot/scripts"; return 1; fi
+}
 
 gate_8() {
   local godot="${GODOT:-$(command -v godot || true)}"

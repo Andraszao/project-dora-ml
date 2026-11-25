@@ -7,6 +7,8 @@
     <TargetFramework>net8.0</TargetFramework>
     <RootNamespace>DoraBio.Core</RootNamespace>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <!-- Every public member must carry XML docs: missing ones are build errors (gate 0). -->
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
     <!-- The Godot editor builds Debug. Unoptimized numeric loops are about 5× slower, so always optimize the core. -->
     <Optimize>true</Optimize>

@@ -64,6 +64,11 @@ Rules:
    with `NAMES`/`CHECKS` entries in `bricks.sh`, and add a row to this table.
 5. A gate must never pass vacuously. Test gates fail if they match zero tests, and gate 0 fails on an untagged
    test class. Both were mutation-checked, along with stop-on-first-failure.
+6. **Documentation is part of the brick.** Every public member needs XML docs (`/// <summary>`, plus `<param>`
+   for record parameters). The compiler enforces this for the core and CLI (gate 0) and `bricks.sh` enforces it
+   for `godot/scripts/*.cs` (gate 7). Beyond the tags, comment the *why* and the math: formulas for numeric
+   code, file-format primers for codecs, invariants (exact tiling, reproducible gradient sums) where they're
+   relied on. GDScript uses `##` doc comments on exports and functions.
 
 ## Commands (all verified in a Linux container without a GPU)
 
