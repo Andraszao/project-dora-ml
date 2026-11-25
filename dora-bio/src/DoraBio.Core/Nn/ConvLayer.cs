@@ -22,8 +22,15 @@ namespace DoraBio.Core.Nn;
 /// The last line is the "transposed convolution": every output gradient is scattered back to the input
 /// pixels that produced it. Gradients that land in the padding border are discarded by <see cref="Unpad"/>,
 /// because padding is a constant zero, not a learnable input.
+///
+/// <para><b>Two implementations, identical results.</b> <see cref="ForwardReference"/> and <see cref="BackwardReference"/>
+/// are the original row kernels: one weight at a time, a whole row of <c>y += w·x</c>. They are simple but move a row
+/// of memory per multiply-add. <see cref="Forward"/> and <see cref="Backward"/> are register-blocked: 8 output (or
+/// input) channels × one SIMD strip of pixels are accumulated in registers, so each input value is loaded once per tap
+/// instead of once per channel. They add the same terms in the same order per output value, with the same separate
+/// multiply and add (never a fused multiply-add), so the results are bit-identical; brick 23's tests check that.</para>
 /// </summary>
-internal sealed class ConvLayer
+internal sealed partial class ConvLayer
 {
     /// <summary>Kernel side length. Fixed at 3; larger receptive fields come from dilation, not bigger kernels.</summary>
     public const int Kernel = 3;
@@ -103,13 +110,14 @@ internal sealed class ConvLayer
                       .CopyTo(output.Slice((c * height + y) * width, width));
     }
 
-    /// <summary>output[oc] = bias[oc] + Σ_ic Σ_taps w * shifted(padded[ic]). Output is [OutChannels, h, w].</summary>
+    /// <summary>Reference forward pass (the original row kernel): output[oc] = bias[oc] + Σ_ic Σ_taps w * shifted(padded[ic]).</summary>
     /// <remarks>
     /// Loop order: for each (output channel, input channel, tap), the whole tap contributes
     /// <c>weight × (the input plane shifted by the tap offset)</c> to the output plane, one row at a time.
-    /// Each row is a contiguous SIMD axpy. That's much faster than gathering 9 × InChannels values per pixel.
+    /// Each row is a contiguous SIMD axpy. Per output value the terms arrive as: bias, then input channel by input
+    /// channel, tap by tap. <see cref="Forward"/> keeps exactly that order.
     /// </remarks>
-    public void Forward(ReadOnlySpan<float> parameters, ReadOnlySpan<float> padded, int height, int width, Span<float> output)
+    public void ForwardReference(ReadOnlySpan<float> parameters, ReadOnlySpan<float> padded, int height, int width, Span<float> output)
     {
         int d = Dilation, pw = PaddedWidth(width), ph = PaddedHeight(height);
         int plane = height * width, paddedPlane = ph * pw;
@@ -138,9 +146,10 @@ internal sealed class ConvLayer
     }
 
     /// <summary>
-    /// Accumulates (+=) weight and bias gradients into <paramref name="gradients"/>, which uses the parameter layout.
-    /// If <paramref name="gradPadded"/> is non-empty it is overwritten with dLoss/dPaddedInput, in the padded layout.
-    /// Callers crop it with <see cref="Unpad"/>; values on the border belong to the zero padding and are discarded.
+    /// Reference backward pass (the original row kernels). Accumulates (+=) weight and bias gradients into
+    /// <paramref name="gradients"/>, which uses the parameter layout. If <paramref name="gradPadded"/> is non-empty it is
+    /// overwritten with dLoss/dPaddedInput, in the padded layout. Callers crop it with <see cref="Unpad"/>; values on the
+    /// border belong to the zero padding and are discarded.
     /// </summary>
     /// <param name="parameters">The network's flat parameter array (read-only here).</param>
     /// <param name="padded">The padded input saved by the forward pass.</param>
@@ -149,7 +158,7 @@ internal sealed class ConvLayer
     /// <param name="width">Image width.</param>
     /// <param name="gradients">Gradient buffer with the same layout as <paramref name="parameters"/>; added to, not overwritten.</param>
     /// <param name="gradPadded">Receives ∂loss/∂(padded input), or pass empty to skip it (the first layer, whose input is data).</param>
-    public void Backward(
+    public void BackwardReference(
         ReadOnlySpan<float> parameters,
         ReadOnlySpan<float> padded,
         ReadOnlySpan<float> gradOutput,

@@ -280,7 +280,7 @@ MUTATIONS=(
   # gate | file | text to find | replacement ("<DELETE-FILE>" deletes the file)
   $'0|tests/DoraBio.Core.Tests/DataTests.cs|[Trait(Bricks.Trait, Bricks.Data)]\n|'
   $'0|src/DoraBio.Core/Data/GrayImage.cs|    /// <summary>Width in pixels (number of columns).</summary>\n|'
-  '1|src/DoraBio.Core/Nn/ConvLayer.cs|gradients[BiasOffset + oc] += Simd.Sum(gOutPlane);|gradients[BiasOffset + oc] += 1.1f * Simd.Sum(gOutPlane);'
+  '1|src/DoraBio.Core/Nn/ConvLayer.Blocked.cs|gradients[BiasOffset + oc] += Simd.Sum(gradOutput.Slice(oc * plane, plane));|gradients[BiasOffset + oc] += 1.1f * Simd.Sum(gradOutput.Slice(oc * plane, plane));'
   '2|src/DoraBio.Core/Data/Dihedral.cs|(a, b) = (b, last - a);|(a, b) = (b, a);'
   '3|src/DoraBio.Core/IO/PngDecoder.cs|3 => (a + b) >> 1,|3 => (a + b + 1) >> 1,'
   '4|src/DoraBio.Core/TiledInference.cs|margin = RoundUp(net.Config.ReceptiveRadius, align);|margin = RoundUp(net.Config.ReceptiveRadius, align) - 1;'
@@ -299,6 +299,7 @@ MUTATIONS=(
   $'20|src/DoraBio.Core/TiledInference.cs|        tileCore = RoundUp(tileCore, align);\n|'
   '21|src/DoraBio.Core/Nn/DenoisingNet.cs|public static NetConfig Default => new(24, [1, 2, 4, 8, 4, 2, 1]);|public static NetConfig Default => UNet();'
   '22|src/DoraBio.Core/PerformanceBench.cs|? "unet" : "dilated";|? "u-net" : "dilated";'
+  '23|src/DoraBio.Core/Nn/ConvLayer.Blocked.cs|a7 += new Vector<float>(Unsafe.Add(ref weights, t + 7 * ic9)) * v;|a7 += new Vector<float>(Unsafe.Add(ref weights, t + 6 * ic9)) * v;'
 )
 
 self_test() {

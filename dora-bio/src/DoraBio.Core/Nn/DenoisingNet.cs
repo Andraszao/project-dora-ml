@@ -146,6 +146,25 @@ public sealed partial class DenoisingNet
 
     internal IReadOnlyList<ConvLayer> Layers => _layers;
 
+    /// <summary>
+    /// Tests only: run every convolution through the reference row kernels instead of the register-blocked ones, to
+    /// prove the two give bit-identical networks (brick 23). Per instance, so parallel tests can't affect each other.
+    /// </summary>
+    internal bool ReferenceKernels { get; set; }
+
+    private void ConvForward(ConvLayer layer, ReadOnlySpan<float> padded, int height, int width, Span<float> output)
+    {
+        if (ReferenceKernels) layer.ForwardReference(Parameters, padded, height, width, output);
+        else layer.Forward(Parameters, padded, height, width, output);
+    }
+
+    private void ConvBackward(ConvLayer layer, ReadOnlySpan<float> padded, ReadOnlySpan<float> gradOutput, int height, int width,
+        Span<float> gradients, Span<float> gradPadded)
+    {
+        if (ReferenceKernels) layer.BackwardReference(Parameters, padded, gradOutput, height, width, gradients, gradPadded);
+        else layer.Backward(Parameters, padded, gradOutput, height, width, gradients, gradPadded);
+    }
+
     private DenoisingNet(NetConfig config, float[]? parameters)
     {
         config.Validate();
@@ -337,7 +356,7 @@ public sealed partial class DenoisingNet
             var layer = _layers[l];
             layer.Pad(current, height, width, ws.Padded[l]);
             var output = ws.Activations[l].AsSpan(0, layer.OutChannels * plane);
-            layer.Forward(Parameters, ws.Padded[l], height, width, output);
+            ConvForward(layer, ws.Padded[l], height, width, output);
             if (l < _layers.Length - 1) Relu(output);
             current = output;
         }
@@ -368,11 +387,11 @@ public sealed partial class DenoisingNet
             if (l == 0)
             {
                 // The input is data, not a parameter, so its gradient is not needed.
-                layer.Backward(Parameters, ws.Padded[l], gOut, height, width, gradients, Span<float>.Empty);
+                ConvBackward(layer, ws.Padded[l], gOut, height, width, gradients, Span<float>.Empty);
                 break;
             }
 
-            layer.Backward(Parameters, ws.Padded[l], gOut, height, width, gradients, ws.GradPadded);
+            ConvBackward(layer, ws.Padded[l], gOut, height, width, gradients, ws.GradPadded);
             var gIn = gradIn.AsSpan(0, layer.InChannels * plane);
             layer.Unpad(ws.GradPadded, height, width, gIn);
 
