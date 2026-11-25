@@ -21,7 +21,8 @@ public static class Program
           synth    --out DIR [--count 8] [--size 256 | --width W --height H] [--seed 1] [--peak 25]
                    Write a synthetic dataset: DIR/noisy/*.tif (uint16) and DIR/clean/*.tif (float32).
           train    --data DIR --out WEIGHTS.bin [--mode n2v|supervised] [--epochs 30] [--steps 50]
-                   [--batch 16] [--patch 64] [--lr 0.001] [--features 24] [--journey FILE.json] [--seed 1234]
+                   [--batch 16] [--patch 64] [--lr 0.001] [--journey FILE.json] [--seed 1234]
+                   [--arch dilated|unet] [--features 24 (dilated) / 16 (unet)] [--depth 2 (unet)]
                    [--init WEIGHTS.bin]   (fine-tune existing weights instead of starting fresh)
                    [--describe TEXT]      (what the data is; stored in the weights' provenance)
                    [--augment dihedral|v1] (v1 = v1's ±15° rotation + 0.85-1.15 scale, nearest neighbour; for comparison)
@@ -37,7 +38,7 @@ public static class Program
                    Output is float32 TIFF in the input's original intensity units.
           eval     --weights WEIGHTS.bin --data DIR
                    Per-image PSNR/SSIM of noisy, bilateral and DORA against clean (needs clean images).
-          info     --weights WEIGHTS.bin
+          info     --weights WEIGHTS.bin   |   info --default-arch   (prints dilated or unet)
           diagnose --in IMAGE
                    Does the image's noise look independent between pixels, as Noise2Void assumes? (no ground truth needed)
           fmd-check --root data/fmd
@@ -161,7 +162,15 @@ public static class Program
         else
         {
             var defaults = NetConfig.Default;
-            net = DenoisingNet.Create(new NetConfig(o.Int("features", defaults.Features), defaults.Dilations), config.Seed);
+            string arch = o.String("arch", defaults.Architecture == NetArchitecture.UNet ? "unet" : "dilated");
+            var architecture = arch switch
+            {
+                "dilated" => new NetConfig(o.Int("features", 24), [1, 2, 4, 8, 4, 2, 1]),
+                "unet" => NetConfig.UNet(o.Int("features", 16), o.Int("depth", 2)),
+                _ => throw new ArgumentException($"Unknown --arch '{arch}' (use dilated or unet)."),
+            };
+            architecture.Validate();
+            net = DenoisingNet.Create(architecture, config.Seed);
         }
 
         if (vst && mode != TrainingMode.Noise2Void)
@@ -456,6 +465,11 @@ public static class Program
     /// <summary><c>info</c>: prints a weights file's version, architecture, size, save time and provenance.</summary>
     private static int Info(Options o)
     {
+        if (o.Has("default-arch"))
+        {
+            Console.WriteLine(NetConfig.Default.Architecture == NetArchitecture.UNet ? "unet" : "dilated");
+            return 0;
+        }
         var (net, info) = WeightsFile.Load(o.Required("weights"));
         Console.WriteLine($"model version : {info.ModelVersion}");
         Console.WriteLine($"architecture  : {info.Config}");

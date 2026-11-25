@@ -275,6 +275,7 @@ MUTATIONS=(
   '18|src/DoraBio.Core/Nn/Resample.cs|float v = 0.25f * g[x];|float v = 0.5f * g[x];'
   '19|src/DoraBio.Core/Nn/DenoisingNet.UNet.cs|Simd.Axpy(1f, ws.SkipGrad[l].AsSpan(0, gOut.Length), gOut);|Simd.Axpy(0f, ws.SkipGrad[l].AsSpan(0, gOut.Length), gOut);'
   $'20|src/DoraBio.Core/TiledInference.cs|        tileCore = RoundUp(tileCore, align);\n|'
+  '21|src/DoraBio.Core/Nn/DenoisingNet.cs|public static NetConfig Default => new(24, [1, 2, 4, 8, 4, 2, 1]);|public static NetConfig Default => UNet();'
 )
 
 self_test() {

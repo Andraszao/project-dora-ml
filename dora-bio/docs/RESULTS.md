@@ -297,6 +297,46 @@ Noise2Void only, and a model trained with it must be applied with it). What limi
 images from one frame, not the transform. A calibrated camera (dark and flat frames) or a curve-based transform would
 be the way to revisit it.
 
+## P4: a U-Net against the dilated network
+
+Phase P4 of [`PATHWAY.md`](../PATHWAY.md), measured 2026-11-25. The U-Net has 16 → 32 → 64 features over two pooling
+levels (11 convolutions, 118,113 parameters, about the dilated network's compute per pixel); the dilated network has
+26,497. Both get exactly P3's budget, seed, data and validation (30 epochs × 50 steps × batch 16 × 64 px, seed 2026,
+4 raw frames per FOV); the dilated runs are P3's `sup_plain` and `n2v_plain`. Reproduce: `tools/experiments/p4_arch.sh`.
+
+**The rule was set before measuring** (PATHWAY.md): the U-Net becomes the default only if it beats the dilated network
+on all-48 test_mix PSNR (raw) for supervised *and* Noise2Void training, and is at most 3× slower.
+
+| Raw test_mix | Confocal (20) | Two-photon (16) | Widefield (12) | All 48 |
+|---|---|---|---|---|
+| Supervised, dilated | 34.38 / 0.898 | 33.52 / 0.878 | 33.02 / 0.852 | 33.75 / 0.880 |
+| **Supervised, U-Net** | **35.55 / 0.927** | **33.87 / 0.893** | **34.51 / 0.893** | **34.73 / 0.907** |
+| Noise2Void, dilated | 33.77 / 0.881 | 31.85 / 0.800 | 27.97 / 0.563 | 31.68 / 0.774 |
+| Noise2Void, U-Net | 32.99 / 0.859 | 31.40 / 0.767 | 27.98 / 0.571 | 31.21 / 0.756 |
+
+| All 48, PSNR (dB) | raw | avg2 | avg4 | avg8 | avg16 |
+|---|---|---|---|---|---|
+| Supervised, dilated | 33.75 | 34.19 | 35.04 | 35.32 | 35.83 |
+| Supervised, U-Net | 34.73 | 35.04 | 35.44 | 35.33 | 35.28 |
+| Noise2Void, dilated | 31.68 | 33.21 | 34.89 | 36.33 | 37.89 |
+| Noise2Void, U-Net | 31.21 | 32.50 | 34.29 | 35.22 | 36.27 |
+
+Speed: a 512×512 frame takes 0.79 s with the U-Net and 0.58 s with the dilated network (median of 5 tiled runs on 4
+cores), **1.36× slower** <!-- p4-slowdown: 1.36 -->. Training took 5:42 for 30 epochs against 4:40 (1.22×).
+
+- **With ground truth, the U-Net is clearly better:** +0.98 dB overall and better on every microscope type (widefield
+  +1.49, confocal +1.17, two-photon +0.35), with SSIM 0.907 against 0.880. It is the best DORA model so far (34.73 dB,
+  4.5 dB above the bilateral filter), and it was still improving when the 30-epoch cap stopped it (best epoch 28).
+  It also helps on cleaner inputs up to avg8, though like every model it falls below the untouched image there.
+- **Without ground truth (Noise2Void), it is worse:** −0.47 dB overall. Its run stopped early at epoch 10 with its
+  best epoch at 4, while the dilated run kept improving until epoch 23. That points at training (the U-Net may need a
+  smaller learning rate or more care with blind spots) rather than capacity, but this wasn't tested. On the
+  validation set its best score was in fact slightly higher (25.56 vs 25.39 dB), so 48 validation patches can't
+  reliably tell these two apart.
+- **Verdict, by the rule set in advance: the dilated network stays the default**, because the U-Net doesn't win for
+  Noise2Void. `--arch unet` is available and is the better choice when ground truth exists. Making the default depend
+  on the training mode would be a new rule, chosen after seeing these numbers, so it isn't adopted here.
+
 ## What these results do and don't show
 
 - **One seed per configuration.** Differences of a few tenths of a dB may be run-to-run variation rather than real
@@ -314,7 +354,7 @@ be the way to revisit it.
 - **Weights trained on FMD are not published** (CC BY-SA terms for derived models are a separate decision). The
   bundled model stays the synthetic one.
 
-## Reproducibility checks (gates 13 and 15)
+## Reproducibility checks (gates 13, 15 and 21)
 
 The blocks marked `fmd-noise` above and the blocks below are verbatim program output. `bricks.sh` gate 13 re-runs
 the first two whenever the data is present and requires an exact match. The block below is
@@ -374,3 +414,51 @@ all         48   27.22 / 0.543   30.22 / 0.752   32.97 / 0.844
 routed by the noise check: 12 of 48 images to the correlated-noise model
 ```
 <!-- /p3-n2v-routed -->
+
+Gate 21 applies the P4 rule to the four blocks below (and the slowdown marker above), checks that `NetConfig.Default`
+follows it, and re-runs the blocks when the weights are present (`runs/p3/` for the dilated network, `runs/p4/` for
+the U-Net, from `tools/experiments/p4_arch.sh`).
+
+<!-- p4-dncnn-sup -->
+```text
+test_mix level raw: mean PSNR (dB) / SSIM vs ground truth, 8-bit scale
+modality     n  noisy           bilateral       DORA           
+Confocal    20   29.13 / 0.701   31.74 / 0.872   34.38 / 0.898
+TwoPhoton   16   26.32 / 0.473   31.07 / 0.816   33.52 / 0.878
+WideField   12   25.23 / 0.374   26.53 / 0.466   33.02 / 0.852
+all         48   27.22 / 0.543   30.22 / 0.752   33.75 / 0.880
+```
+<!-- /p4-dncnn-sup -->
+
+<!-- p4-unet-sup -->
+```text
+test_mix level raw: mean PSNR (dB) / SSIM vs ground truth, 8-bit scale
+modality     n  noisy           bilateral       DORA           
+Confocal    20   29.13 / 0.701   31.74 / 0.872   35.55 / 0.927
+TwoPhoton   16   26.32 / 0.473   31.07 / 0.816   33.87 / 0.893
+WideField   12   25.23 / 0.374   26.53 / 0.466   34.51 / 0.893
+all         48   27.22 / 0.543   30.22 / 0.752   34.73 / 0.907
+```
+<!-- /p4-unet-sup -->
+
+<!-- p4-dncnn-n2v -->
+```text
+test_mix level raw: mean PSNR (dB) / SSIM vs ground truth, 8-bit scale
+modality     n  noisy           bilateral       DORA           
+Confocal    20   29.13 / 0.701   31.74 / 0.872   33.77 / 0.881
+TwoPhoton   16   26.32 / 0.473   31.07 / 0.816   31.85 / 0.800
+WideField   12   25.23 / 0.374   26.53 / 0.466   27.97 / 0.563
+all         48   27.22 / 0.543   30.22 / 0.752   31.68 / 0.774
+```
+<!-- /p4-dncnn-n2v -->
+
+<!-- p4-unet-n2v -->
+```text
+test_mix level raw: mean PSNR (dB) / SSIM vs ground truth, 8-bit scale
+modality     n  noisy           bilateral       DORA           
+Confocal    20   29.13 / 0.701   31.74 / 0.872   32.99 / 0.859
+TwoPhoton   16   26.32 / 0.473   31.07 / 0.816   31.40 / 0.767
+WideField   12   25.23 / 0.374   26.53 / 0.466   27.98 / 0.571
+all         48   27.22 / 0.543   30.22 / 0.752   31.21 / 0.756
+```
+<!-- /p4-unet-n2v -->
