@@ -43,6 +43,39 @@ internal static class TestUtil
         return Math.Sqrt(sum / values.Length);
     }
 
+    /// <summary>Writes an 8-bit grayscale PNG (filter 0, zlib), the format FMD ships in.</summary>
+    public static void WritePng(string path, int width, int height, Func<int, int, byte> pixel)
+    {
+        var raw = new byte[height * (width + 1)];
+        for (int y = 0; y < height; y++)
+            for (int x = 0; x < width; x++)
+                raw[y * (width + 1) + 1 + x] = pixel(x, y);
+        using var compressed = new MemoryStream();
+        using (var z = new System.IO.Compression.ZLibStream(compressed, System.IO.Compression.CompressionLevel.Fastest, leaveOpen: true))
+            z.Write(raw);
+
+        using var png = new MemoryStream();
+        png.Write([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+        void Chunk(string type, byte[] data)
+        {
+            var typeAndData = System.Text.Encoding.ASCII.GetBytes(type).Concat(data).ToArray();
+            var len = new byte[4];
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(len, (uint)data.Length);
+            var crc = new byte[4];
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(crc, DoraBio.Core.IO.Crc32.Compute(typeAndData));
+            png.Write(len); png.Write(typeAndData); png.Write(crc);
+        }
+        var ihdr = new byte[13];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(ihdr, (uint)width);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(ihdr.AsSpan(4), (uint)height);
+        ihdr[8] = 8;   // bit depth; color type 0 (gray), compression/filter/interlace 0
+        Chunk("IHDR", ihdr);
+        Chunk("IDAT", compressed.ToArray());
+        Chunk("IEND", []);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllBytes(path, png.ToArray());
+    }
+
     public static string TempDirectory()
     {
         string dir = Path.Combine(Path.GetTempPath(), "dorabio-tests-" + Guid.NewGuid().ToString("N"));

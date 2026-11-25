@@ -178,6 +178,7 @@ MUTATIONS=(
   '6|godot/samples/synthetic_cells.tif||<DELETE-FILE>'
   $'7|godot/scripts/DoraBioBridge.cs|    /// <summary>True while a denoise, adapt or training job runs. Only one job runs at a time.</summary>\n|'
   '11|tools/fetch_fmd.sh|d7a14d3be17368dbfe24a5cfe8ed0d40d403d7902d70fe914d04303e4aa8f2f6"|"'
+  '12|src/DoraBio.Core/Data/FmdDataset.cs|public IReadOnlyCollection<int> ExcludedFovs { get; init; } = [FmdDataset.TestFov];|public IReadOnlyCollection<int> ExcludedFovs { get; init; } = [];'
 )
 
 self_test() {

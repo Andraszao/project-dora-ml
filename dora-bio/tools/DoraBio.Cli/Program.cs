@@ -24,11 +24,15 @@ public static class Program
                    [--batch 16] [--patch 64] [--lr 0.001] [--features 24] [--journey FILE.json] [--seed 1234]
                    [--init WEIGHTS.bin]   (fine-tune existing weights instead of starting fresh)
                    [--describe TEXT]      (what the data is; stored in the weights' provenance)
+                   FMD folders: [--fmd-frames 4] [--fmd-levels raw,avg2,avg4,avg8,avg16] [--fmd-categories A,B]
+                   (FOV 19, FMD's test FOV, is always excluded from training)
           denoise  --weights WEIGHTS.bin --in IMAGE --out OUT.tif [--baseline BASELINE.tif] [--tile 128]
                    Output is float32 TIFF in the input's original intensity units.
           eval     --weights WEIGHTS.bin --data DIR
                    Per-image PSNR/SSIM of noisy, bilateral and DORA against clean (needs clean images).
           info     --weights WEIGHTS.bin
+          fmd-check --root data/fmd
+                   Verify a downloaded FMD dataset: structure, test_mix, and no train/test leakage.
         """;
 
     /// <summary>Entry point: <c>dora-bio &lt;command&gt; [--option value]…</c>.</summary>
@@ -57,6 +61,7 @@ public static class Program
                 "denoise" => Denoise(options),
                 "eval" => Eval(options),
                 "info" => Info(options),
+                "fmd-check" => FmdCheck(options),
                 _ => throw new ArgumentException($"Unknown command '{args[0]}'."),
             };
         }
@@ -100,7 +105,7 @@ public static class Program
     private static int Train(Options o)
     {
         string dataDir = o.Required("data");
-        var dataset = DatasetLoader.LoadDirectory(dataDir);
+        var dataset = DatasetLoader.LoadDirectory(dataDir, FmdOptionsFrom(o));
         var mode = o.String("mode", dataset.All(d => d.HasClean) ? "supervised" : "n2v") switch
         {
             "n2v" or "noise2void" => TrainingMode.Noise2Void,
@@ -218,6 +223,31 @@ public static class Program
     }
 
     /// <summary><c>info</c>: prints a weights file's version, architecture, size, save time and provenance.</summary>
+    /// <summary>
+    /// FMD loading options from <c>--fmd-frames</c>, <c>--fmd-levels</c> and <c>--fmd-categories</c>. The test FOV
+    /// exclusion is deliberately not exposed: the CLI never trains on FMD's test FOV.
+    /// </summary>
+    private static FmdOptions FmdOptionsFrom(Options o) => new()
+    {
+        FramesPerFov = o.Int("fmd-frames", 4),
+        NoiseLevels = o.String("fmd-levels", "raw").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
+        Categories = o.StringOrNull("fmd-categories")?.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
+    };
+
+    /// <summary>
+    /// <c>fmd-check</c>: structure of every category and of test_mix, plus the leakage guard. Every test_mix
+    /// ground truth must equal its category's FOV 19 ground truth pixel for pixel, and the default training plan
+    /// must contain no FOV 19 file. Exit 1 on any problem (used by bricks.sh gate 12).
+    /// </summary>
+    private static int FmdCheck(Options o)
+    {
+        var (problems, summary) = FmdDataset.Verify(o.Required("root"));
+        foreach (string p in problems) Console.WriteLine($"✗ {p}");
+        if (problems.Count > 0) return 1;
+        Console.WriteLine($"✓ {summary}");
+        return 0;
+    }
+
     private static int Info(Options o)
     {
         var (net, info) = WeightsFile.Load(o.Required("weights"));

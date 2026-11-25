@@ -5,37 +5,38 @@ namespace DoraBio.Core.Data;
 /// <summary>
 /// Loads a training directory into normalized <see cref="ImagePair"/>s. The layout is detected automatically:
 ///
-/// 1. Paired:  dir/noisy/NAME.tif with optional dir/clean/NAME.tif (matched by file name).
-///             This is what <c>dora-bio synth</c> writes.
-/// 2. FMD:     dir/raw/FOV/*.png with dir/gt/FOV/avg50.png, the published layout of the Fluorescence Microscopy
-///             Denoising dataset (Zhang et al., CVPR 2019). Up to <c>maxFramesPerFov</c> raw frames per FOV.
-///             Matches the dataset's documented layout but has not been tested against the real download.
-/// 3. Flat:    dir/*.tif|png, noisy only, for Noise2Void. Each file is its own FOV.
+/// 1. Paired:   dir/noisy/NAME.tif with optional dir/clean/NAME.tif (matched by file name).
+///              This is what <c>dora-bio synth</c> writes.
+/// 2. FMD:      a dataset root of category folders, or a single category (dir/raw/FOV/*.png + dir/gt/FOV/avg50.png),
+///              or the flat test_mix layout. See <see cref="FmdDataset"/>, which also keeps FMD's test FOV out of training.
+/// 3. Flat:     dir/*.tif|png, noisy only, for Noise2Void. Each file is its own FOV.
 /// </summary>
 /// <remarks>
-/// Gated by brick 5 (training) although it lives in Data/, because it depends on the IO brick's decoders.
+/// The generic loader is gated by brick 5 (training). The FMD layouts are brick 12 (fmd-loader).
 /// </remarks>
 public static class DatasetLoader
 {
     /// <summary>Detects the layout, loads every image, checks sizes, and normalizes each pair by its noisy image's percentiles.</summary>
-    /// <param name="dir">Dataset root folder.</param>
-    /// <param name="maxFramesPerFov">FMD only: raw frames used per FOV (FMD ships 50 per FOV; more mostly adds near-duplicates).</param>
+    /// <param name="dir">Dataset folder.</param>
+    /// <param name="fmd">What to load from an FMD folder (frames per FOV, noise levels, categories). Defaults exclude the test FOV.</param>
     /// <exception cref="DirectoryNotFoundException"><paramref name="dir"/> doesn't exist.</exception>
     /// <exception cref="InvalidDataException">No supported images found, or a clean image doesn't match its noisy image's size.</exception>
-    public static List<ImagePair> LoadDirectory(string dir, int maxFramesPerFov = 4)
+    public static List<ImagePair> LoadDirectory(string dir, FmdOptions? fmd = null)
     {
         if (!Directory.Exists(dir)) throw new DirectoryNotFoundException(dir);
 
-        string noisyDir = Path.Combine(dir, "noisy"), cleanDir = Path.Combine(dir, "clean");
-        string rawDir = Path.Combine(dir, "raw"), gtDir = Path.Combine(dir, "gt");
+        if (FmdDataset.IsCategory(dir) || FmdDataset.IsRoot(dir))
+            return FmdDataset.Load(FmdDataset.PlanTraining(dir, fmd ?? new FmdOptions()));
+        if (FmdDataset.IsTestMix(dir))
+            return FmdDataset.Load(FmdDataset.PlanTestMix(dir));
 
-        List<ImagePair> raw;
-        if (Directory.Exists(noisyDir)) raw = LoadPaired(noisyDir, cleanDir);
-        else if (Directory.Exists(rawDir) && Directory.Exists(gtDir)) raw = LoadFmd(rawDir, gtDir, maxFramesPerFov);
-        else raw = ImageFiles(dir).Select(f => new ImagePair(ImageLoader.Load(f), null, Path.GetFileNameWithoutExtension(f), Path.GetFileName(f))).ToList();
+        string noisyDir = Path.Combine(dir, "noisy"), cleanDir = Path.Combine(dir, "clean");
+        List<ImagePair> raw = Directory.Exists(noisyDir)
+            ? LoadPaired(noisyDir, cleanDir)
+            : ImageFiles(dir).Select(f => new ImagePair(ImageLoader.Load(f), null, Path.GetFileNameWithoutExtension(f), Path.GetFileName(f))).ToList();
 
         if (raw.Count == 0)
-            throw new InvalidDataException($"No .tif/.tiff/.png images found in {dir} (looked for noisy/, raw/+gt/, or flat files).");
+            throw new InvalidDataException($"No .tif/.tiff/.png images found in {dir} (looked for noisy/, FMD raw/+gt/, or flat files).");
         foreach (var pair in raw) pair.Validate();
         return raw.Select(p => p.Normalize().Pair).ToList();
     }
@@ -51,26 +52,6 @@ public static class DatasetLoader
                 ? ImageFiles(cleanDir).FirstOrDefault(c => Path.GetFileNameWithoutExtension(c) == stem)
                 : null;
             result.Add(new ImagePair(ImageLoader.Load(file), cleanFile is null ? null : ImageLoader.Load(cleanFile), stem, Path.GetFileName(file)));
-        }
-        return result;
-    }
-
-    /// <summary>
-    /// FMD layout: each raw/FOV folder holds repeated noisy captures of one field of view, and gt/FOV holds their
-    /// average, which serves as ground truth. All frames of a FOV share one group id, so they're never split apart.
-    /// </summary>
-    private static List<ImagePair> LoadFmd(string rawDir, string gtDir, int maxFramesPerFov)
-    {
-        var result = new List<ImagePair>();
-        foreach (string fovDir in Directory.GetDirectories(rawDir).OrderBy(d => d, StringComparer.Ordinal))
-        {
-            string fov = Path.GetFileName(fovDir);
-            string? gtFile = Directory.Exists(Path.Combine(gtDir, fov))
-                ? ImageFiles(Path.Combine(gtDir, fov)).FirstOrDefault()
-                : null;
-            var clean = gtFile is null ? null : ImageLoader.Load(gtFile);
-            foreach (string frame in ImageFiles(fovDir).Take(maxFramesPerFov))
-                result.Add(new ImagePair(ImageLoader.Load(frame), clean, $"fov-{fov}", $"{fov}/{Path.GetFileName(frame)}"));
         }
         return result;
     }
