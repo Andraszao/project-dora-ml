@@ -17,16 +17,18 @@ All numbers come from this repo, run on a 4-core cloud VM with no GPU.
 
 | Check | Result |
 |---|---|
-| Core unit tests (`dotnet test`) | 124 passing in ~5 s, including finite-difference gradient checks (mutation-tested) |
-| Brick gates (`./bricks.sh`) | all 18 green (gates 11–15 with the FMD data and P3 weights present); documentation of every public member is enforced by the build |
-| Gates can fail (`./bricks.sh --self-test`) | one planted bug per gate 0–7 and 11–17 (two for gate 0), all 16 caught (after a clean control copy passes) |
+| Core unit tests (`dotnet test`) | 147 passing in ~5 s, including finite-difference gradient checks for both architectures (mutation-tested) |
+| Brick gates (`./bricks.sh`) | all 22 green (gates 11–15 and 21 with the FMD data and experiment weights present); documentation of every public member is enforced by the build |
+| Gates can fail (`./bricks.sh --self-test`) | one planted bug per gate 0–7 and 11–21 (two for gate 0), all 20 caught (after a clean control copy passes) |
 | CI (GitHub Actions) | all gates incl. headless Godot, on PRs into `main`, pushes to `main` and manual runs (docs-only changes skipped): [run #1](https://github.com/Andraszao/project-dora-ml/actions/runs/45617118232) green in 150 s of runner time, 0 billable minutes (public repo) |
 | Codecs vs. independent encoders | TIFF/PNG fixtures written by Pillow, ImageMagick and libtiff decode exactly |
 | Tiled vs. whole-image inference | identical (≤1e-5) for ragged tiles, tiles smaller than the receptive field, etc. |
 | Training reproducibility | two runs with the same seed produce bit-identical weights |
 | Bundled model training | Noise2Void on 10 synthetic 256 px frames, reached the 8 dB "mastery" target at epoch 25 in 5 min |
 | Held-out evaluation (4 unseen synthetic FOVs) | noisy **20.89 dB / SSIM 0.223** → bilateral **28.43 / 0.677** → DORA **30.21 / 0.809** |
-| **Real microscope data** (FMD, 48 held-out images, raw noise level; [details](docs/RESULTS.md)) | noisy **27.22 dB / 0.543** → bilateral **30.22 / 0.752** → DORA supervised **33.75 / 0.880**. Without ground truth: Noise2Void routed by the noise check **32.97 / 0.844**, plain Noise2Void 31.68 / 0.774; the bundled synthetic model 32.15 / 0.818 |
+| **Real microscope data** (FMD, 48 held-out images, raw noise level; [details](docs/RESULTS.md)) | noisy **27.22 dB / 0.543** → bilateral **30.22 / 0.752** → DORA supervised **33.75 / 0.880**, or **34.73 / 0.907** with `--arch unet`. Without ground truth: Noise2Void routed by the noise check **32.97 / 0.844**, plain Noise2Void 31.68 / 0.774; the bundled synthetic model 32.15 / 0.818 |
+| U-Net vs dilated network (same budget) | supervised +0.98 dB, Noise2Void −0.47 dB, 1.36× slower; the dilated network stays the default by the rule set before measuring |
+| Tiled vs. whole-image U-Net inference | identical (≤1e-5), with tiles on the 2^depth grid |
 | Correlated-noise check (no ground truth) | same verdict as the ground-truth measurement on all 48 FMD test images; flags exactly the 228 widefield images among 912 training images |
 | Noise-model calibration (one image) | synthetic: gain within 5.1%, variance curve within 6.8%; real FMD: reliable on widefield only ([details](docs/RESULTS.md#variance-stabilization-and-calibration-bricks-1617)) |
 | Train/test leakage on FMD | `dora-bio fmd-check`: every test image is FOV 19 pixel for pixel, and FOV 19 never enters training |
@@ -142,9 +144,9 @@ The plan this rebuild started from had a few errors. Where the build differs fro
 
 ## Roadmap
 
-[`PATHWAY.md`](PATHWAY.md) lays out phases P0–P10: the foundation (P0), CI (P1), validation on real FMD data (P2)
-and noise-model fidelity (P3: correlated-noise check, structured blind spots, variance stabilization) are done.
-Next come a U-Net (P4), performance, stacks, analysis tools, model management, more formats, and a release. Each
+[`PATHWAY.md`](PATHWAY.md) lays out phases P0–P10: the foundation (P0), CI (P1), validation on real FMD data (P2),
+noise-model fidelity (P3: correlated-noise check, structured blind spots, variance stabilization) and a U-Net (P4)
+are done. Next come performance (P5), stacks, analysis tools, model management, more formats, and a release. Each
 phase is a set of gated bricks.
 
 ## Honesty notes and limitations

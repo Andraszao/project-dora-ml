@@ -47,8 +47,8 @@ godot/                         Godot 4.5 .NET project (open THIS folder in Godot
 ## Development pathway
 
 Work follows [`PATHWAY.md`](PATHWAY.md): phases **P0 → P10**, each a group of bricks with gates. P0 (bricks 0–8),
-P1 (bricks 9–10, CI), P2 (bricks 11–13, real FMD data) and P3 (bricks 14–17, noise-model fidelity) are done.
-**The current phase is P4 (model capacity: a U-Net)**, starting with brick 18 (`pool-upsample`). Pick up the next unfinished brick of the current phase,
+P1 (bricks 9–10, CI), P2 (bricks 11–13, real FMD data), P3 (bricks 14–17, noise-model fidelity) and P4 (bricks 18–21,
+U-Net) are done. **The current phase is P5 (performance)**, starting with brick 22 (`bench`). Pick up the next unfinished brick of the current phase,
 follow the phase protocol there, and update its status table when a phase closes. Read `docs/RESULTS.md` before
 changing training or the model: it records what actually works on real data.
 
@@ -82,7 +82,7 @@ before anything is built on top.** `./bricks.sh` runs the gates in order and sto
 | 20 | unet-tiling | `TiledInference.cs` | `Brick=20-unet-tiling`: tiled U-Net inference equals whole-image inference for ragged sizes |
 | 21 | arch-eval | `tools/experiments/p4_arch.sh`, `docs/RESULTS.md` | `Brick=21-arch-eval`; the default architecture follows the rule set before measuring; with data + weights: the recorded blocks reproduce |
 
-Gates 11–15 need the dataset (gate 15's reproduction also needs the weights from `tools/experiments/p3_struct.sh`) (`tools/fetch_fmd.sh`, about 9 GB into the gitignored `data/fmd/`). Without it, their
+Gates 11–15 and 21 need the dataset (the reproductions in gates 15 and 21 also need the weights from `tools/experiments/`) (`tools/fetch_fmd.sh`, about 9 GB into the gitignored `data/fmd/`). Without it, their
 data-dependent part reports SKIPPED (exit code 77) while the pins, unit tests and RESULTS.md checks still run. CI has
 no data and must not download it.
 
@@ -123,6 +123,7 @@ dotnet tools/DoraBio.Cli/bin/Release/net8.0/dora-bio.dll fmd-eval --weights W.bi
 tools/experiments/p2_fmd.sh                               # retrain + evaluate every P2 model (~45 min CPU)
 tools/experiments/p3_struct.sh                            # P3: plain vs structured blind spots (~50 min CPU)
 tools/experiments/p3_vst.sh                               # P3: with and without variance stabilization (~16 min CPU)
+tools/experiments/p4_arch.sh                              # P4: U-Net vs dilated network (~21 min CPU)
 dotnet tools/DoraBio.Cli/bin/Release/net8.0/dora-bio.dll fmd-noise --root data/fmd   # is the real noise pixel-independent?
 dotnet tools/DoraBio.Cli/bin/Release/net8.0/dora-bio.dll diagnose --in IMAGE          # the same question, without ground truth
 dotnet test DoraBio.sln                                   # all tests at once, ~5 s
@@ -160,6 +161,8 @@ cd godot && dotnet build && godot --headless --path . --import \
     wins on noisy input and loses on clean input (and one network trained on mixed data loses on the independent
     images), and the second lost overall (docs/RESULTS.md, P3). Don't make either a default without new held-out
     evidence. Choose footprints and other settings on validation data, never on test_mix.
+    The same goes for the architecture: by P4's rule the dilated network is the default (the U-Net won supervised,
+    +0.98 dB, but lost Noise2Void); gate 21 fails if `NetConfig.Default` disagrees with the recorded results.
 11. **Never train on FMD's test FOV (19).** `FmdOptions.ExcludedFovs` defaults to it, the CLI doesn't expose it, and
     gate 12 proves test_mix is FOV 19 and absent from the training plan. Report results on test_mix only.
 12. **Don't commit FMD data, or weights trained on it, without a license decision.** The data is CC BY-SA 4.0;
