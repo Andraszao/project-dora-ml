@@ -19,6 +19,8 @@ public sealed class Trainer
     private readonly DenoisingNet _net;
     private readonly TrainerConfig _config;
 
+    /// <param name="net">Trained in place. Pass a clone if the original must stay usable meanwhile.</param>
+    /// <param name="config">Validated immediately; invalid settings throw here, not mid-run.</param>
     public Trainer(DenoisingNet net, TrainerConfig config)
     {
         config.Validate();
@@ -26,11 +28,17 @@ public sealed class Trainer
         _config = config;
     }
 
+    /// <summary>Runs training to completion, cancellation, mastery or early stop. The network ends up holding its best weights.</summary>
+    /// <param name="dataset">Normalized image pairs. Split into train and validation by FOV inside this call.</param>
+    /// <param name="onEpoch">Called on the training thread after every epoch (log it, persist it, or marshal it to a UI).</param>
+    /// <param name="cancellation">Checked between steps; the current step finishes, then the best weights are restored.</param>
     public TrainingResult Train(
         IReadOnlyList<ImagePair> dataset,
         Action<EpochReport>? onEpoch = null,
         CancellationToken cancellation = default)
     {
+        // Setup: split by FOV, build the sampler and the fixed validation set, and create a fresh optimizer.
+        // Targets only exist when validation has clean data (PSNR gain needs ground truth).
         var cfg = _config;
         var (trainImages, valImages) = DatasetSplit.Split(dataset, cfg.ValidationFraction, cfg.Seed);
         var rng = new Random(cfg.Seed);
@@ -51,16 +59,20 @@ public sealed class Trainer
 
         for (int epoch = 1; epoch <= cfg.MaxEpochs; epoch++)
         {
+            // 1. Train: StepsPerEpoch mini-batch updates (cancellation is checked between steps).
             double lossSum = 0;
             int steps = 0;
             for (; steps < cfg.StepsPerEpoch && !cancellation.IsCancellationRequested; steps++)
                 lossSum += stepper.Step(sampler, optimizer);
             if (cancellation.IsCancellationRequested && steps == 0) { stopReason = "cancelled"; break; }
 
+            // 2. Score on the fixed validation patches. With ground truth, PSNR is the score. Without it,
+            //    the blind-spot loss is the only signal (negated so that higher is better in both cases).
             var score = validation.Evaluate(_net);
-            double primary = score.Psnr ?? -score.Loss;   // higher is better
+            double primary = score.Psnr ?? -score.Loss;
             var events = new List<string>();
 
+            // 3. Keep the best weights. On a plateau, decay the learning rate every PlateauPatience stale epochs.
             bool isBest = primary > bestScore + 1e-6;
             if (isBest)
             {
@@ -81,6 +93,7 @@ public sealed class Trainer
                 }
             }
 
+            // 4. Progressive targets: is DORA's improvement over the raw input big enough yet?
             double? gain = score.Psnr - validation.NoisyPsnr;
             TargetEvent? targetEvent = null;
             if (targets is not null && gain is { } g)
@@ -94,11 +107,13 @@ public sealed class Trainer
             history.Add(report);
             onEpoch?.Invoke(report);
 
+            // 5. Stop conditions, in priority order.
             if (cancellation.IsCancellationRequested) { stopReason = "cancelled"; break; }
             if (cfg.StopOnMastery && targetEvent?.Kind == TargetEventKind.Mastered) { stopReason = "mastered"; break; }
             if (epochsSinceBest >= cfg.EarlyStopPatience) { stopReason = "early_stop"; break; }
         }
 
+        // Hand back the best weights seen, not whatever the last epoch happened to leave (v1 saved the last).
         if (bestEpoch > 0) Array.Copy(bestParameters, _net.Parameters, bestParameters.Length);
         return new TrainingResult(history, bestEpoch, bestScore, validation.NoisyPsnr, stopReason, targets?.IsMastered ?? false);
     }
@@ -114,6 +129,7 @@ internal sealed class BatchStepper
     private readonly float[] _gradients;
     private readonly WorkspacePool _pool;
 
+    /// <summary>Preallocates the batch, one gradient buffer per sample, and the summed gradient.</summary>
     public BatchStepper(DenoisingNet net, int batchSize, int patchSize)
     {
         _net = net;
@@ -128,10 +144,16 @@ internal sealed class BatchStepper
     public double Step(PatchSampler sampler, AdamOptimizer optimizer)
     {
         sampler.Fill(_batch);
+
+        // Normalize by the masked pixels in the whole batch, so the summed gradients are those of the
+        // batch-mean loss, whether a pixel is one of 2% blind spots or one of 100% supervised pixels.
         double maskTotal = 0;
         foreach (float m in _batch.Masks) maskTotal += m;
         float scale = (float)(1.0 / Math.Max(1.0, maskTotal));
         int size = _batch.Size;
+
+        // Each sample writes only its own gradient buffer, so the parallel loop needs no locks. Summing the
+        // buffers afterwards in sample order (not completion order) keeps runs bit-for-bit reproducible.
 
         Parallel.For(0, _batch.Count, () => _pool.Rent(), (i, _, ws) =>
         {

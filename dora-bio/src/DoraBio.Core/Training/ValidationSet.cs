@@ -3,6 +3,10 @@ using DoraBio.Core.Nn;
 
 namespace DoraBio.Core.Training;
 
+/// <summary>One evaluation of the validation set.</summary>
+/// <param name="Loss">Mean blind-spot MSE against noisy pixels (Noise2Void) or MSE against clean (supervised).</param>
+/// <param name="Psnr">PSNR of DORA's output on the unmasked input against clean, in dB; null without ground truth.</param>
+/// <param name="Ssim">Mean SSIM against clean; null without ground truth.</param>
 public sealed record ValidationScore(double Loss, double? Psnr, double? Ssim);
 
 /// <summary>
@@ -17,13 +21,22 @@ internal sealed class ValidationSet
     private readonly int _size;
     private readonly TrainingMode _mode;
 
+    /// <summary>
+    /// One fixed validation patch. The blind-spot mask is drawn once, so the Noise2Void loss is comparable
+    /// from epoch to epoch.
+    /// </summary>
     private sealed record Patch(float[] Noisy, float[] MaskedInput, float[] Mask, float[]? Clean);
 
+    /// <summary>True when every validation patch has ground truth, so PSNR, SSIM and progressive targets are available.</summary>
     public bool HasClean { get; }
 
     /// <summary>PSNR of the noisy input itself against clean, i.e. the "do nothing" baseline.</summary>
     public double? NoisyPsnr { get; }
 
+    /// <summary>
+    /// Extracts <see cref="TrainerConfig.ValidationPatches"/> patches, cycling through the held-out images,
+    /// at positions drawn from a seed derived from <see cref="TrainerConfig.Seed"/>.
+    /// </summary>
     public ValidationSet(IReadOnlyList<ImagePair> images, TrainerConfig config)
     {
         _mode = config.Mode;
@@ -52,6 +65,7 @@ internal sealed class ValidationSet
             NoisyPsnr = Metrics.PsnrFromMse(_patches.Average(p => Metrics.Mse(p.Noisy, p.Clean!)));
     }
 
+    /// <summary>Scores the network on every patch in parallel. Read-only with respect to the network.</summary>
     public ValidationScore Evaluate(DenoisingNet net)
     {
         var pool = new WorkspacePool(net);

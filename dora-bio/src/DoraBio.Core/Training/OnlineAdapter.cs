@@ -19,10 +19,24 @@ public sealed class OnlineAdapter
     private readonly Random _rng;
     private readonly float _maskRatio;
 
+    /// <summary>Side of the patches drawn from the image. The image must be at least this large.</summary>
     public int PatchSize { get; }
+
+    /// <summary>Total adaptation steps taken so far, across all <see cref="Adapt"/> calls (Adam's t).</summary>
     public long OptimizerStep => _optimizer.Step;
+
+    /// <summary>The adaptation step size.</summary>
     public float LearningRate => _optimizer.LearningRate;
 
+    /// <param name="net">The model to adapt. It's modified in place, so take a clone if the original must survive.</param>
+    /// <param name="learningRate">
+    /// Deliberately about 10× below the training rate: adaptation should nudge a trained model toward this
+    /// microscope's noise, not overwrite what it learned.
+    /// </param>
+    /// <param name="patchSize">Patch side; the bridge lowers it for small images.</param>
+    /// <param name="batchSize">Patches per step.</param>
+    /// <param name="maskRatio">Blind-spot fraction per patch.</param>
+    /// <param name="seed">Seeds patch positions and masks.</param>
     public OnlineAdapter(DenoisingNet net, float learningRate = 1e-4f, int patchSize = 64, int batchSize = 8,
         float maskRatio = 0.02f, int seed = 7)
     {

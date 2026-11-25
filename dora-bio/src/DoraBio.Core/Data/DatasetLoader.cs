@@ -12,8 +12,16 @@ namespace DoraBio.Core.Data;
 ///             Matches the dataset's documented layout but has not been tested against the real download.
 /// 3. Flat:    dir/*.tif|png, noisy only, for Noise2Void. Each file is its own FOV.
 /// </summary>
+/// <remarks>
+/// Gated by brick 5 (training) although it lives in Data/, because it depends on the IO brick's decoders.
+/// </remarks>
 public static class DatasetLoader
 {
+    /// <summary>Detects the layout, loads every image, checks sizes, and normalizes each pair by its noisy image's percentiles.</summary>
+    /// <param name="dir">Dataset root folder.</param>
+    /// <param name="maxFramesPerFov">FMD only: raw frames used per FOV (FMD ships 50 per FOV; more mostly adds near-duplicates).</param>
+    /// <exception cref="DirectoryNotFoundException"><paramref name="dir"/> doesn't exist.</exception>
+    /// <exception cref="InvalidDataException">No supported images found, or a clean image doesn't match its noisy image's size.</exception>
     public static List<ImagePair> LoadDirectory(string dir, int maxFramesPerFov = 4)
     {
         if (!Directory.Exists(dir)) throw new DirectoryNotFoundException(dir);
@@ -32,6 +40,7 @@ public static class DatasetLoader
         return raw.Select(p => p.Normalize().Pair).ToList();
     }
 
+    /// <summary>noisy/NAME.* paired with clean/NAME.* by file stem; a noisy image without a match gets no clean image.</summary>
     private static List<ImagePair> LoadPaired(string noisyDir, string cleanDir)
     {
         var result = new List<ImagePair>();
@@ -46,6 +55,10 @@ public static class DatasetLoader
         return result;
     }
 
+    /// <summary>
+    /// FMD layout: each raw/FOV folder holds repeated noisy captures of one field of view, and gt/FOV holds their
+    /// average, which serves as ground truth. All frames of a FOV share one group id, so they're never split apart.
+    /// </summary>
     private static List<ImagePair> LoadFmd(string rawDir, string gtDir, int maxFramesPerFov)
     {
         var result = new List<ImagePair>();
@@ -62,6 +75,7 @@ public static class DatasetLoader
         return result;
     }
 
+    /// <summary>Supported image files in <paramref name="dir"/>, sorted ordinally so load order (and seeded splits) is stable.</summary>
     private static IEnumerable<string> ImageFiles(string dir) =>
         Directory.GetFiles(dir).Where(ImageLoader.IsSupported).OrderBy(f => f, StringComparer.Ordinal);
 }
