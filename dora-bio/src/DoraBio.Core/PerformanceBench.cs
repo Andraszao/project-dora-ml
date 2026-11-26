@@ -12,7 +12,8 @@ namespace DoraBio.Core;
 /// <param name="MedianSeconds">Median wall time of the timed runs (after one untimed warm-up run).</param>
 /// <param name="MinSeconds">Fastest timed run.</param>
 /// <param name="Runs">Number of timed runs.</param>
-/// <param name="Kernels">"blocked" (the kernels DORA runs) or "reference" (the original row kernels, for comparison).</param>
+/// <param name="Kernels">"blocked" (the kernels DORA runs), "reference" (the original row kernels, for comparison) or
+/// "blocked-256" (the blocked kernels with the 512-bit ones turned off; only on AVX-512 machines).</param>
 public sealed record BenchTiming(string Name, string Architecture, string Detail, double MedianSeconds, double MinSeconds, int Runs,
     string Kernels = "blocked");
 
@@ -68,8 +69,10 @@ public static class PerformanceBench
     /// <summary>
     /// The standard set: denoise and both kinds of training step, for the default dilated network and the default
     /// U-Net, plus the dilated network's denoise and Noise2Void step on the reference kernels, so the blocked kernels'
-    /// speedup can be checked on whatever machine runs this (gate 24). Full: a 512×512 frame (5 runs) and batch 16 at
-    /// 64 px (10 steps). Quick (for gate 22): 128×128 and batch 4 at 32 px, 3 runs each.
+    /// speedup can be checked on whatever machine runs this (gate 24). On AVX-512 machines the dilated denoise and
+    /// Noise2Void step and the U-Net denoise are also timed with the 512-bit kernels turned off ("blocked-256", brick
+    /// 36), interleaved with the normal runs. Full: a 512×512 frame (5 runs) and batch 16 at 64 px (10 steps). Quick
+    /// (for gate 22): 128×128 and batch 4 at 32 px, 3 runs each.
     /// </summary>
     public static IReadOnlyList<BenchTiming> Run(bool quick)
     {
@@ -85,18 +88,27 @@ public static class PerformanceBench
             results.Add(TrainStep(net, TrainingMode.Supervised, batch, patch, stepRuns));
             if (config.Architecture == NetArchitecture.Dilated)
             {
-                // The speedup gate 24 checks is measured with blocked and reference runs interleaved (A, B, A, B, …),
-                // so noise and drift on a shared machine hit both sides alike. These replace the plain timings above.
-                var (blocked, reference) = DenoisePair(net, size, denoiseRuns);
-                results[results.FindIndex(t => t.Name == "denoise" && t.Architecture == "dilated")] = blocked;
-                results.Add(reference);
-                (blocked, reference) = TrainStepPair(net, TrainingMode.Noise2Void, batch, patch, stepRuns);
-                results[results.FindIndex(t => t.Name == "train-step-n2v" && t.Architecture == "dilated")] = blocked;
-                results.Add(reference);
+                // The speedups gate 24 checks are measured with the variants' runs interleaved (A, B, C, A, B, C, …),
+                // so noise and drift on a shared machine hit every side alike. These replace the plain timings above.
+                var denoise = DenoiseVariants(net, size, denoiseRuns, reference: true);
+                results[results.FindIndex(t => t.Name == "denoise" && t.Architecture == "dilated")] = denoise[0];
+                results.AddRange(denoise.Skip(1));
+                var step = TrainStepVariants(net, TrainingMode.Noise2Void, batch, patch, stepRuns, reference: true);
+                results[results.FindIndex(t => t.Name == "train-step-n2v" && t.Architecture == "dilated")] = step[0];
+                results.AddRange(step.Skip(1));
+            }
+            else if (WideAvailable)
+            {
+                var denoise = DenoiseVariants(net, size, denoiseRuns, reference: false);
+                results[results.FindIndex(t => t.Name == "denoise" && t.Architecture == "unet")] = denoise[0];
+                results.AddRange(denoise.Skip(1));
             }
         }
         return results;
     }
+
+    /// <summary>True when the 512-bit kernels are on, so a "blocked-256" comparison means something (brick 36).</summary>
+    private static bool WideAvailable => ConvLayer.WideKernels;
 
     /// <summary>Denoise with the blocked and the reference kernels, runs interleaved; returns (blocked, reference).</summary>
     /// <param name="net">The model (only read; the reference runs use a copy).</param>
@@ -104,15 +116,26 @@ public static class PerformanceBench
     /// <param name="runs">Timed runs of each.</param>
     public static (BenchTiming Blocked, BenchTiming Reference) DenoisePair(DenoisingNet net, int size, int runs)
     {
+        var all = DenoiseVariants(net, size, runs, reference: true);
+        return (all[0], all.First(t => t.Kernels == "reference"));
+    }
+
+    /// <summary>
+    /// Denoise with the blocked kernels, the reference kernels (if <paramref name="reference"/>) and, on AVX-512 machines,
+    /// the blocked kernels limited to 256 bits, runs interleaved. The blocked timing comes first.
+    /// </summary>
+    private static List<BenchTiming> DenoiseVariants(DenoisingNet net, int size, int runs, bool reference)
+    {
         var frame = SyntheticFluorescence.Generate(size, size, seed: 17);
         var (pair, _) = new ImagePair(frame.Noisy, null, "bench", "bench").Normalize();
-        var reference = net.Clone();
-        reference.ReferenceKernels = true;
-        var (a, b) = TimePair(runs,
-            () => TiledInference.Denoise(net, pair.Noisy),
-            () => TiledInference.Denoise(reference, pair.Noisy));
+        var referenceNet = net.Clone();
+        referenceNet.ReferenceKernels = true;
         string detail = $"{size}x{size}, tile {TiledInference.DefaultTileCore}";
-        return (Summarize("denoise", net, detail, a, false), Summarize("denoise", net, detail, b, true));
+        var variants = new List<(string Kernels, Action Run)> { ("blocked", () => TiledInference.Denoise(net, pair.Noisy)) };
+        if (reference) variants.Add(("reference", () => TiledInference.Denoise(referenceNet, pair.Noisy)));
+        if (WideAvailable) variants.Add(("blocked-256", Narrow(() => TiledInference.Denoise(net, pair.Noisy))));
+        var times = TimeInterleaved(runs, variants.Select(v => v.Run).ToArray());
+        return variants.Select((v, i) => Summarize("denoise", net, detail, times[i], v.Kernels)).ToList();
     }
 
     /// <summary>Training steps with the blocked and the reference kernels, runs interleaved; returns (blocked, reference).</summary>
@@ -122,6 +145,13 @@ public static class PerformanceBench
     /// <param name="patch">Patch side length.</param>
     /// <param name="runs">Timed steps of each.</param>
     public static (BenchTiming Blocked, BenchTiming Reference) TrainStepPair(DenoisingNet net, TrainingMode mode, int batch, int patch, int runs)
+    {
+        var all = TrainStepVariants(net, mode, batch, patch, runs, reference: true);
+        return (all[0], all.First(t => t.Kernels == "reference"));
+    }
+
+    /// <summary>Training steps of the same variants as <see cref="DenoiseVariants"/>, each on its own copy of the model.</summary>
+    private static List<BenchTiming> TrainStepVariants(DenoisingNet net, TrainingMode mode, int batch, int patch, int runs, bool reference)
     {
         Action Stepper(bool referenceKernels)
         {
@@ -133,29 +163,37 @@ public static class PerformanceBench
             var optimizer = new AdamOptimizer(clone.ParameterCount, 1e-3f) { ClipNorm = 1f };
             return () => stepper.Step(sampler, optimizer);
         }
-        var (a, b) = TimePair(runs, Stepper(false), Stepper(true));
+        var variants = new List<(string Kernels, Action Run)> { ("blocked", Stepper(false)) };
+        if (reference) variants.Add(("reference", Stepper(true)));
+        if (WideAvailable) variants.Add(("blocked-256", Narrow(Stepper(false))));
+        var times = TimeInterleaved(runs, variants.Select(v => v.Run).ToArray());
         string name = mode == TrainingMode.Noise2Void ? "train-step-n2v" : "train-step-supervised";
         string detail = $"batch {batch} @ {patch}px";
-        return (Summarize(name, net, detail, a, false), Summarize(name, net, detail, b, true));
+        return variants.Select((v, i) => Summarize(name, net, detail, times[i], v.Kernels)).ToList();
     }
 
-    private static (double[] A, double[] B) TimePair(int runs, Action a, Action b)
+    /// <summary>Runs <paramref name="action"/> with the 512-bit kernels turned off (bit-identical results; only slower).</summary>
+    private static Action Narrow(Action action) => () =>
+    {
+        ConvLayer.WideKernels = false;
+        try { action(); }
+        finally { ConvLayer.WideKernels = true; }
+    };
+
+    /// <summary>Warms every action up, then times them in turn (A, B, C, A, B, C, …) so drift hits all alike.</summary>
+    private static double[][] TimeInterleaved(int runs, Action[] actions)
     {
         if (runs < 1) throw new ArgumentOutOfRangeException(nameof(runs));
-        a();
-        b();   // warm both up first
-        var ta = new double[runs];
-        var tb = new double[runs];
+        foreach (var a in actions) a();
+        var times = actions.Select(_ => new double[runs]).ToArray();
         for (int i = 0; i < runs; i++)
-        {
-            var clock = Stopwatch.StartNew();
-            a();
-            ta[i] = clock.Elapsed.TotalSeconds;
-            clock.Restart();
-            b();
-            tb[i] = clock.Elapsed.TotalSeconds;
-        }
-        return (ta, tb);
+            for (int k = 0; k < actions.Length; k++)
+            {
+                var clock = Stopwatch.StartNew();
+                actions[k]();
+                times[k][i] = clock.Elapsed.TotalSeconds;
+            }
+        return times;
     }
 
     private static double[] Time(int runs, Action action)
@@ -172,11 +210,14 @@ public static class PerformanceBench
         return times;
     }
 
-    private static BenchTiming Summarize(string name, DenoisingNet net, string detail, double[] times, bool referenceKernels)
+    private static BenchTiming Summarize(string name, DenoisingNet net, string detail, double[] times, bool referenceKernels) =>
+        Summarize(name, net, detail, times, referenceKernels ? "reference" : "blocked");
+
+    private static BenchTiming Summarize(string name, DenoisingNet net, string detail, double[] times, string kernels)
     {
         var sorted = times.OrderBy(t => t).ToArray();
         double median = sorted.Length % 2 == 1 ? sorted[sorted.Length / 2] : 0.5 * (sorted[sorted.Length / 2 - 1] + sorted[sorted.Length / 2]);
         string architecture = net.Config.Architecture == NetArchitecture.UNet ? "unet" : "dilated";
-        return new BenchTiming(name, architecture, detail, median, sorted[0], sorted.Length, referenceKernels ? "reference" : "blocked");
+        return new BenchTiming(name, architecture, detail, median, sorted[0], sorted.Length, kernels);
     }
 }

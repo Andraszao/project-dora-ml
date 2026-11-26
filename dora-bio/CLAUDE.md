@@ -17,7 +17,7 @@ loaded sample in-app, or train on synthetic data or on a folder.
 ```
 DoraBio.sln                    core + tests + CLI (no Godot)
 src/DoraBio.Core/              ALL ML/IO code. net8.0. No Godot, no NuGet dependencies.
-  Nn/        ConvLayer (3×3 dilated conv fwd/bwd), DenoisingNet (+ .UNet.cs: the U-Net graph; .Film.cs: noise conditioning), Resample (2×2 pool,
+  Nn/        ConvLayer (3×3 dilated conv fwd/bwd; .Blocked.cs register-blocked, .Wide.cs 512-bit), DenoisingNet (+ .UNet.cs: the U-Net graph; .Film.cs: noise conditioning), Resample (2×2 pool,
              upsample), AdamOptimizer, Simd, WorkspacePool
   Data/      GrayImage, Normalization, Anscombe (variance stabilization), Dihedral, V1Augment, BlindSpot (+MaskFootprint),
              PatchSampler, ImagePair/DatasetSplit,
@@ -32,7 +32,8 @@ src/DoraBio.Core/              ALL ML/IO code. net8.0. No Godot, no NuGet depend
   NoiseDiagnostics.cs (is the noise pixel-independent? from the noisy image alone),
   NoiseCalibration.cs (variance = gain · intensity + intercept, from the noisy image alone),
   NoiseConditioning.cs (the per-frame condition a noise-conditioned network gets: ln(σ̂ / 0.05) of the whole frame),
-  ExtBenchmark.cs (CARE's scoring protocol), Fidelity.cs (proportionality, ratio error, spots found and real)
+  ExtBenchmark.cs (CARE's scoring protocol), Fidelity.cs (proportionality, ratio error, spots found and real),
+  PerformanceBench.cs (timings for gates 22/24) and Roofline.cs (measured peaks, per-kernel GFLOP/s, stack-run split)
 tests/DoraBio.Core.Tests/      xunit. Fixtures/ written by Pillow/ImageMagick (make_fixtures.py) and tifffile/mrcfile (make_stack_fixtures.py)
 tools/DoraBio.Cli/             `dora-bio` CLI: synth | train | denoise | eval | info | bench | diagnose | ext-check | ext-eval | fidelity |
                                stack-check | stack-info | fmd-check | fmd-eval |
@@ -68,8 +69,10 @@ public sets (and faithful: slope 0.93) but not adopted, because it stops too ear
 the benchmark data (manifest + `ATTRIBUTIONS.md`) and added BigTIFF, MRC and per-axis stack reading; next is
 35 (Q2). Q2 was measured and not adopted (the U-Net missed the FMD guard by 0.0006 dB), and it found that longer Noise2Void
 training learns pixel-correlated noise, which the masked loss can't see; next are S1/S2 (systems track) and Q19 (the U-Net
-with routing). Owner decisions there: GPU training is
-an optional offline step (inference stays pure C# on the CPU), and the shipped model is trained only on synthetic and
+with routing). Brick 36 (S1 + S2) measured the roofline (every kernel compute-bound; inference 97% of a stack run) and
+added bit-identical 512-bit kernels (1.3–1.6× on AVX-512 CPUs); next is 37 (Q19). Owner decisions there: GPU training is
+an optional offline step, GPU inference is approved only as an opt-in forward path in the Godot app (S10; the CPU
+engine stays the reference and the CLI's engine), and the shipped model is trained only on synthetic and
 CC BY / CC0 data, with FMD kept for evaluation.
 Pick up the next unfinished brick of the current phase, follow the phase protocol there, and update its status table when a phase closes. Read `docs/RESULTS.md` before
 changing training or the model: it records what actually works on real data.
@@ -117,6 +120,7 @@ before anything is built on top.** `./bricks.sh` runs the gates in order and sto
 | 33 | q12-n2v-recipe (quality pass, SOTA stage 1) | `ExtDatasets.ValidationPlan`, CLI `ext-eval`/`fidelity --split validation`, `train --mask-ratio`, `tools/experiments/q12_n2v.sh` | `Brick=33-q12-n2v-recipe`: the validation plan is exactly the trainer's split; the recorded selection log and Q12's verdict follow the pre-registered rule; with data + runs/q12 the blocks reproduce |
 | 34 | ext-data-2 (SOTA stage 1) | `tools/ext_manifest.json`, `tools/ext_data.py`, `ATTRIBUTIONS.md`, BigTIFF in `IO/TiffCodec.cs`, `IO/MrcReader.cs`, `IO/ImageStack.cs` (`StackLayout`), `Data/ExtStacks.cs`, CLI `stack-check`, `stack-info` | `ext_data.py check` (schema, pins, licence policy) and `attributions --check`; `Brick=34-ext-data-2`: ImageJ/tifffile/BigTIFF/MRC fixtures from independent writers read plane by plane at the right position; contradictory metadata is an error; pairs by pattern + substitution; registries = manifest; with data: every download matches its pins and `stack-check` finds the published counts |
 | 35 | q2-n2v-stop (quality pass, SOTA stage 1) | `TrainerConfig.Selection` (`ValidationSignal`), `KeepLastEpoch`, `TrainingResult.LastParameters`, `TrainingJobOptions.LastWeightsPath`, CLI `train --select/--patience/--keep/--save-last`, `info --default-n2v`, `fmd-eval --precise`, `tools/experiments/q2_stop.sh` | `Brick=35-q2-n2v-stop`: the loss signal picks the lowest-loss epoch where PSNR would pick another; patience 0 runs the whole budget; best or last weights kept and the last always reported; the recorded choice, verdict (on unrounded FMD scores) and `train --mode n2v` defaults follow the pre-registered rule; with data + runs/q2 the blocks reproduce |
+| 36 | roofline-wide (systems S1 + S2) | `Roofline.cs`, CLI `bench --roofline`, `Nn/ConvLayer.Wide.cs` (512-bit forward and input-gradient kernels, `DORA_WIDE_KERNELS=0` turns them off), unrolled taps in `ConvLayer.Blocked.cs`, `PerformanceBench` (interleaved `blocked-256` timings), `tools/ci/perf_budget.json` (`wide_speedups`) | `Brick=36-roofline-wide`: the 512-bit kernels, forced on (any CPU), equal the reference on 200 shapes and whole networks; `bench --roofline` reports peaks, kernels and the stack split; gate 24 checks the 512-bit speedup floor on AVX-512 machines |
 
 Gates 11–15 and 21 need the dataset (the reproductions in gates 15 and 21 also need the weights from `tools/experiments/`) (`tools/fetch_fmd.sh`, about 9 GB into the gitignored `data/fmd/`). Without it, their
 data-dependent part reports SKIPPED (exit code 77) while the pins, unit tests and RESULTS.md checks still run. CI has
@@ -195,6 +199,9 @@ cd godot && dotnet build && godot --headless --path . --import \
    The register-blocked kernels (`ConvLayer.Blocked.cs`) must stay **bit-identical** to the reference row kernels
    (`ForwardReference`/`BackwardReference`): same terms, same order per output value, separate multiply and add.
    Never use a fused multiply-add there; it would change results and break the recorded FMD reproductions.
+   The 512-bit kernels (`ConvLayer.Wide.cs`) follow the same rule, and only where SIMD lanes are pixels (forward, input
+   gradients). The weight-gradient kernel sums across pixels, so its lane width is part of its rounding: it stays on
+   `Vector<float>` (256 bits on AVX2/AVX-512 machines; .NET 8 never makes `Vector<T>` wider).
 5. **Tiled inference must equal whole-image inference** (`TiledInference` margin = receptive radius,
    clipped at image edges). Covered by `TiledInferenceMatchesWholeImage`.
 6. **Optimizer state persists** across online adaptation (`OnlineAdapter`). A fresh Adam at t = 1 is a sign-step

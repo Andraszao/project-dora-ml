@@ -52,6 +52,9 @@ public static class Program
                    |   info --default-condition   (supervised training's default --condition: none or noise)
           bench    [--quick] [--json OUT.json]
                    Timings: denoise a frame and one training step, for both architectures (see PerformanceBench).
+          bench --roofline [--json OUT.json]
+                   This CPU's measured peaks (mul+add and FMA at 256/512 bits, read bandwidth per cache level), each
+                   convolution kernel's GFLOP/s and bytes against them, and where a stack run's time goes (~1 min).
           diagnose --in IMAGE
                    Does the image's noise look independent between pixels, as Noise2Void assumes? (no ground truth needed)
           stack-check [--root data/ext] [--dataset NAME]
@@ -563,6 +566,7 @@ public static class Program
     /// </summary>
     private static int Bench(Options o)
     {
+        if (o.Has("roofline")) return BenchRoofline(o);
         bool quick = o.Has("quick");
         var timings = PerformanceBench.Run(quick);
         Console.WriteLine($"{"operation",-22} {"architecture",-12} {"kernels",-10} {"detail",-20} {"median s",9} {"min s",9}");
@@ -940,6 +944,34 @@ public static class Program
         Console.WriteLine($"{Path.GetFileName(path)}: {stack.Format}, {stack.Layout.FullAxes}, {stack.Layout} " +
                           $"({stack.PlaneCount} planes of {stack.Width}×{stack.Height}; shape from {stack.Layout.Source})");
         Console.WriteLine($"first plane: min {plane.Pixels.Min():0.###}, mean {plane.Pixels.Average(v => (double)v):0.###}, max {plane.Pixels.Max():0.###}");
+        return 0;
+    }
+
+    /// <summary>
+    /// <c>bench --roofline</c> (systems brick S1): the machine's measured peaks, every convolution kernel shape DORA runs
+    /// set against them, and a stack run's time per stage, so speed work targets the real limit.
+    /// </summary>
+    private static int BenchRoofline(Options o)
+    {
+        var peaks = Roofline.MeasurePeaks();
+        Console.WriteLine($"machine: {peaks.Cores} threads, Vector<float> = {peaks.VectorBits} bits, AVX-512 {(System.Runtime.Intrinsics.Vector512.IsHardwareAccelerated ? "yes" : "no")}");
+        Console.WriteLine($"{"peak",-22} {"1 thread",10} {"all threads",12}");
+        foreach (var c in peaks.Compute) Console.WriteLine($"{c.Name,-22} {c.OneThread,7:0.0} GF {c.AllThreads,9:0.0} GF");
+        foreach (var b in peaks.Bandwidth) Console.WriteLine($"{b.Name,-22} {b.OneThread,7:0.0} GB {b.AllThreads,9:0.0} GB");
+        var kernels = Roofline.MeasureKernels(peaks);
+        Console.WriteLine($"{"kernel",-9} {"shape",-20} {"GFLOP/s",8} {"ms",8} {"MB",7} {"flop/B",7} {"of compute",10} {"of bandwidth",12}  bound");
+        foreach (var k in kernels)
+            Console.WriteLine($"{k.Kernel,-9} {k.Shape,-20} {k.Gflops,8:0.0} {k.Seconds * 1e3,8:0.00} {k.Megabytes,7:0.00} {k.Intensity,7:0.0} {k.ComputeShare,10:P0} {k.BandwidthShare,12:P0}  {k.Bound}");
+        var stack = Roofline.MeasureStack(DenoisingNet.Create(NetConfig.Default, seed: 5));
+        Console.WriteLine($"stack run, per 512² page ({stack.Pages} pages): decode {stack.DecodeSeconds * 1e3:0.0} ms, inference {stack.InferSeconds * 1e3:0.0} ms, " +
+                          $"normalize + map back {stack.OtherProcessingSeconds * 1e3:0.0} ms, encode + write {stack.EncodeWriteSeconds * 1e3:0.0} ms " +
+                          $"(inference {stack.InferSeconds / stack.TotalSeconds:P0})");
+        if (o.StringOrNull("json") is { } path)
+        {
+            var report = new { schema = 1, peaks, kernels = kernels.Select(k => new { k.Kernel, k.Shape, k.Gflop, k.Seconds, k.Gflops, k.Megabytes, k.Intensity, k.ComputeShare, k.BandwidthShare, k.Bound }), stack };
+            File.WriteAllText(path, System.Text.Json.JsonSerializer.Serialize(report, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+            Console.WriteLine($"📝 {path}");
+        }
         return 0;
     }
 

@@ -7,9 +7,12 @@ Schema 2: {schema: 2, model_version: str, quick: bool,
            machine: {cores: int > 0, simd_floats: int > 0, simd_accelerated: bool, os: str, dotnet: str},
            timings: [{name, architecture, kernels, detail: str, median_seconds >= min_seconds > 0, runs: int >= 1}, ...]}
 with exactly one "blocked" timing for each of the 3 operations × 2 architectures, plus "reference" timings of the
-dilated network's denoise and Noise2Void step.
+dilated network's denoise and Noise2Void step. On AVX-512 machines there are also "blocked-256" timings (the blocked
+kernels with the 512-bit ones off, brick 36) of the dilated denoise and Noise2Void step and the U-Net denoise.
 Budget file: {budgets: [{name, architecture, max_median_seconds}],
-              speedups: [{name, architecture, min_speedup_over_reference}]}
+              speedups: [{name, architecture, min_speedup_over_reference}],
+              wide_speedups: [{name, architecture, min_speedup_over_256}]}
+(wide_speedups are checked only when the report has blocked-256 timings, i.e. on AVX-512 machines).
 (blocked timings; a speedup is the reference median divided by the blocked median, measured in the same run, so it
 doesn't depend on how fast the machine is). Exit 0 when everything holds, 1 otherwise (each problem is printed).
 """
@@ -18,7 +21,7 @@ import sys
 
 NAMES = {"denoise", "train-step-n2v", "train-step-supervised"}
 ARCHITECTURES = {"dilated", "unet"}
-KERNELS = {"blocked", "reference"}
+KERNELS = {"blocked", "reference", "blocked-256"}
 REQUIRED = {(n, a, "blocked") for n in NAMES for a in ARCHITECTURES} | {
     ("denoise", "dilated", "reference"), ("train-step-n2v", "dilated", "reference")}
 
@@ -54,7 +57,7 @@ def check_schema(report):
             continue
         need(t.get("name") in NAMES, f"{where}.name must be one of {sorted(NAMES)}")
         need(t.get("architecture") in ARCHITECTURES, f"{where}.architecture must be dilated or unet")
-        need(t.get("kernels") in KERNELS, f"{where}.kernels must be blocked or reference")
+        need(t.get("kernels") in KERNELS, f"{where}.kernels must be one of {sorted(KERNELS)}")
         need(isinstance(t.get("detail"), str) and t["detail"], f"{where}.detail must be a non-empty string")
         median, low, runs = t.get("median_seconds"), t.get("min_seconds"), t.get("runs")
         numbers = all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (median, low))
@@ -83,6 +86,20 @@ def check_budget(report, budget):
         print(f"{b['name']:<22} {b['architecture']:<8} median {median:.4f} s, budget {b['max_median_seconds']:.4f} s: {'within' if ok else 'OVER'}")
         if not ok:
             problems.append(f"{key[:2]}: median {median:.4f} s is over the {b['max_median_seconds']} s budget")
+    narrow = {k for k in timings if k[2] == "blocked-256"}
+    for s in budget.get("wide_speedups", []):
+        fast, slow = (s["name"], s["architecture"], "blocked"), (s["name"], s["architecture"], "blocked-256")
+        if not narrow:
+            print(f"{s['name']:<22} {s['architecture']:<8} 512-bit speedup: not measured (no AVX-512 on this machine)")
+            continue
+        if fast not in timings or slow not in timings:
+            problems.append(f"wide speedup {fast[:2]} needs both blocked and blocked-256 timings")
+            continue
+        speedup = timings[slow] / timings[fast]
+        ok = speedup >= s["min_speedup_over_256"]
+        print(f"{s['name']:<22} {s['architecture']:<8} {speedup:.2f}x faster with 512-bit kernels, minimum {s['min_speedup_over_256']:.2f}x: {'ok' if ok else 'TOO SLOW'}")
+        if not ok:
+            problems.append(f"{fast[:2]}: only {speedup:.2f}x faster with the 512-bit kernels (minimum {s['min_speedup_over_256']}x)")
     for s in budget.get("speedups", []):
         fast, slow = (s["name"], s["architecture"], "blocked"), (s["name"], s["architecture"], "reference")
         if fast not in timings or slow not in timings:

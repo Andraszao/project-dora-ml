@@ -603,6 +603,49 @@ epoch (C), fix that without using ground truth?
   weakness of the rule: averaging four sets let C's 0.37 dB validation loss on FMD hide behind small public-set gains.
   Q19's rule adds a per-set floor on validation.
 
+## Systems S1 + S2 (brick 36): where the time goes, and 512-bit kernels
+
+Measured with `dora-bio bench --roofline` (and `dora-bio bench` for whole-model timings) on the 4-vCPU cloud container
+(Intel Xeon @ 2.1 GHz with AVX-512, 2 MB L2 per core). This machine is shared and noisy: all-thread figures moved by up
+to 60% between runs, and the one-thread mul+add peak by 20% (47–59 GFLOP/s at 256 bits). So one-thread figures and
+interleaved comparisons are what the conclusions rest on. These numbers are a measurement record, not a gated block:
+another machine gives other numbers.
+
+| Peak, one thread | 256-bit | 512-bit |
+|---|---|---|
+| Separate multiply and add (what DORA's kernels do) | 47–59 GFLOP/s | 79 GFLOP/s |
+| Fused multiply-add (not allowed: it would change every result) | 90 GFLOP/s | 166 GFLOP/s |
+| Read bandwidth: L1 / L2 / L3 / DRAM | 71 / 49 / 26 / 11 GB/s | |
+
+| Kernel, one thread | Shape | 256-bit | 512-bit | FLOP per byte |
+|---|---|---|---|---|
+| Forward (dilated, inference tile) | 24→24, d2 and d8, 172² | 32–33 GFLOP/s | **61 GFLOP/s** | 49–53 |
+| Forward (U-Net levels, training patch) | 16→16 @ 64², 32→32 @ 32², 64→64 @ 16² | 34–36 | 48–52 | 34–64 |
+| Forward, first and last layer | 1→24, 24→1 | 13–23 | 21–38 | 4 |
+| Backward (weight + input gradients) | dilated and U-Net shapes | 17–26 | (input gradients only) | 45–75 |
+
+- **Every kernel is compute-bound.** At 34–75 FLOPs per byte, the main kernels use 1–5% of the bandwidth of the cache
+  level their data sits in, and a stack run spends **97% of its time in inference** (per 512² page: decode 5 ms,
+  inference 237 ms, encode and write 2 ms). Copying data is not the problem on the denoising path; a channel-blocked
+  memory layout or cache tiling would buy nothing here.
+- **`Vector<T>` stays 256-bit in .NET 8,** whatever `DOTNET_PreferredVectorBitWidth` says, so an early "512-bit makes no
+  difference" test had measured nothing. The new kernels use `Vector512` explicitly (`ConvLayer.Wide.cs`): the forward
+  kernel and the input-gradient kernel, whose SIMD lanes are pixels, so a lane does exactly what the scalar reference
+  does and the results are **bit-identical** (brick 36's tests force them on and compare 200 shapes with the reference;
+  every recorded FMD block still reproduces). The weight-gradient kernel sums across pixels, so its lane width is part of
+  its rounding; it stays at 256 bits.
+- **Speed-up, interleaved runs (A, B, A, B) in one process, three runs:** dilated 512² denoise **1.38–1.64×**, dilated
+  Noise2Void step 1.44–1.62×, U-Net 512² denoise 1.30–1.53×. A 512² frame now denoises in about 0.21–0.30 s (dilated) and
+  0.28–0.36 s (U-Net) on this machine. `DORA_WIDE_KERNELS=0` turns the 512-bit kernels off; nothing changes but speed.
+- **Unrolling the 9 taps** (offsets precomputed) helped the 256-bit kernel only on the U-Net shapes (31 → 35 GFLOP/s);
+  it is kept, since most laptops have no AVX-512 (recent Intel consumer chips dropped it, and Apple silicon has 128-bit
+  NEON).
+- **What is left, and what it would cost.** The 512-bit forward kernel runs at about 77% of the separate-multiply-add
+  peak. The next factor of up to 2 is the fused multiply-add, which rule 4 forbids because it changes the last bit of
+  every result and so every recorded reproduction; that would be a deliberate decision to re-record, not an
+  optimization. Backward runs at 36–54% of its peak, and all-core scaling on this container is only about 2.5–3× on 4
+  vCPUs, which looks like the host rather than the code (the peak microbenchmark scales the same way).
+
 ## Fidelity: what scientists measure (brick 32)
 
 PSNR rewards being close on average. A biologist measures specific things: the brightness of a region relative to

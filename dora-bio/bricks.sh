@@ -24,7 +24,7 @@ export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_SKIP_FIRST_TIME_EXPE
 
 NAMES=(scaffold nn data io inference training cli godot-build godot-smoke ci-core ci-godot fmd-fetch fmd-loader fmd-eval
        n2v-diagnostic structured-mask vst calibration pool-upsample unet unet-tiling arch-eval
-       bench blocked-conv perf-budget q1-recipe tiff-stack-write q10-routing cli-batch q13-conditioning ext-data q18-ext-bench quant-fidelity q12-n2v-recipe ext-data-2 q2-n2v-stop)
+       bench blocked-conv perf-budget q1-recipe tiff-stack-write q10-routing cli-batch q13-conditioning ext-data q18-ext-bench quant-fidelity q12-n2v-recipe ext-data-2 q2-n2v-stop roofline-wide)
 CHECKS=(
   "solution builds (warnings are errors, missing XML docs included); every test class belongs to exactly one brick"
   "ConvLayer/DenoisingNet/Adam/Simd: finite-difference gradient checks, optimizer behavior"
@@ -62,6 +62,7 @@ CHECKS=(
   "quality pass Q12: validation plan = the trainer's split; the selection log and the verdict follow the pre-registered rule; with data + runs/q12 the blocks reproduce"
   "dataset manifest pinned, licence policy holds, ATTRIBUTIONS.md generated from it; TIFF/BigTIFF/MRC stacks read per axis (independent fixtures); downloaded stack datasets match their published counts"
   "quality pass Q2: the selection signal decides the epoch (loss never uses ground truth), keep-last and save-last; the recorded choice, verdict and shipped Noise2Void defaults follow the pre-registered rule; with data + runs/q2 the blocks reproduce"
+  "512-bit kernels bit-identical to the reference (forced on, any CPU); bench --roofline reports peaks, every kernel shape and the stack-run split; the 512-bit speedup floor is in gate 24's budget"
 )
 LAST=$((${#NAMES[@]} - 1))
 LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dora-bricks.XXXXXX")"
@@ -74,7 +75,9 @@ list() {
 # Runs one brick's xunit tests; fails if any test fails OR if the filter matched nothing.
 test_gate() {
   local brick="$1" out
-  out="$(dotnet test DoraBio.sln -c Release --filter "Brick=$brick" 2>&1)"; local code=$?
+  # "|| code=$?" keeps a failing run from ending a `set -e` gate (gate 24) before its output is printed.
+  local code=0
+  out="$(dotnet test DoraBio.sln -c Release --filter "Brick=$brick" 2>&1)" || code=$?
   echo "$out"
   local passed
   passed="$(echo "$out" | sed -n 's/.*Passed: *\([0-9][0-9]*\).*/\1/p' | tail -1)"
@@ -605,6 +608,28 @@ gate_35() {   # q2-n2v-stop (quality pass Q2, pre-registered in PATHWAY.md, comm
   reproduces q2-fidelity-unet-mreb fidelity --dataset deepbacs-mreb --root "$EXT" --weights "runs/q2/unet_${winner}_deepbacs-mreb.bin" || return 1
 }
 
+gate_36() {   # roofline-wide (systems S1 + S2: roofline measurement, 512-bit bit-identical kernels)
+  test_gate 36-roofline-wide || return 1
+  dotnet build tools/DoraBio.Cli -c Release >/dev/null || return 1
+  local json="$LOG_DIR/roofline.json"
+  dotnet "$CLI_DLL" bench --roofline --json "$json" || return 1
+  python3 - "$json" <<'PY' || return 1
+import json, sys
+r = json.load(open(sys.argv[1]))
+p = r["peaks"]
+problems = []
+if not p["Compute"] or any(c["OneThread"] <= 0 for c in p["Compute"]): problems.append("compute peaks missing or not positive")
+if len(p["Bandwidth"]) != 4 or any(b["OneThread"] <= 0 for b in p["Bandwidth"]): problems.append("bandwidth peaks missing")
+if len(r["kernels"]) < 11 or any(k["Gflops"] <= 0 or k["Seconds"] <= 0 for k in r["kernels"]): problems.append("kernel figures missing")
+s = r["stack"]
+share = s["InferSeconds"] / (s["DecodeSeconds"] + s["InferSeconds"] + s["OtherProcessingSeconds"] + s["EncodeWriteSeconds"])
+if not 0 < share <= 1: problems.append(f"stack split is inconsistent (inference share {share})")
+for m in problems: print(">>", m)
+print(f">> roofline: {len(r['kernels'])} kernel shapes, inference {share:.0%} of a stack run")
+sys.exit(1 if problems else 0)
+PY
+}
+
 gate_21() {   # arch-eval
   test_gate 21-arch-eval || return 1
   # The rule was set before measuring (PATHWAY.md, P4): the U-Net becomes the default only if, at the same training
@@ -698,6 +723,8 @@ MUTATIONS=(
   '34|tools/ext_manifest.json|"licence": "CC-BY-SA-4.0", "use": "eval-only"|"licence": "CC-BY-SA-4.0", "use": "train"'
   '35|src/DoraBio.Core/Training/Trainer.cs|double primary = cfg.Selection == ValidationSignal.Loss ? -score.Loss : score.Psnr ?? -score.Loss;|double primary = score.Psnr ?? -score.Loss;'
   '35|src/DoraBio.Core/Training/Trainer.cs|if (bestEpoch > 0 && !cfg.KeepLastEpoch)|if (bestEpoch > 0)'
+  '36|src/DoraBio.Core/Nn/ConvLayer.Wide.cs|int t1 = d, t2 = 2 * d, t3 = d * pw,|int t1 = 2 * d, t2 = d, t3 = d * pw,'
+  '36|src/DoraBio.Core/Nn/ConvLayer.Wide.cs|        int t0 = 2 * d * gw + 2 * d, t1 = 2 * d * gw + d,|        int t0 = 2 * d * gw + d, t1 = 2 * d * gw + 2 * d,'
 )
 
 self_test() {
@@ -784,7 +811,7 @@ for i in $(seq "$FIRST" "$UPTO"); do
     printf "SKIPPED  %s\n" "$(tail -1 "$log")"
     SUMMARY+=("$i ${NAMES[$i]}: SKIPPED (not verified)")
   else
-    printf "FAIL  (%ss)\n" "$took"
+    printf "FAIL  (%ss, exit %s%s)\n" "$took" "$code" "$( ((code > 128)) && echo ", killed by signal $((code - 128))" )"
     echo "──── last 40 lines of brick $i log ────"
     tail -40 "$log"
     echo "───────────────────────────────────────"

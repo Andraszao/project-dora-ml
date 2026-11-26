@@ -41,6 +41,7 @@ internal static class Bricks
     public const string SelfSupervisedRecipe = "33-q12-n2v-recipe"; // quality pass Q12: the Noise2Void recipe
     public const string ExtData2 = "34-ext-data-2";            // benchmark data: stacks (TIFF/BigTIFF/MRC), manifest, licences
     public const string NoiseStop = "35-q2-n2v-stop";          // quality pass Q2: what chooses a Noise2Void run's weights
+    public const string WideKernels = "36-roofline-wide";      // systems S1 + S2: roofline, 512-bit bit-identical kernels
 }
 
 [Trait(Bricks.Trait, Bricks.Scaffold)]
@@ -50,7 +51,7 @@ public class BrickWiringTests
         [Bricks.Scaffold, Bricks.Nn, Bricks.Data, Bricks.IO, Bricks.Inference, Bricks.Training, Bricks.Fmd, Bricks.FmdEval,
          Bricks.NoiseDiagnostic, Bricks.StructuredMask, Bricks.Vst, Bricks.Calibration,
          Bricks.PoolUpsample, Bricks.UNet, Bricks.UNetTiling, Bricks.ArchEval,
-         Bricks.Bench, Bricks.BlockedConv, Bricks.PerfBudget, Bricks.TiffStackWrite, Bricks.NoiseRouting, Bricks.CliBatch, Bricks.NoiseConditioning, Bricks.ExtData, Bricks.ExtBench, Bricks.QuantFidelity, Bricks.SelfSupervisedRecipe, Bricks.ExtData2, Bricks.NoiseStop];
+         Bricks.Bench, Bricks.BlockedConv, Bricks.PerfBudget, Bricks.TiffStackWrite, Bricks.NoiseRouting, Bricks.CliBatch, Bricks.NoiseConditioning, Bricks.ExtData, Bricks.ExtBench, Bricks.QuantFidelity, Bricks.SelfSupervisedRecipe, Bricks.ExtData2, Bricks.NoiseStop, Bricks.WideKernels];
 
     /// <summary>An untagged test would silently run in no gate, so treat a missing or unknown brick as a build error.</summary>
     [Xunit.Fact]

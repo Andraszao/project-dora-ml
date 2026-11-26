@@ -4,7 +4,10 @@ using Xunit;
 
 namespace DoraBio.Core.Tests;
 
-/// <summary>The reference-kernel timings that gate 24 compares against really run the reference kernels, on a copy.</summary>
+/// <summary>
+/// The reference-kernel timings that gate 24 compares against really run the reference kernels, on a copy, and the
+/// full set has every timing the budget's speedup checks divide by.
+/// </summary>
 [Trait(Bricks.Trait, Bricks.PerfBudget)]
 public class PerfBudgetTests
 {
@@ -27,6 +30,9 @@ public class PerfBudgetTests
         var names = PerformanceBench.Run(quick: true).Select(t => (t.Name, t.Architecture, t.Kernels)).ToHashSet();
         Assert.Contains(("denoise", "dilated", "reference"), names);
         Assert.Contains(("train-step-n2v", "dilated", "reference"), names);
-        Assert.Equal(8, names.Count);
+        // On AVX-512 machines brick 36 adds the 256-bit comparisons its speedup floor divides by.
+        var narrow = new[] { ("denoise", "dilated", "blocked-256"), ("train-step-n2v", "dilated", "blocked-256"), ("denoise", "unet", "blocked-256") };
+        if (ConvLayer.WideKernels) Assert.All(narrow, n => Assert.Contains(n, names));
+        Assert.Equal(ConvLayer.WideKernels ? 11 : 8, names.Count);
     }
 }

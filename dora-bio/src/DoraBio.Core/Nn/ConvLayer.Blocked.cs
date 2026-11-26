@@ -34,6 +34,11 @@ internal sealed partial class ConvLayer
     /// </remarks>
     public void Forward(ReadOnlySpan<float> parameters, ReadOnlySpan<float> padded, int height, int width, Span<float> output)
     {
+        if (WideKernels && width >= Wide)
+        {
+            ForwardWide(parameters, padded, height, width, output);   // 512-bit lanes, same per-pixel arithmetic
+            return;
+        }
         int d = Dilation, pw = PaddedWidth(width), paddedPlane = PaddedHeight(height) * pw, plane = height * width;
         int ic9 = InChannels * Taps;
         ref float input = ref MemoryMarshal.GetReference(padded);
@@ -41,6 +46,7 @@ internal sealed partial class ConvLayer
         ref float weights = ref MemoryMarshal.GetReference(parameters);
         _ = padded[PaddedLength(height, width) - 1];      // one bounds check up front for the unchecked loads below
         _ = output[OutChannels * plane - 1];
+        int t1 = d, t2 = 2 * d, t3 = d * pw, t4 = t3 + d, t5 = t3 + 2 * d, t6 = 2 * d * pw, t7 = t6 + d, t8 = t6 + 2 * d;
 
         int oc = 0;
         for (; oc + Block <= OutChannels; oc += Block)
@@ -70,21 +76,17 @@ internal sealed partial class ConvLayer
                     var a7 = new Vector<float>(Unsafe.Add(ref weights, BiasOffset + oc + 7));
                     for (int ic = 0; ic < InChannels; ic++)
                     {
+                        // The 9 taps unrolled, offsets precomputed, in the reference's order (ky, then kx).
                         int row = ic * paddedPlane + y * pw + x, w = wBlock + ic * Taps;
-                        for (int ky = 0; ky < Kernel; ky++)
-                            for (int kx = 0; kx < Kernel; kx++)
-                            {
-                                var v = Load(ref input, row + ky * d * pw + kx * d);
-                                int t = w + ky * Kernel + kx;
-                                a0 += new Vector<float>(Unsafe.Add(ref weights, t)) * v;
-                                a1 += new Vector<float>(Unsafe.Add(ref weights, t + ic9)) * v;
-                                a2 += new Vector<float>(Unsafe.Add(ref weights, t + 2 * ic9)) * v;
-                                a3 += new Vector<float>(Unsafe.Add(ref weights, t + 3 * ic9)) * v;
-                                a4 += new Vector<float>(Unsafe.Add(ref weights, t + 4 * ic9)) * v;
-                                a5 += new Vector<float>(Unsafe.Add(ref weights, t + 5 * ic9)) * v;
-                                a6 += new Vector<float>(Unsafe.Add(ref weights, t + 6 * ic9)) * v;
-                                a7 += new Vector<float>(Unsafe.Add(ref weights, t + 7 * ic9)) * v;
-                            }
+                        Tap(ref input, row, ref weights, w, ic9, ref a0, ref a1, ref a2, ref a3, ref a4, ref a5, ref a6, ref a7);
+                        Tap(ref input, row + t1, ref weights, w + 1, ic9, ref a0, ref a1, ref a2, ref a3, ref a4, ref a5, ref a6, ref a7);
+                        Tap(ref input, row + t2, ref weights, w + 2, ic9, ref a0, ref a1, ref a2, ref a3, ref a4, ref a5, ref a6, ref a7);
+                        Tap(ref input, row + t3, ref weights, w + 3, ic9, ref a0, ref a1, ref a2, ref a3, ref a4, ref a5, ref a6, ref a7);
+                        Tap(ref input, row + t4, ref weights, w + 4, ic9, ref a0, ref a1, ref a2, ref a3, ref a4, ref a5, ref a6, ref a7);
+                        Tap(ref input, row + t5, ref weights, w + 5, ic9, ref a0, ref a1, ref a2, ref a3, ref a4, ref a5, ref a6, ref a7);
+                        Tap(ref input, row + t6, ref weights, w + 6, ic9, ref a0, ref a1, ref a2, ref a3, ref a4, ref a5, ref a6, ref a7);
+                        Tap(ref input, row + t7, ref weights, w + 7, ic9, ref a0, ref a1, ref a2, ref a3, ref a4, ref a5, ref a6, ref a7);
+                        Tap(ref input, row + t8, ref weights, w + 8, ic9, ref a0, ref a1, ref a2, ref a3, ref a4, ref a5, ref a6, ref a7);
                     }
                     int o = oc * plane + y * width + x;
                     Store(ref result, o, a0);
@@ -124,6 +126,23 @@ internal sealed partial class ConvLayer
                 }
             }
         }
+    }
+
+    /// <summary>One tap into 8 channels' accumulators, <c>Vector&lt;float&gt;</c> lanes (see the 512-bit overload).</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void Tap(ref float input, int at, ref float weights, int t, int ic9,
+        ref Vector<float> a0, ref Vector<float> a1, ref Vector<float> a2, ref Vector<float> a3,
+        ref Vector<float> a4, ref Vector<float> a5, ref Vector<float> a6, ref Vector<float> a7)
+    {
+        var v = Load(ref input, at);
+        a0 += new Vector<float>(Unsafe.Add(ref weights, t)) * v;
+        a1 += new Vector<float>(Unsafe.Add(ref weights, t + ic9)) * v;
+        a2 += new Vector<float>(Unsafe.Add(ref weights, t + 2 * ic9)) * v;
+        a3 += new Vector<float>(Unsafe.Add(ref weights, t + 3 * ic9)) * v;
+        a4 += new Vector<float>(Unsafe.Add(ref weights, t + 4 * ic9)) * v;
+        a5 += new Vector<float>(Unsafe.Add(ref weights, t + 5 * ic9)) * v;
+        a6 += new Vector<float>(Unsafe.Add(ref weights, t + 6 * ic9)) * v;
+        a7 += new Vector<float>(Unsafe.Add(ref weights, t + 7 * ic9)) * v;
     }
 
     /// <summary>One output value, in the reference order (scalar float math, identical to a SIMD lane).</summary>
@@ -263,6 +282,8 @@ internal sealed partial class ConvLayer
             ref float result = ref MemoryMarshal.GetReference(gradPadded);
             _ = parameters[WeightOffset + WeightCount - 1];
             int ic = 0;
+            if (WideKernels && width >= Wide)
+                ic = InputGradientBlocksWide(ref weights, ref g, ref result, height, width, gw, gPlane);   // same per-pixel arithmetic
             for (; ic + Block <= InChannels; ic += Block)
                 for (int Y = d; Y < d + height; Y++)
                 {
