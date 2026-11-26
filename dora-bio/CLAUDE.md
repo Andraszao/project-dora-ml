@@ -56,7 +56,10 @@ Work follows [`PATHWAY.md`](PATHWAY.md): phases **P0 → P10**, each a group of 
 P1 (bricks 9–10, CI), P2 (bricks 11–13, real FMD data), P3 (bricks 14–17, noise-model fidelity), P4 (bricks 18–21,
 U-Net) and P5 (bricks 22–24, performance) are done. **The current phase is P6 (stacks, time-lapse and batch)**:
 bricks 25–32 are done (30–32 opened the field-validation track, FV: DORA matches CARE supervised, trails
-CAREamics' Noise2Void by about 1 dB and distorts intensities more); next is quality pass Q12, ahead of the lab pilot.
+CAREamics' Noise2Void by about 1 dB and distorts intensities more). From brick 33 on, work follows the **road to state
+of the art** in `PATHWAY.md` (stages 1–5); next is quality pass Q12 (brick 33). Owner decisions there: GPU training is
+an optional offline step (inference stays pure C# on the CPU), and the shipped model is trained only on synthetic and
+CC BY / CC0 data, with FMD kept for evaluation.
 Pick up the next unfinished brick of the current phase, follow the phase protocol there, and update its status table when a phase closes. Read `docs/RESULTS.md` before
 changing training or the model: it records what actually works on real data.
 

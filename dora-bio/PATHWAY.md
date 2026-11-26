@@ -21,6 +21,7 @@ settled first, and so every phase builds only on phases that are already green.
 | **P9** | Format coverage | "my file won't open" (LZW, OME-TIFF, HDF5) | planned |
 | **P10** | Release | only runs from the editor or CLI | planned |
 | **FV** | Field validation (alongside P6–P10) | nobody outside this repo has used DORA or compared it with their current tool | 🚧 in progress: 30 `ext-data`, 31 `ext-bench` (Q18: supervised at parity with CARE, Noise2Void 0.7 dB behind), 32 `quant-fidelity` done; the pilot waits for Q12 |
+| **SOTA** | [Road to state of the art](#road-to-state-of-the-art-stages-15-agreed-2026-11-26) (stages 1–5, bricks 33–44+) | DORA trails the standard self-supervised tool and has no broad scoreboard | planned: next 33 (Q12) |
 
 ## Phase protocol (applies to every phase)
 
@@ -246,6 +247,51 @@ preprints. They give the answer that matters: which tool they would actually use
   that, not PSNR, decides whether denoising helped.
 - **Practicalities:** pixel size and exposure (and camera gain and offset if known), a download link rather than
   attachments, and consent for what may be published (aggregate numbers only, unless they say otherwise).
+
+## Road to state of the art (stages 1–5, agreed 2026-11-26)
+
+**The goal:** at or above the best open tools on the benchmarks the field uses, on the user's CPU, with fidelity
+(brick 32) reported next to PSNR. DORA's bet is a compact model adapted to the user's own sensor and sample in minutes,
+not a giant zero-shot model; GPU time, if used at all, only pretrains its starting weights (stage 4). Each stage keeps
+the build/quality cadence, and each quality pass is pre-registered as usual.
+
+**Decisions (owner, 2026-11-26).**
+- **GPU training is allowed as an optional, offline step.** A PyTorch script may pretrain base weights and export them in
+  DORA's format. Inference and per-sample adaptation stay pure C# on the CPU, and end users never need Python.
+- **The shipped model is trained only on synthetic data and CC BY 4.0 / CC0 datasets.** `ATTRIBUTIONS.md` is generated
+  from the pinned manifest in `tools/fetch_ext.sh`. FMD (CC BY-SA) is never used for training a shipped model; it stays
+  a zero-shot evaluation benchmark. This settles the FMD licence question.
+
+**Benchmark data (checked on Zenodo, 2026-11-26; all CC BY 4.0).** The 2024 AI4Life challenge subsets: W2S (10925783,
+0.19 GB), SUPPORT voltage imaging (10925939, 2.1 GB) and JUMP Cell Painting (10912386, 2.4 GB); the organisers describe
+it as an *unsupervised* challenge (to confirm from its page in brick 34). The 2025 AI4Life *supervised* challenge
+training sets: Tribolium (15615943, 4.5 GB) and Planaria (15615592, 16.3 GB). BioSR+ (7115540, 9.3 GB, per-structure
+archives). DeepCAD-RT two-photon time-lapses: mouse brain neutrophils (6296569, 12.7 GB, motile), zebrafish brain
+regions (6293696) and optic tectum neurons (6339707). Aydin examples (18686251, 4 GB). Not usable for training: the
+DeepCAD-RT *demo* data (GPL-licensed), and the Convallaria / mouse actin / mouse nuclei trio until its licence is found.
+
+| # | Kind | Brick | Gate or bar |
+|---|---|---|---|
+| **Stage 1** | | **Close the self-supervised gap (CPU only)** | |
+| 33 | quality | **Q12:** a Noise2Void U-Net at CAREamics' size (about 0.5M parameters) against today's 26k dilated network, 0.2% against 2% masking, a longer budget; chosen on held-out training images | within 0.3 dB of CAREamics Noise2Void on the Q18 sets **and** MreB slope ≥ 0.9 |
+| 34 | build | `ext-data-2`: the benchmark data above in `tools/fetch_ext.sh` (the large archives behind `--full`), loaders for 3D and time-lapse stacks, and the attribution manifest | pins, counts and licences recorded; gates stay fast without `--full` |
+| 35 | quality | **Self-supervised scoreboard:** DORA's best self-supervised recipe against the 2024 challenge leaderboard (W2S, SUPPORT, JUMP) and against CAREamics Noise2Void and N2V2 run here on the 2025 sets | pre-registered at the pass; scored the way each benchmark specifies |
+| **Stage 2** | | **Better blind spots and frame pairs** | |
+| 36 | build | **N2V2** (blur pooling and median replacement, which remove Noise2Void's checkerboard artifacts) and **Noise2Noise** from neighbouring time-lapse frames, plus a spatiotemporal blind spot | gradient checks; the checkerboard test goes away |
+| 37 | quality | N2V2 against N2V; Noise2Noise against the spatiotemporal blind spot, on **both stationary and motile** sequences (MreB, zebrafish; DeepCAD-RT neutrophils), because Noise2Noise assumes the signal holds still between frames | pre-registered; a method that smears moving puncta doesn't ship as a default |
+| **Stage 3** | | **Context: 3D and time** | |
+| 38 | build | **2.5D context:** neighbouring slices or frames (z−1, z, z+1) as input channels; exact volume tiling with a one-slice halo | tiled equals whole volume |
+| 39 | quality | 2.5D against 2D on Tribolium and Planaria (3D) and the time-lapses | pre-registered |
+| **Stage 4** | | **Stronger base weights (optional offline GPU)** | |
+| 40 | build | **GPU training and export:** a PyTorch training script for DORA's architectures that writes DORA's weight format | the same weights give the same outputs in PyTorch and in DORA's C# inference |
+| 41 | quality | **Supervised scoreboard:** NAFNet-style blocks (with TLC-style local pooling, so tiling stays exact) and wider networks, trained on the GPU, against the 2025 challenge leaderboard and CARE run here | pre-registered |
+| 42 | build | `train-stream`: training data read from disk as a seeded working set | peak memory flat in dataset size; equal to an in-memory run |
+| 43 | quality | **The shippable model:** one network pretrained on the permissive corpus (synthetic + CC BY / CC0), adapted per sample on the CPU; `ATTRIBUTIONS.md` generated | beats today's bundled model on every benchmark and on FMD, which it never saw; becomes the default |
+| **Stage 5** | | **State of the art as a tool** | |
+| 44+ | builds | "what was removed" and uncertainty view; the fidelity report in the app; vendor formats (OME-TIFF first, then CZI/ND2, from `vendor-corpus`); `ui-stack`; `viewport-chunks`; a napari/Fiji bridge; release | per brick |
+
+**Checkpoints.** The lab pilot starts as soon as stage 1 passes (Q12), not at the end. If Q12 misses, stage 1's
+scoreboard (35) still runs, to show whether the gap is general or specific to the Q18 sets.
 
 ---
 
