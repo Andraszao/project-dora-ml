@@ -21,7 +21,7 @@ settled first, and so every phase builds only on phases that are already green.
 | **P9** | Format coverage | "my file won't open" (LZW, OME-TIFF, HDF5) | planned |
 | **P10** | Release | only runs from the editor or CLI | planned |
 | **FV** | Field validation (alongside P6–P10) | nobody outside this repo has used DORA or compared it with their current tool | 🚧 in progress: 30 `ext-data`, 31 `ext-bench` (Q18: supervised at parity with CARE, Noise2Void 0.7 dB behind), 32 `quant-fidelity` done; the pilot waits for Q12 |
-| **SOTA** | [Road to state of the art](#road-to-state-of-the-art-stages-15-agreed-2026-11-26) (stages 1–5, bricks 33–44+) | DORA trails the standard self-supervised tool and has no broad scoreboard | planned: next 33 (Q12) |
+| **SOTA** | [Road to state of the art](#road-to-state-of-the-art-stages-15-agreed-2026-11-26) (stages 1–5, bricks 33–44+) | DORA trails the standard self-supervised tool and has no broad scoreboard | 🚧 in progress: 33 (Q12) pre-registered |
 
 ## Phase protocol (applies to every phase)
 
@@ -306,7 +306,7 @@ bar and adoption rule are written here **before** it is measured.
 | Q10 | **Noise-level routing**: pick the raw-trained or the all-level model per image from its estimated noise level | Q1: −0.47 dB at raw, +0.1 to +4.9 dB on cleaner inputs; P3's correlation routing worked | ✅ brick 27, **measured, not adopted** ([results](docs/RESULTS.md#quality-pass-q10-routing-each-image-by-its-noise-level)). The threshold chosen on validation sends every image to B: A's raw edge there is 0.34 dB, and noise σ can't pick out the images where A wins (even level-perfect routing: +0.06 dB). test_mix raw 34.28 vs the 34.63 needed. Lesson: with unknown noise levels, the all-level model alone is the better single supervised model (−0.3 to −0.5 dB on raw, +1 to +5 dB elsewhere): **a trade for the owner to weigh (see Q4)** |
 | Q18 | **DORA against CARE and Noise2Void on public data** (`ext-bench`, field validation): the same images, the same scoring (CARE's brightness-matched protocol), and the same patch budget for DORA and for CAREamics run on CPU | the viability question: nobody has compared DORA with the tools biologists already use | ✅ brick 31, **measured, not competitive** ([results](docs/RESULTS.md#quality-pass-q18-dora-against-care-and-noise2void-on-public-data)). Supervised: DORA's U-Net matches CAREamics CARE (+0.07 dB over three sets, ahead on each). Noise2Void: DORA's default (26k-parameter dilated network) is 0.72 dB behind on average and about 1 dB behind on the two sets where Noise2Void works; on CARE 2D neither works, and DORA's noise check says why (correlated noise). By the rule, Q12 moves ahead of the pilot |
 | Q13 | **A noise-conditioned U-Net (FiLM)**: one all-level model that is told how noisy each image is, so it can change its response per image instead of averaging over five noise levels | Q1: the all-level model loses 0.47 dB at raw; Q10: switching between two fixed models can't win it back; FFDNet-style conditioning (FiLM modulation rather than an input noise map) adapts one model smoothly | ✅ brick 29, **measured, not adopted** ([results](docs/RESULTS.md#quality-pass-q13-telling-the-network-how-noisy-each-image-is)). Seed 2026 raw 33.92 vs the 34.63 needed; over three seeds conditioning loses 0.19 dB at raw and 0.11 on cleaner levels, though the network does use its condition (a 2× wrong σ̂ costs 1.2 dB). Lessons: seed spread is about 0.3 dB, and Q1's raw cost was partly a bad seed (three-seed mean: 0.30 below the raw-trained U-Net, not 0.47) |
-| Q12 | **A wider U-Net and a longer budget for all-level training** (24 or 32 base features, more epochs; optionally pretrained on synthetic Poisson–Gaussian pairs, then fine-tuned on FMD) | same; costs about 2–4× the compute. A 60-epoch run takes only about 6 minutes on this CPU, so the budget is cheap to raise. Pretraining on synthetic noise, then fine-tuning on real data, has been tried on FMD before | **next quality pass**, now ahead of the pilot (Q18's rule). Q18 adds a target: DORA's Noise2Void is about 1 dB behind CAREamics' 334k-parameter U-Net where Noise2Void works, so the pass covers the Noise2Void network (with Q2) as well as supervised all-level training. Brick 32 adds a second target: DORA's Noise2Void compresses contrast (MreB slope 0.75 against CAREamics' 0.86), so candidates are judged on fidelity too. Compare three-seed means: single runs differ by up to 0.3 dB |
+| Q12 | **A wider U-Net and a longer budget for all-level training** (24 or 32 base features, more epochs; optionally pretrained on synthetic Poisson–Gaussian pairs, then fine-tuned on FMD) | same; costs about 2–4× the compute. A 60-epoch run takes only about 6 minutes on this CPU, so the budget is cheap to raise. Pretraining on synthetic noise, then fine-tuning on real data, has been tried on FMD before | **brick 33, pre-registered** [below](#q12-pre-registration-closing-the-self-supervised-gap-brick-33) (the self-supervised part first; supervised all-level width follows in stage 4) |
 | Q11 | **An all-level model that keeps raw quality**: weight raw frames more in the training mix (e.g. 4 raw frames plus 1 of each other level) | Q1/Q10: the all-level model's raw loss comes from sharing capacity across five levels | open |
 | Q2 | **U-Net Noise2Void training**: its run stopped early (best epoch 4) and lost 0.47 dB | P4 | open |
 | Q3 | **"Do no harm" on clean inputs**: every model scores below the untouched image on 16-frame averages (bundled model −4.2 dB) | P2, P3, P4 level tables; Q1's all-level U-Net is the first to beat the untouched image overall (40.15 vs 39.70) | open; Q10 is its best candidate |
@@ -393,6 +393,49 @@ Written before any of its code exists or anything is measured.
 - **Known weaknesses, stated now.** The test splits are tiny (5, 2 and 2 images), so per-image scores are reported
   too. One seed per method, and Q13 measured a seed spread of about 0.3 dB. The baselines are run here, on CPU, with
   an equal patch budget, not the GPU budgets their authors used, so their own published numbers may be higher.
+
+### Q12 pre-registration: closing the self-supervised gap (brick 33)
+
+Written before any of its code exists or anything is run.
+
+- **The gap (Q18, brick 32).**
+  - **PSNR:** DORA's default Noise2Void averages 26.28 dB over the three public sets, against 27.00 for CAREamics
+    Noise2Void. DORA's is a 26k-parameter dilated network masking 2% of pixels for 30 × 50 steps; CAREamics' is a
+    334k-parameter U-Net masking 0.2%.
+  - **Fidelity:** DORA's compresses contrast on MreB (slope 0.75, against CAREamics' 0.86).
+  - **Budget:** two of its three runs were still improving at the 30-epoch cap.
+- **Candidates, chosen in three steps on validation images.** The validation images are the fifth of each training
+  split that the trainer holds out with seed 2026, scored with CARE's protocol against their high-SNR partners. The
+  test images aren't touched until the end.
+  1. **Network:** the dilated stack (26k parameters, today's default), and the U-Net with 16 base features (118k) and
+     with 32 (about 0.47M, CAREamics' size). All at 2% masking and 30 × 50 steps.
+  2. **Masking**, for the chosen network: 2% against 0.2% of pixels.
+  3. **Budget**, for the chosen network and masking: 30 against 90 epochs (× 50 steps). This step runs only if at least
+     two of step 2's winning runs ended at the 30-epoch cap.
+- **How each step chooses.** It keeps the candidate with the highest mean validation PSNR over the three sets among
+  those whose MreB validation slope is at least 0.85; if none qualifies, the highest mean PSNR. Ties within 0.05 dB go
+  to the cheaper candidate.
+- **Fixed throughout:** batch 16, 64 px patches, seed 2026, Adam at 1e-3 with DORA's plateau decay and early stopping,
+  dihedral augmentation, plain (unstructured) blind spots, and the noisy images of each training split only.
+- **Bar** (on the test splits, after choosing): mean PSNR over the three sets ≥ 26.70 dB (CAREamics Noise2Void's 27.00
+  − 0.3) **and** MreB test slope ≥ 0.90.
+- **FMD guard.** The chosen recipe is also trained with P3's plain Noise2Void settings (raw frames, 4 per FOV, seed
+  2026, FOV 19 excluded). It must score at least 31.48 dB on test_mix raw: P3's plain Noise2Void scored 31.68, so it may
+  lose at most 0.2.
+- **Adoption rule.**
+  - **Bar met and the guard holds:** the chosen network, masking and budget become `train --mode n2v`'s defaults, and
+    the lab pilot is unblocked.
+  - **Bar missed, but better:** if the test mean still gains ≥ 0.3 dB on today's default (≥ 26.58), without lowering the
+    MreB slope, and the guard holds, it becomes the default anyway ("improved, not competitive"). The pilot stays
+    blocked.
+  - **Otherwise:** not adopted.
+  - The supervised default is untouched by this pass.
+- **Known weaknesses, stated now.**
+  - One seed, and Q13 measured a spread of about 0.3 dB.
+  - The selection uses ground truth on held-out training images, which a user wouldn't have. But it picks one default
+    for everyone, the way CAREamics' defaults were picked.
+  - CARE 2D's noise is correlated, so no plain Noise2Void can do much there. It stays in the mean, as pre-registered
+    for Q18.
 
 ## Parking lot (deliberately not on the path)
 
