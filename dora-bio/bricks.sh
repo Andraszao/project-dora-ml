@@ -24,7 +24,7 @@ export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_SKIP_FIRST_TIME_EXPE
 
 NAMES=(scaffold nn data io inference training cli godot-build godot-smoke ci-core ci-godot fmd-fetch fmd-loader fmd-eval
        n2v-diagnostic structured-mask vst calibration pool-upsample unet unet-tiling arch-eval
-       bench blocked-conv perf-budget q1-recipe tiff-stack-write q10-routing cli-batch q13-conditioning ext-data)
+       bench blocked-conv perf-budget q1-recipe tiff-stack-write q10-routing cli-batch q13-conditioning ext-data q18-ext-bench)
 CHECKS=(
   "solution builds (warnings are errors, missing XML docs included); every test class belongs to exactly one brick"
   "ConvLayer/DenoisingNet/Adam/Simd: finite-difference gradient checks, optimizer behavior"
@@ -57,6 +57,7 @@ CHECKS=(
   "stacks and folders stream one frame at a time: pages decode exactly, no frame outlives the next; CLI denoises a stack and a folder; peak memory flat in stack length"
   "quality pass Q13: FiLM gradients, untrained = plain bit for bit, exact tiling; the recorded verdict and the default follow the pre-registered rule; with data + weights the blocks reproduce"
   "external datasets: fetch_ext.sh pins every archive (record, size, sha256); pairing by name; with data: ext-check consistent"
+  "quality pass Q18: CARE's scoring protocol; the recorded verdict follows the pre-registered rule; with data + runs/q18 the blocks reproduce"
 )
 LAST=$((${#NAMES[@]} - 1))
 LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dora-bricks.XXXXXX")"
@@ -405,6 +406,42 @@ gate_30() {   # ext-data (field validation: the public paired datasets from tool
   [[ $missing -eq 0 ]] || { echo "present datasets verified; $missing not downloaded"; return 77; }
 }
 
+gate_31() {   # q18-ext-bench (quality pass Q18, pre-registered in PATHWAY.md, commit be5228b, before any of its code)
+  test_gate 31-q18-ext-bench || return 1
+  # Rule: averaged over the three datasets, DORA supervised >= CAREamics CARE - 0.5 dB and DORA Noise2Void >= CAREamics
+  # Noise2Void - 0.5 dB (mean test PSNR after CARE's normalization): competitive. Otherwise: not-competitive.
+  local d m datasets=(mreb nucleoid care2d) expected recorded
+  for d in "${datasets[@]}"; do for m in dora-n2v dora-sup careamics-n2v careamics-care; do
+    [[ -n "$(recorded_block "q18-$m-$d")" ]] || { echo ">> docs/RESULTS.md needs the q18-$m-$d block"; return 1; }
+  done; done
+  expected="$( for d in "${datasets[@]}"; do for m in dora-n2v dora-sup careamics-n2v careamics-care; do
+                 recorded_block "q18-$m-$d" | awk -v k="$m" '$1 == "mean" { print k, $8 }'; done; done | awk '
+    { sum[$1] += $2 / 3 }
+    END {
+      n2v = sum["dora-n2v"] - sum["careamics-n2v"]; sup = sum["dora-sup"] - sum["careamics-care"]
+      printf "%s Noise2Void %+.2f dB, supervised %+.2f dB vs CAREamics (mean over 3 datasets)\n", \
+        (n2v >= -0.5 - 1e-9 && sup >= -0.5 - 1e-9) ? "competitive" : "not-competitive", n2v, sup
+    }')"
+  recorded="$(sed -n 's/.*<!-- q18-verdict: \([a-z-]*\) -->.*/\1/p' docs/RESULTS.md)"
+  [[ "${expected%% *}" == "$recorded" ]] || { echo ">> Q18's rule gives '${expected%% *}' ($expected), but RESULTS.md records '$recorded'"; return 1; }
+  echo ">> Q18: $expected; recorded verdict agrees"
+  local -A full=([mreb]=deepbacs-mreb [nucleoid]=deepbacs-nucleoid [care2d]=zerocost-care2d)
+  for d in "${datasets[@]}"; do
+    [[ -f "$EXT/${full[$d]}/.complete" && -f runs/q18/dora_sup_${full[$d]}.bin && -f runs/q18/careamics_care/${full[$d]}/timing.json ]] \
+      || { echo "verdict checked on the recorded results; reproduction skipped (needs data/ext and runs/q18)"; return 77; }
+  done
+  dotnet build tools/DoraBio.Cli -c Release >/dev/null || return 1
+  for d in "${datasets[@]}"; do
+    local name="${full[$d]}"
+    reproduces "q18-dora-n2v-$d" ext-eval --dataset "$name" --root "$EXT" --weights "runs/q18/dora_n2v_$name.bin" || return 1
+    reproduces "q18-dora-sup-$d" ext-eval --dataset "$name" --root "$EXT" --weights "runs/q18/dora_sup_$name.bin" || return 1
+    reproduces "q18-careamics-n2v-$d" ext-eval --dataset "$name" --root "$EXT" --predictions "runs/q18/careamics_n2v/$name" \
+      --label "CAREamics 0.3.5 Noise2Void, default 2D config, 30 x 50 steps x batch 16, CPU" || return 1
+    reproduces "q18-careamics-care-$d" ext-eval --dataset "$name" --root "$EXT" --predictions "runs/q18/careamics_care/$name" \
+      --label "CAREamics 0.3.5 CARE, default 2D config, 60 x 50 steps x batch 16, CPU" || return 1
+  done
+}
+
 gate_21() {   # arch-eval
   test_gate 21-arch-eval || return 1
   # The rule was set before measuring (PATHWAY.md, P4): the U-Net becomes the default only if, at the same training
@@ -488,6 +525,8 @@ MUTATIONS=(
   '29|src/DoraBio.Core/Nn/DenoisingNet.Film.cs|gradients[FilmW1 + i] += dHidden[i] * ws.Condition;|gradients[FilmW1 + i] += dHidden[i];'
   '29|docs/RESULTS.md|<!-- q13-verdict: not-adopted -->|<!-- q13-verdict: adopted -->'
   '30|src/DoraBio.Core/Data/ExtDatasets.cs|.Where(n => !clean.Contains(n)).ToList();|.Where(n => false).ToList();'
+  '31|src/DoraBio.Core/ExtBenchmark.cs|double a = var > 0 ? cov / var : 0, b = mr - a * mx;|double a = 1, b = mr - a * mx;'
+  '31|docs/RESULTS.md|<!-- q18-verdict: not-competitive -->|<!-- q18-verdict: competitive -->'
 )
 
 self_test() {

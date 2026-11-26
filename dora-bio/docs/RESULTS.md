@@ -436,6 +436,62 @@ plain recipe of at least 0.2 dB.
   three-seed mean puts the all-level recipe 0.30 dB below the raw-trained U-Net's single run (34.73), not 0.47.
   (3) Early stopping on 48 validation patches can cut a run off at epoch 33 that would have improved to 60 (Q5).
 
+## Quality pass Q18: DORA against CARE and Noise2Void on public data
+
+The first comparison with the tools biologists already use (brick 31, field validation), pre-registered in
+[`PATHWAY.md`](../PATHWAY.md#q18-pre-registration-dora-against-care-and-noise2void-on-public-data-ext-bench) (commit
+`be5228b`) before any of its code existed. Reproduce: `tools/fetch_ext.sh`, then install
+`tools/experiments/requirements-careamics.txt` into a virtualenv and run
+`CAREAMICS_PYTHON=VENV/bin/python tools/experiments/q18_ext.sh`.
+
+**Data:** three public paired sets (CC BY 4.0). DeepBacs *E. coli* MreB (16-bit, 30 training pairs, 5 test) and
+nucleoid (8-bit, 28 and 2), from Spahn et al., *Communications Biology* 2022. The ZeroCostDL4Mic CARE 2D example (float32,
+22 and 2), from von Chamier et al., *Nature Communications* 2021. **Scoring:** CARE's protocol (Weigert et al., *Nature
+Methods* 2018): the high-SNR reference normalized by its own 0.1st and 99.9th percentiles, every output matched to it
+by least-squares scale and offset, and PSNR and SSIM after that, the noisy input included. **Baselines:** CAREamics 0.3.5
+(the library behind the napari Noise2Void and CARE plugins), default 2D configurations, 64 px patches, batch 16, the
+same step budget as DORA's matching recipe, on the same 4-core CPU.
+
+| Test PSNR (dB) / SSIM, mean over each test split | MreB (5) | Nucleoid (2) | CARE 2D (2) | Mean |
+|---|---|---|---|---|
+| Noisy input | 21.67 / 0.368 | 27.39 / 0.808 | 19.28 / 0.461 | 22.78 |
+| Bilateral filter | 21.75 / 0.381 | 27.53 / 0.823 | 19.30 / 0.469 | 22.86 |
+| DORA out of the box: bundled synthetic model | 23.59 / 0.513 | 32.34 / 0.952 | 19.23 / 0.436 | 25.05 |
+| DORA out of the box: FMD-trained U-Net (P4) | 26.10 / 0.758 | 33.50 / 0.971 | 18.91 / 0.385 | 26.17 |
+| **DORA Noise2Void** (dilated, 26k parameters) | 25.83 / 0.697 | 33.71 / 0.961 | 19.30 / 0.467 | **26.28** |
+| **CAREamics Noise2Void** (U-Net, 334k parameters) | **27.01** / 0.814 | **34.70** / 0.979 | 19.29 / 0.466 | **27.00** |
+| **DORA supervised** (U-Net, 118k parameters) | **27.37** / 0.827 | **35.45** / 0.982 | **20.13** / 0.539 | **27.65** |
+| **CAREamics CARE** (U-Net, 334k parameters) | 27.35 / 0.818 | 35.30 / 0.981 | 20.08 / 0.520 | **27.58** |
+
+- **The bar is missed, on Noise2Void.** Averaged over the three sets, DORA supervised is **+0.07 dB** against CARE (the
+  bar allowed −0.5) and DORA Noise2Void is **−0.72 dB** against CAREamics Noise2Void (also −0.5 allowed). **By the rule:
+  not competitive.** Q12 (capacity and training budget) moves ahead of the lab pilot, and the README states the gap.
+  <!-- q18-verdict: not-competitive -->
+- **With ground truth, DORA matches CARE.** DORA's supervised U-Net is ahead on all three sets (by 0.02, 0.15 and
+  0.05 dB, and on SSIM by 0.001–0.019), on the same CPU and budget, with a network a third the size. That's within
+  noise, so the fair reading is parity, not a win. CARE stopped early under its default early stopping, after 9–13
+  epochs; DORA's supervised runs stopped at 28–39.
+- **Without ground truth, DORA's default is about 1 dB behind where Noise2Void works.** On the two DeepBacs sets,
+  whose noise DORA's check finds independent between pixels (correlation −0.02 and −0.01), CAREamics Noise2Void is ahead
+  by 1.18 and 0.99 dB. The likeliest cause is network size: DORA's default Noise2Void network is the 26k-parameter
+  dilated stack, 12.6× smaller than CAREamics' U-Net. Other defaults differ too: masking 2% of pixels against 0.2%,
+  holding out 20% of the training images against 8 patches, and predicting with the best checkpoint against the last.
+  Which of these matters is untested (on FMD, a U-Net trained by Noise2Void lost at a 30-epoch budget: P4, Q2).
+- **Where Noise2Void can't work, DORA says so.** On CARE 2D neither Noise2Void does anything (19.30 and 19.29 against
+  19.28 untouched), while supervised training gains 0.8 dB. DORA's noise check finds its noise correlated between
+  neighbouring pixels (0.58), from the noisy image alone, and tells the user to prefer supervised training or structured
+  masking. CAREamics gives no such warning. (Structured blind spots weren't part of this pass.)
+- **Out of the box, without training on these sets,** the FMD-trained U-Net beats DORA's own Noise2Void on MreB (26.10)
+  and comes within 0.2 dB on nucleoid. But it falls below the untouched image on CARE 2D. The synthetic bundled model
+  gains 1.9 and 5.0 dB on the DeepBacs sets.
+- **Speed on this CPU** (not part of the bar):
+  - **Training, Noise2Void:** DORA 2:33–2:56, CAREamics 187–230 s.
+  - **Training, supervised:** DORA 2:49–4:04, CARE 76–92 s (it stops much earlier).
+  - **Inference:** DORA about 0.27 s per 512² frame (`bench`), CAREamics about 0.5 s per 512² image in these runs.
+- **What it doesn't show.** Three small test splits (5, 2 and 2 images, every image listed in the blocks below) and
+  one seed per method; the Q13 seed spread was about 0.3 dB. Both tools ran their CPU defaults with an equal step
+  budget, not the longer GPU training their authors used, so either could score higher with more training.
+
 ## What these results do and don't show
 
 - **Mostly one seed per configuration.** Q13 ran the all-level U-Net recipe with three seeds: its raw score spread
@@ -453,7 +509,7 @@ plain recipe of at least 0.2 dB.
 - **Weights trained on FMD are not published** (CC BY-SA terms for derived models are a separate decision). The
   bundled model stays the synthetic one.
 
-## Reproducibility checks (gates 13, 15, 21, 25, 27 and 29)
+## Reproducibility checks (gates 13, 15, 21, 25, 27, 29 and 31)
 
 The blocks marked `fmd-noise` above and the blocks below are verbatim program output. `bricks.sh` gate 13 re-runs
 the first two whenever the data is present and requires an exact match. The block below is
@@ -918,3 +974,176 @@ WideField   12   38.74 / 0.923   39.91 / 0.944   39.47 / 0.956
 all         48   39.70 / 0.949   40.57 / 0.964   40.37 / 0.967
 ```
 <!-- /q13-plain-2028 -->
+
+Quality pass Q18 (gate 31 checks the verdict from these blocks and re-runs all twelve when `data/ext` and `runs/q18/`
+are present). DORA's are `ext-eval --dataset <set> --weights runs/q18/dora_<n2v|sup>_<set>.bin`. CAREamics' are
+`ext-eval --dataset <set> --predictions runs/q18/careamics_<n2v|care>/<set> --label …`, which re-scores its saved outputs
+(re-training CAREamics needs the virtualenv). The out-of-the-box rows come from the same command (`runs/q18/eval_*`).
+
+DORA Noise2Void, deepbacs-mreb:
+
+<!-- q18-dora-n2v-mreb -->
+```text
+deepbacs-mreb test, 5 images: PSNR (dB) / SSIM vs the high-SNR reference, CARE's normalization
+method: Noise2Void on deepbacs-mreb training split, noisy images only: DORA Noise2Void, default recipe; best epoch 28; val loss 0.007466
+image        noisy           bilateral       method         
+m31.tif       21.19 / 0.328   21.30 / 0.346   25.39 / 0.682
+m32.tif       20.48 / 0.282   20.72 / 0.319   24.59 / 0.654
+m33.tif       22.40 / 0.423   22.41 / 0.424   26.62 / 0.733
+m34.tif       21.81 / 0.359   21.84 / 0.365   25.90 / 0.698
+m35.tif       22.48 / 0.449   22.48 / 0.449   26.65 / 0.719
+mean          21.67 / 0.368   21.75 / 0.381   25.83 / 0.697
+```
+<!-- /q18-dora-n2v-mreb -->
+
+CAREamics Noise2Void, deepbacs-mreb:
+
+<!-- q18-careamics-n2v-mreb -->
+```text
+deepbacs-mreb test, 5 images: PSNR (dB) / SSIM vs the high-SNR reference, CARE's normalization
+method: CAREamics 0.3.5 Noise2Void, default 2D config, 30 x 50 steps x batch 16, CPU
+image        noisy           bilateral       method         
+m31.tif       21.19 / 0.328   21.30 / 0.346   26.59 / 0.813
+m32.tif       20.48 / 0.282   20.72 / 0.319   25.75 / 0.791
+m33.tif       22.40 / 0.423   22.41 / 0.424   27.75 / 0.827
+m34.tif       21.81 / 0.359   21.84 / 0.365   27.04 / 0.818
+m35.tif       22.48 / 0.449   22.48 / 0.449   27.91 / 0.821
+mean          21.67 / 0.368   21.75 / 0.381   27.01 / 0.814
+```
+<!-- /q18-careamics-n2v-mreb -->
+
+DORA supervised, deepbacs-mreb:
+
+<!-- q18-dora-sup-mreb -->
+```text
+deepbacs-mreb test, 5 images: PSNR (dB) / SSIM vs the high-SNR reference, CARE's normalization
+method: Supervised on deepbacs-mreb training pairs: DORA supervised U-Net; best epoch 31; val loss 0.002245; val PSNR 26.49 dB (+6.43 dB over noisy)
+image        noisy           bilateral       method         
+m31.tif       21.19 / 0.328   21.30 / 0.346   26.92 / 0.824
+m32.tif       20.48 / 0.282   20.72 / 0.319   26.12 / 0.812
+m33.tif       22.40 / 0.423   22.41 / 0.424   28.04 / 0.841
+m34.tif       21.81 / 0.359   21.84 / 0.365   27.41 / 0.831
+m35.tif       22.48 / 0.449   22.48 / 0.449   28.34 / 0.828
+mean          21.67 / 0.368   21.75 / 0.381   27.37 / 0.827
+```
+<!-- /q18-dora-sup-mreb -->
+
+CAREamics CARE, deepbacs-mreb:
+
+<!-- q18-careamics-care-mreb -->
+```text
+deepbacs-mreb test, 5 images: PSNR (dB) / SSIM vs the high-SNR reference, CARE's normalization
+method: CAREamics 0.3.5 CARE, default 2D config, 60 x 50 steps x batch 16, CPU
+image        noisy           bilateral       method         
+m31.tif       21.19 / 0.328   21.30 / 0.346   26.88 / 0.809
+m32.tif       20.48 / 0.282   20.72 / 0.319   26.18 / 0.801
+m33.tif       22.40 / 0.423   22.41 / 0.424   28.08 / 0.837
+m34.tif       21.81 / 0.359   21.84 / 0.365   27.36 / 0.817
+m35.tif       22.48 / 0.449   22.48 / 0.449   28.24 / 0.824
+mean          21.67 / 0.368   21.75 / 0.381   27.35 / 0.818
+```
+<!-- /q18-careamics-care-mreb -->
+
+DORA Noise2Void, deepbacs-nucleoid:
+
+<!-- q18-dora-n2v-nucleoid -->
+```text
+deepbacs-nucleoid test, 2 images: PSNR (dB) / SSIM vs the high-SNR reference, CARE's normalization
+method: Noise2Void on deepbacs-nucleoid training split, noisy images only: DORA Noise2Void, default recipe; best epoch 21; val loss 0.001445
+image        noisy           bilateral       method         
+m29.tif       26.76 / 0.762   26.95 / 0.782   33.15 / 0.955
+m30.tif       28.01 / 0.854   28.11 / 0.865   34.26 / 0.968
+mean          27.39 / 0.808   27.53 / 0.823   33.71 / 0.961
+```
+<!-- /q18-dora-n2v-nucleoid -->
+
+CAREamics Noise2Void, deepbacs-nucleoid:
+
+<!-- q18-careamics-n2v-nucleoid -->
+```text
+deepbacs-nucleoid test, 2 images: PSNR (dB) / SSIM vs the high-SNR reference, CARE's normalization
+method: CAREamics 0.3.5 Noise2Void, default 2D config, 30 x 50 steps x batch 16, CPU
+image        noisy           bilateral       method         
+m29.tif       26.76 / 0.762   26.95 / 0.782   34.14 / 0.976
+m30.tif       28.01 / 0.854   28.11 / 0.865   35.25 / 0.982
+mean          27.39 / 0.808   27.53 / 0.823   34.70 / 0.979
+```
+<!-- /q18-careamics-n2v-nucleoid -->
+
+DORA supervised, deepbacs-nucleoid:
+
+<!-- q18-dora-sup-nucleoid -->
+```text
+deepbacs-nucleoid test, 2 images: PSNR (dB) / SSIM vs the high-SNR reference, CARE's normalization
+method: Supervised on deepbacs-nucleoid training pairs: DORA supervised U-Net; best epoch 22; val loss 0.0003181; val PSNR 34.97 dB (+7.18 dB over noisy)
+image        noisy           bilateral       method         
+m29.tif       26.76 / 0.762   26.95 / 0.782   34.88 / 0.979
+m30.tif       28.01 / 0.854   28.11 / 0.865   36.03 / 0.985
+mean          27.39 / 0.808   27.53 / 0.823   35.45 / 0.982
+```
+<!-- /q18-dora-sup-nucleoid -->
+
+CAREamics CARE, deepbacs-nucleoid:
+
+<!-- q18-careamics-care-nucleoid -->
+```text
+deepbacs-nucleoid test, 2 images: PSNR (dB) / SSIM vs the high-SNR reference, CARE's normalization
+method: CAREamics 0.3.5 CARE, default 2D config, 60 x 50 steps x batch 16, CPU
+image        noisy           bilateral       method         
+m29.tif       26.76 / 0.762   26.95 / 0.782   34.76 / 0.977
+m30.tif       28.01 / 0.854   28.11 / 0.865   35.84 / 0.985
+mean          27.39 / 0.808   27.53 / 0.823   35.30 / 0.981
+```
+<!-- /q18-careamics-care-nucleoid -->
+
+DORA Noise2Void, zerocost-care2d:
+
+<!-- q18-dora-n2v-care2d -->
+```text
+zerocost-care2d test, 2 images: PSNR (dB) / SSIM vs the high-SNR reference, CARE's normalization
+method: Noise2Void on zerocost-care2d training split, noisy images only: DORA Noise2Void, default recipe; best epoch 28; val loss 0.0003379
+image        noisy           bilateral       method         
+23.tif        18.76 / 0.457   18.78 / 0.465   18.78 / 0.463
+24.tif        19.80 / 0.465   19.83 / 0.473   19.83 / 0.471
+mean          19.28 / 0.461   19.30 / 0.469   19.30 / 0.467
+```
+<!-- /q18-dora-n2v-care2d -->
+
+CAREamics Noise2Void, zerocost-care2d:
+
+<!-- q18-careamics-n2v-care2d -->
+```text
+zerocost-care2d test, 2 images: PSNR (dB) / SSIM vs the high-SNR reference, CARE's normalization
+method: CAREamics 0.3.5 Noise2Void, default 2D config, 30 x 50 steps x batch 16, CPU
+image        noisy           bilateral       method         
+23.tif        18.76 / 0.457   18.78 / 0.465   18.77 / 0.462
+24.tif        19.80 / 0.465   19.83 / 0.473   19.81 / 0.470
+mean          19.28 / 0.461   19.30 / 0.469   19.29 / 0.466
+```
+<!-- /q18-careamics-n2v-care2d -->
+
+DORA supervised, zerocost-care2d:
+
+<!-- q18-dora-sup-care2d -->
+```text
+zerocost-care2d test, 2 images: PSNR (dB) / SSIM vs the high-SNR reference, CARE's normalization
+method: Supervised on zerocost-care2d training pairs: DORA supervised U-Net; best epoch 33; val loss 0.01024; val PSNR 19.90 dB (+1.61 dB over noisy)
+image        noisy           bilateral       method         
+23.tif        18.76 / 0.457   18.78 / 0.465   19.71 / 0.540
+24.tif        19.80 / 0.465   19.83 / 0.473   20.55 / 0.538
+mean          19.28 / 0.461   19.30 / 0.469   20.13 / 0.539
+```
+<!-- /q18-dora-sup-care2d -->
+
+CAREamics CARE, zerocost-care2d:
+
+<!-- q18-careamics-care-care2d -->
+```text
+zerocost-care2d test, 2 images: PSNR (dB) / SSIM vs the high-SNR reference, CARE's normalization
+method: CAREamics 0.3.5 CARE, default 2D config, 60 x 50 steps x batch 16, CPU
+image        noisy           bilateral       method         
+23.tif        18.76 / 0.457   18.78 / 0.465   19.82 / 0.522
+24.tif        19.80 / 0.465   19.83 / 0.473   20.35 / 0.517
+mean          19.28 / 0.461   19.30 / 0.469   20.08 / 0.520
+```
+<!-- /q18-careamics-care-care2d -->

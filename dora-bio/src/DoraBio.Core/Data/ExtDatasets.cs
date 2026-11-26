@@ -101,6 +101,45 @@ public static class ExtDatasets
     public static List<ImagePair> LoadPairs(string root, ExtDataset dataset, ExtSplit split) =>
         FmdDataset.Load(PlanPairs(root, dataset, split));
 
+    /// <summary>
+    /// The training split, normalized for training (quality pass Q18's recipe).
+    /// <list type="bullet">
+    /// <item><b>Supervised:</b> the pairs, with noisy and clean each normalized by <i>its own</i> 0.1st and 99.9th
+    /// percentiles, CARE's convention. Here the clean partner is 3–11× brighter than the noisy image; normalizing both by
+    /// the noisy image's map (DORA's FMD convention, where both are at one scale) would ask the network to learn that
+    /// gain too.</item>
+    /// <item><b>Noise2Void:</b> the noisy images alone, as a user without ground truth would have them.</item>
+    /// </list>
+    /// Each file is its own field of view, so the trainer's validation split holds out whole images. The test split is
+    /// never touched.
+    /// </summary>
+    public static List<ImagePair> LoadTraining(string root, ExtDataset dataset, bool supervised)
+    {
+        if (supervised)
+        {
+            var plan = PlanPairs(root, dataset, ExtSplit.Train);
+            var pairs = new ImagePair[plan.Count];
+            Parallel.For(0, plan.Count, i =>
+            {
+                var p = plan[i];
+                var noisy = ImageLoader.Load(p.NoisyPath);
+                var clean = ImageLoader.Load(p.CleanPath);
+                var pair = new ImagePair(Normalization.Apply(noisy, Normalization.FromPercentiles(noisy.Pixels)),
+                    Normalization.Apply(clean, Normalization.FromPercentiles(clean.Pixels)), p.GroupId, p.Name);
+                pair.Validate();
+                pairs[i] = pair;
+            });
+            return pairs.ToList();
+        }
+        return PlanNoisy(root, dataset, ExtSplit.Train).AsParallel().AsOrdered().Select(path =>
+        {
+            var noisy = ImageLoader.Load(path);
+            string file = Path.GetFileName(path);
+            return new ImagePair(Normalization.Apply(noisy, Normalization.FromPercentiles(noisy.Pixels)), null,
+                $"{dataset.Name}/{Path.GetFileNameWithoutExtension(file)}", $"{dataset.Name}/{file}");
+        }).ToList();
+    }
+
     private static List<string> TiffFiles(string dir)
     {
         if (!Directory.Exists(dir)) throw new DirectoryNotFoundException($"{dir}: missing (run tools/fetch_ext.sh).");

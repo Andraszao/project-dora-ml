@@ -33,6 +33,8 @@ public static class Program
                    [--subset correlated|independent]  (train only on the images whose noise check says so)
                    [--vst]  (Noise2Void in the variance-stabilized domain; apply the model with --vst too)
                    FMD folders: [--fmd-frames 4] [--fmd-levels raw,avg2,avg4,avg8,avg16] [--fmd-categories A,B]
+                   External sets: --ext NAME [--data data/ext]  (its training split from tools/fetch_ext.sh; supervised
+                    pairs are normalized each by their own percentiles; --mode n2v uses the noisy images alone)
                    (FOV 19, FMD's test FOV, is always excluded from training)
           denoise  --weights WEIGHTS.bin --in IMAGE --out OUT.tif [--baseline BASELINE.tif] [--tile 128]
                    (IMAGE may be a multi-page TIFF stack: OUT.tif is then a stack with the same pages; or a folder:
@@ -50,6 +52,9 @@ public static class Program
                    Does the image's noise look independent between pixels, as Noise2Void assumes? (no ground truth needed)
           ext-check [--root data/ext]
                    Verify the public paired datasets from tools/fetch_ext.sh: counts, pairing, decoding, brightness.
+          ext-eval --dataset NAME (--weights WEIGHTS.bin | --predictions DIR [--label TEXT]) [--root data/ext]
+                   Score a model, or another tool's outputs (DIR/<test file name>), on an external set's test images with
+                   CARE's protocol: reference normalized by its 0.1-99.9 percentiles, outputs matched by least squares.
           fmd-check --root data/fmd
                    Verify a downloaded FMD dataset: structure, test_mix, and no train/test leakage.
           fmd-eval  --weights WEIGHTS.bin --root data/fmd [--levels raw,avg2,...] [--per-image]
@@ -95,6 +100,7 @@ public static class Program
                 "info" => Info(options),
                 "fmd-check" => FmdCheck(options),
                 "ext-check" => ExtCheck(options),
+                "ext-eval" => ExtEval(options),
                 "fmd-eval" => FmdEval(options),
                 "fmd-noise" => FmdNoise(options),
                 "fmd-diagnose" => FmdDiagnose(options),
@@ -150,9 +156,19 @@ public static class Program
     /// </summary>
     private static int Train(Options o)
     {
-        string dataDir = o.Required("data");
         bool vst = o.Has("vst");
-        var dataset = DatasetLoader.LoadDirectory(dataDir, FmdOptionsFrom(o), vst ? VarianceStabilization.Stabilize : null);
+        List<ImagePair> dataset;
+        if (o.StringOrNull("ext") is { } extName)
+        {
+            // An external dataset's training split (field validation, Q18): supervised on its pairs, or Noise2Void on its
+            // noisy images alone. Its test split is never loaded here.
+            var ext = ExtDatasets.Get(extName);
+            bool supervised = o.String("mode", ext.HasGroundTruth ? "supervised" : "n2v") == "supervised";
+            if (supervised && !ext.HasGroundTruth) throw new ArgumentException($"{ext.Name} has no ground truth for supervised training.");
+            if (vst) throw new ArgumentException("--vst isn't supported with --ext.");
+            dataset = ExtDatasets.LoadTraining(o.String("data", "data/ext"), ext, supervised);
+        }
+        else dataset = DatasetLoader.LoadDirectory(o.Required("data"), FmdOptionsFrom(o), vst ? VarianceStabilization.Stabilize : null);
         var mode = o.String("mode", dataset.All(d => d.HasClean) ? "supervised" : "n2v") switch
         {
             "n2v" or "noise2void" => TrainingMode.Noise2Void,
@@ -248,7 +264,7 @@ public static class Program
             : mode == TrainingMode.Noise2Void ? $"{withClean} clean images used only to score validation"
             : $"{withClean} clean targets";
         string description = (o.StringOrNull("describe")
-            ?? $"{dataset.Count} images from '{Path.GetFileName(Path.GetFullPath(dataDir))}' ({cleanUse})") + structure;
+            ?? $"{dataset.Count} images from '{o.StringOrNull("ext") ?? Path.GetFileName(Path.GetFullPath(o.Required("data")))}' ({cleanUse})") + structure;
         Console.WriteLine($"🧬 {net.Config}, {net.ParameterCount:N0} parameters");
         Console.WriteLine($"📚 {description}; mode {mode}; {config.MaxEpochs} epochs × {config.StepsPerEpoch} steps × batch {config.BatchSize} @ {config.PatchSize}px");
 
@@ -606,6 +622,45 @@ public static class Program
         }
         Console.WriteLine($"all    {plan.Count,3}  {"",12}  {scoresA.Average(x => x.DoraPsnr),7:0.00} {scoresB.Average(x => x.DoraPsnr),7:0.00} {mean,7:0.00}  {images.Count(i => i.Item1 <= threshold),4}");
         Console.WriteLine($"chosen noise threshold: {threshold:0.00000}");
+        return 0;
+    }
+
+    /// <summary>
+    /// <c>ext-eval</c>: scores a DORA model, or the saved outputs of another tool (CAREamics, a vendor's denoiser), on an
+    /// external dataset's test images with CARE's protocol (<see cref="ExtBenchmark"/>), next to the noisy input and the
+    /// bilateral filter. Every test image is listed, since the published test splits hold only 2–5 images. The output is
+    /// deterministic, so docs/RESULTS.md records it verbatim and gate 31 re-runs it.
+    /// </summary>
+    private static int ExtEval(Options o)
+    {
+        string root = o.String("root", "data/ext");
+        var dataset = ExtDatasets.Get(o.Required("dataset"));
+        if (!dataset.HasGroundTruth) throw new ArgumentException($"{dataset.Name} has no ground truth to score against.");
+        Func<string, GrayImage, GrayImage> method;
+        string label;
+        if (o.StringOrNull("weights") is { } weights)
+        {
+            var (net, info) = WeightsFile.Load(weights);
+            var denoiser = new FrameDenoiser(net);
+            method = (_, noisy) => denoiser.Denoise(noisy).Output;
+            label = info.Provenance;
+        }
+        else if (o.StringOrNull("predictions") is { } dir)
+        {
+            method = (name, _) => ImageLoader.Load(Path.Combine(dir, name));
+            label = o.String("label", "outputs in " + Path.GetFileName(Path.TrimEndingDirectorySeparator(dir)));
+        }
+        else throw new ArgumentException("ext-eval needs --weights or --predictions.");
+
+        var scores = ExtBenchmark.Evaluate(root, dataset, method);
+        Console.WriteLine($"{dataset.Name} test, {scores.Count} images: PSNR (dB) / SSIM vs the high-SNR reference, CARE's normalization");
+        Console.WriteLine($"method: {label}");
+        Console.WriteLine($"{"image",-12} {"noisy",-15} {"bilateral",-15} {"method",-15}");
+        foreach (var s in scores)
+            Console.WriteLine($"{s.Name,-12} {s.NoisyPsnr,6:0.00} / {s.NoisySsim:0.000}  {s.BilateralPsnr,6:0.00} / {s.BilateralSsim:0.000}  {s.MethodPsnr,6:0.00} / {s.MethodSsim:0.000}");
+        Console.WriteLine($"{"mean",-12} {scores.Average(s => s.NoisyPsnr),6:0.00} / {scores.Average(s => s.NoisySsim):0.000}  " +
+                          $"{scores.Average(s => s.BilateralPsnr),6:0.00} / {scores.Average(s => s.BilateralSsim):0.000}  " +
+                          $"{scores.Average(s => s.MethodPsnr),6:0.00} / {scores.Average(s => s.MethodSsim):0.000}");
         return 0;
     }
 
