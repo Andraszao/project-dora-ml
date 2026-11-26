@@ -267,6 +267,29 @@ public class StackTests
         Assert.Equal((1, 3L, "MRC"), (sim.Files, sim.Planes, sim.Formats.Single()));
     }
 
+    [Fact]
+    public void LargeUniformGroupsAreCheckedOnASpreadOutSampleAndOthersInFull()
+    {
+        string root = TestUtil.TempDirectory();
+        string trib = Path.Combine(root, "mdc25-tribolium");
+        for (int i = 0; i < 30; i++)
+        {
+            WriteStack(Path.Combine(trib, "noisy", $"{i:000}.tif"), 4, 1, size: 4);
+            WriteStack(Path.Combine(trib, "gt", $"{i:000}.tif"), 4, 2, size: 4);
+        }
+        var dataset = ExtStacks.Get("mdc25-tribolium");
+        var sampled = Assert.Single(ExtStacks.Inspect(root, dataset, sampleLimit: 10));
+        Assert.Equal((30, 120L, 10), (sampled.Files, sampled.Planes, sampled.HeadersOpened));
+        var full = Assert.Single(ExtStacks.Inspect(root, dataset));               // 30 files is under the default limit
+        Assert.Equal((30, 120L, 30), (full.Files, full.Planes, full.HeadersOpened));
+
+        WriteStack(Path.Combine(trib, "noisy", "007.tif"), 5, 1, size: 4);      // one pair of another size: no shortcut
+        WriteStack(Path.Combine(trib, "gt", "007.tif"), 5, 2, size: 4);
+        var mixed = Assert.Single(ExtStacks.Inspect(root, dataset, sampleLimit: 10));
+        Assert.Equal((30, 121L, 30), (mixed.Files, mixed.Planes, mixed.HeadersOpened));
+        Assert.Throws<ArgumentOutOfRangeException>(() => ExtStacks.Inspect(root, dataset, sampleLimit: 1));
+    }
+
     [Theory]
     [InlineData("noisy/*.tif", "noisy/a.tif", true)]
     [InlineData("noisy/*.tif", "noisy/sub/a.tif", false)]

@@ -84,7 +84,7 @@ public static class Program
                    PSNR/SSIM (8-bit scale) on FMD's held-out test_mix: noisy vs bilateral vs DORA, per microscope type.
           fmd-noise --root data/fmd [--levels raw,avg2,...]
                    How correlated test_mix's real noise is between neighbouring pixels (Noise2Void assumes 0).
-          fmd-diagnose --root data/fmd [--levels raw]
+          fmd-diagnose --root data/fmd [--levels raw] [--validation-seed S] [--choose-threshold]
                    Checks `diagnose` (noisy image only) against fmd-noise's ground truth; exit 1 on any disagreement.
         """;
 
@@ -619,29 +619,42 @@ public static class Program
     private static int FmdDiagnose(Options o)
     {
         string testMix = Path.Combine(o.Required("root"), "test_mix");
+        int? validationSeed = o.Has("validation-seed") ? o.Int("validation-seed", 0) : null;
+        string scope = validationSeed is { } vs ? $"validation (seed {vs})" : "test_mix";
         int disagreements = 0;
+        var samples = new List<(double Estimate, bool Correlated)>();
         foreach (string level in o.String("levels", "raw").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
         {
-            var truth = FmdBenchmark.MeasureNoise(testMix, level).ToDictionary(s => s.Name);
+            var plan = validationSeed is { } seed
+                ? FmdBenchmark.ValidationPlan(o.Required("root"), seed, [level])
+                : FmdDataset.PlanTestMix(testMix, level);
+            var truth = FmdBenchmark.MeasureNoise(plan).ToDictionary(s => s.Name);
             var rows = new List<(string Modality, bool Truth, bool Blind, double Estimate)>();
-            foreach (var p in FmdDataset.PlanTestMix(testMix, level))
+            foreach (var p in plan)
             {
                 var d = NoiseDiagnostics.Diagnose(ImageLoader.Load(p.NoisyPath));
                 var t = truth[p.Name];
                 bool truthCorrelated = Math.Max(t.Right1, t.Down1) >= NoiseDiagnostics.CorrelatedThreshold;
                 rows.Add((FmdBenchmark.ModalityOf(p.GroupId), truthCorrelated, d.Correlated, Math.Max(d.Right1, d.Down1)));
+                samples.Add((Math.Max(d.Right1, d.Down1), truthCorrelated));
                 if (truthCorrelated != d.Correlated)
                 {
                     disagreements++;
                     Console.WriteLine($"✗ {p.Name}: blind estimate {Math.Max(d.Right1, d.Down1):0.000}, truth {Math.Max(t.Right1, t.Down1):0.000}");
                 }
             }
-            Console.WriteLine($"test_mix level {level}: correlated-noise verdicts, blind (noisy image only) vs ground truth");
+            Console.WriteLine($"{scope} level {level}: correlated-noise verdicts, blind (noisy image only) vs ground truth");
             Console.WriteLine($"{"modality",-10} {"n",3}  {"truth",5} {"blind",5}  {"blind estimate min-max",22}");
             foreach (var g in rows.GroupBy(r => r.Modality).OrderBy(g => g.Key, StringComparer.Ordinal))
                 Console.WriteLine($"{g.Key,-10} {g.Count(),3}  {g.Count(r => r.Truth),5} {g.Count(r => r.Blind),5}  {$"{g.Min(r => r.Estimate):0.000}-{g.Max(r => r.Estimate):0.000}",22}");
         }
         Console.WriteLine(disagreements == 0 ? "✓ every verdict agrees with the ground truth" : $"✗ {disagreements} verdicts disagree");
+        if (o.Has("choose-threshold"))   // Q19's guard: the routing threshold these images support (validation only)
+        {
+            var (threshold, reason) = NoiseDiagnostics.ChooseThreshold(samples);
+            Console.WriteLine($"routing threshold: {threshold:0.000} ({reason})");
+            return 0;
+        }
         return disagreements == 0 ? 0 : 1;
     }
 
@@ -692,9 +705,11 @@ public static class Program
         if (o.StringOrNull("weights") is { } weights)
         {
             var (net, info) = WeightsFile.Load(weights);
-            var denoiser = new FrameDenoiser(net);
+            // --weights-correlated: images the noise check calls correlated go to a second network (P3's routing, Q19).
+            var correlated = o.StringOrNull("weights-correlated") is { } c ? WeightsFile.Load(c) : default;
+            var denoiser = new FrameDenoiser(net, correlated.Net);
             method = (_, noisy) => denoiser.Denoise(noisy).Output;
-            label = info.Provenance;
+            label = correlated.Net is null ? info.Provenance : $"{info.Provenance} | correlated images: {correlated.Info.Provenance}";
         }
         else if (o.StringOrNull("predictions") is { } dir)
         {
@@ -756,9 +771,11 @@ public static class Program
         if (o.StringOrNull("weights") is { } weights)
         {
             var (net, info) = WeightsFile.Load(weights);
-            var denoiser = new FrameDenoiser(net);
+            // --weights-correlated: images the noise check calls correlated go to a second network (P3's routing, Q19).
+            var correlated = o.StringOrNull("weights-correlated") is { } c ? WeightsFile.Load(c) : default;
+            var denoiser = new FrameDenoiser(net, correlated.Net);
             method = (_, noisy) => denoiser.Denoise(noisy).Output;
-            label = info.Provenance;
+            label = correlated.Net is null ? info.Provenance : $"{info.Provenance} | correlated images: {correlated.Info.Provenance}";
         }
         else if (o.StringOrNull("predictions") is { } dir)
         {
@@ -909,8 +926,9 @@ public static class Program
                     }
                     string planes = group.Planes is long p ? $"{sum.Planes}/{p}" : $"{sum.Planes}";
                     string label = d.Groups.Count == 1 ? d.Name : $"{d.Name}[{g}]";
+                    string sampled = sum.HeadersOpened < sum.Files ? $"  (headers of {sum.HeadersOpened} spread-out files; all {sum.Files} the same size)" : "";
                     Console.WriteLine($"{label,-26} {$"{sum.Files}/{group.Files}",11} {planes,15}  {group.Axes,-5} {string.Join(",", sum.PlaneSizes),-12} " +
-                                      $"{string.Join(",", sum.Formats),-8} {stats}");
+                                      $"{string.Join(",", sum.Formats),-8} {stats}{sampled}");
                     if (sum.Files != group.Files) { Console.WriteLine($"  ✗ {label}: {sum.Files} files, expected {group.Files}"); problems++; }
                     if (group.Planes is long expected && sum.Planes != expected)
                     {

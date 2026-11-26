@@ -167,10 +167,14 @@ public static class FmdBenchmark
     /// <summary>Noise correlations and noise level of every test_mix image at one noise level (no model involved).</summary>
     /// <param name="testMixDir">The test_mix folder.</param>
     /// <param name="level">Noise level: raw, avg2, avg4, avg8 or avg16.</param>
-    public static List<NoiseStats> MeasureNoise(string testMixDir, string level = "raw")
+    public static List<NoiseStats> MeasureNoise(string testMixDir, string level = "raw") =>
+        MeasureNoise(FmdDataset.PlanTestMix(testMixDir, level));
+
+    /// <summary>Noise correlations and noise level of every image of a plan (e.g. <see cref="ValidationPlan"/>).</summary>
+    public static List<NoiseStats> MeasureNoise(IReadOnlyList<FmdDataset.PlannedPair> plan)
     {
         var stats = new List<NoiseStats>();
-        foreach (var p in FmdDataset.PlanTestMix(testMixDir, level))
+        foreach (var p in plan)
         {
             var noisy = ImageLoader.Load(p.NoisyPath);
             var clean = ImageLoader.Load(p.CleanPath);

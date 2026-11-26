@@ -34,7 +34,9 @@ public sealed record StackPair(string Noisy, string? Clean, ExtStackGroup Group)
 /// <param name="Planes">Noisy planes in those files.</param>
 /// <param name="PlaneSizes">Distinct plane sizes, e.g. "512×512".</param>
 /// <param name="Formats">Distinct formats ("TIFF", "BigTIFF", "MRC").</param>
-public sealed record StackSummary(int Files, long Planes, IReadOnlyList<string> PlaneSizes, IReadOnlyList<string> Formats);
+/// <param name="HeadersOpened">Noisy files whose headers were opened (all of them, or a spread-out sample; see
+/// <see cref="ExtStacks.Inspect"/>).</param>
+public sealed record StackSummary(int Files, long Planes, IReadOnlyList<string> PlaneSizes, IReadOnlyList<string> Formats, int HeadersOpened);
 
 /// <summary>
 /// The stack datasets of PATHWAY.md's road to state of the art (tools/ext_manifest.json), and how to find and check
@@ -118,25 +120,37 @@ public static class ExtStacks
     }
 
     /// <summary>
-    /// Opens every file's header and checks it: each noisy file must have the group's declared axes, and its clean
-    /// partner the same layout and plane size. Returns what was found per group (no pixels are read).
+    /// Checks every pair's files and returns what was found per group (no pixels are read): each noisy file must have the
+    /// group's declared axes, and its clean partner the same layout and plane size. Every pair is checked to exist. A
+    /// group of more than <paramref name="sampleLimit"/> files has the headers of an evenly spread sample opened (always
+    /// including the first and last), and its plane count is files × planes per file, which holds only if every file in
+    /// the group has the same byte size and every sampled file the same layout; otherwise every header is opened. (On a
+    /// cold disk, opening the 31,000 headers of MDC25 Tribolium one by one took 20 minutes.)
     /// </summary>
     /// <exception cref="InvalidDataException">A file disagrees with its declared axes or with its partner.</exception>
-    public static List<StackSummary> Inspect(string root, ExtStackDataset dataset)
+    public static List<StackSummary> Inspect(string root, ExtStackDataset dataset, int sampleLimit = 200)
     {
+        if (sampleLimit < 2) throw new ArgumentOutOfRangeException(nameof(sampleLimit), "A sample needs at least the first and last file.");
         var pairs = Plan(root, dataset);
         var result = new List<StackSummary>();
         foreach (var group in dataset.Groups)
         {
-            int files = 0;
+            var members = pairs.Where(p => p.Group == group).ToList();
+            bool uniform = members.Count > sampleLimit
+                           && members.Select(p => new FileInfo(p.Noisy).Length).Distinct().Count() == 1
+                           && members.Where(p => p.Clean is not null).Select(p => new FileInfo(p.Clean!).Length).Distinct().Count() <= 1;
+            var opened = uniform
+                ? Enumerable.Range(0, sampleLimit).Select(k => (int)((long)k * (members.Count - 1) / (sampleLimit - 1))).Distinct().Select(i => members[i]).ToList()
+                : members;
             long planes = 0;
+            var layouts = new HashSet<string>(StringComparer.Ordinal);
             var sizes = new SortedSet<string>(StringComparer.Ordinal);
             var formats = new SortedSet<string>(StringComparer.Ordinal);
-            foreach (var pair in pairs.Where(p => p.Group == group))
+            foreach (var pair in opened)
             {
                 using var noisy = Open(pair.Noisy, group.Axes);
-                files++;
                 planes += noisy.PlaneCount;
+                layouts.Add(noisy.Layout.ToString());
                 sizes.Add($"{noisy.Width}×{noisy.Height}");
                 formats.Add(noisy.Format);
                 if (pair.Clean is null) continue;
@@ -146,7 +160,11 @@ public static class ExtStacks
                         $"{Path.GetFileName(pair.Clean)}: {clean.Layout}, {clean.Width}×{clean.Height}, but its noisy partner has " +
                         $"{noisy.Layout}, {noisy.Width}×{noisy.Height}.");
             }
-            result.Add(new StackSummary(files, planes, sizes.ToList(), formats.ToList()));
+            if (uniform && layouts.Count == 1 && sizes.Count == 1)
+                planes = planes / opened.Count * members.Count;   // same bytes and same layout in the sample: one shape
+            else if (uniform)
+                return Inspect(root, dataset, sampleLimit: int.MaxValue);   // the sample disagrees: open everything
+            result.Add(new StackSummary(members.Count, planes, sizes.ToList(), formats.ToList(), opened.Count));
         }
         return result;
     }

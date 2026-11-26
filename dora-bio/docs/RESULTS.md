@@ -603,6 +603,42 @@ epoch (C), fix that without using ground truth?
   weakness of the rule: averaging four sets let C's 0.37 dB validation loss on FMD hide behind small public-set gains.
   Q19's rule adds a per-set floor on validation.
 
+## Quality pass Q19: the U-Net with routing
+
+Brick 37, pre-registered in
+[`PATHWAY.md`](../PATHWAY.md#q19-pre-registration-the-u-net-with-routing-brick-37) (commit `02496b1`) before any of its
+code existed. Reproduce: `tools/experiments/q19_routed.sh` (after P3's script). **Question:** Q2 found the U-Net
+under rule C better on independent noise and worse on widefield's correlated noise. Does routing each image by DORA's
+noise check (P3's design 2) keep the gains and avoid the loss?
+
+- **Guard 1 held on validation.** The noise check routes all 46 validation FOVs by their ground truth (widefield
+  0.559–0.574, confocal and two-photon 0.266 at most), so the threshold stays at 0.4, frozen before test.
+- **The correlated network stayed P3's.** Widefield validation PSNR: P3's dilated diamond-2 network 32.17 dB, the U-Net
+  with diamond-2 32.19, inside the 0.05 dB margin, so the pre-registered tie-break kept P3's. Routing sent exactly the
+  17 widefield validation FOVs and the 12 widefield test images to it.
+
+| Test | FMD all (unrounded) | Confocal | Two-photon | Widefield | MreB | Nucleoid | CARE 2D | Public mean | MreB slope |
+|---|---|---|---|---|---|---|---|---|---|
+| Bar | ≥ 33.17 | ≥ 33.99 | ≥ 32.36 | ≥ 31.66 | ≥ 25.73 | ≥ 33.61 | ≥ 19.20 | ≥ 26.70 | ≥ 0.90 |
+| P3's routed pair (dilated + dilated) | 32.97 | 34.09 | 32.46 | 31.76 | | | | | |
+| Today's Noise2Void default (Q18) | 31.68 | 33.77 | 31.85 | 27.97 | 25.83 | 33.71 | 19.30 | 26.28 | 0.75 |
+| **Q19: U-Net (rule C) + P3's correlated network, routed** | **33.2439** | **34.45** | **32.86** | 31.76 | **26.80** | **34.42** | 19.12 | **26.780** | **0.96** |
+
+- **Not adopted, by one floor.** Every bar is met except CARE 2D's: 19.12 dB against the 19.20 floor (today's 19.30 −
+  0.1). <!-- q19-verdict: not-adopted --> **Nothing ships**; the routed pair stays an opt-in recipe (`train --subset`,
+  `--struct auto`, `denoise/fmd-eval/ext-eval --weights-correlated`).
+- **Why CARE 2D fails, and how much that means.** All 22 of its training images and both test images are flagged as
+  correlated (0.58), so CARE 2D is scored entirely by the structured-blind-spot network. Today's plain network leaves
+  those images almost untouched (19.30 against 19.28 for the noisy input), while the structured one changes them and
+  lands 0.16 dB below the noisy input. Two test images, and references that don't match their inputs (brick 32: the
+  untouched image already has slope 0.75 and a 31% ratio error against its reference), make this a weak set to decide
+  on; but the floor was pre-registered, so the verdict stands. The U-Net itself isn't involved there.
+- **What the pass shows.** On FMD, routing keeps every U-Net gain and none of its loss: **33.24 dB without any ground
+  truth, the best self-supervised result DORA has**, 0.27 dB above P3's routed pair and 0.51 dB below supervised
+  training (33.75). Confocal +0.36 and two-photon +0.40 over P3's pair; widefield unchanged (the same network). On the
+  public sets the U-Net's numbers are Q2's (no image there is called correlated except CARE 2D's), 0.22 dB behind
+  CAREamics' Noise2Void on average, with the most faithful intensities of any self-supervised result (MreB slope 0.96).
+
 ## Systems S1 + S2 (brick 36): where the time goes, and 512-bit kernels
 
 Measured with `dora-bio bench --roofline` (and `dora-bio bench` for whole-model timings) on the 4-vCPU cloud container
@@ -725,7 +761,7 @@ the high-SNR reference (`Fidelity.cs`; reproduce: `tools/experiments/fidelity.sh
 - **Weights trained on FMD are not published** (CC BY-SA terms for derived models are a separate decision). The
   bundled model stays the synthetic one.
 
-## Reproducibility checks (gates 13, 15, 21, 25, 27, 29, 31, 32, 33 and 35)
+## Reproducibility checks (gates 13, 15, 21, 25, 27, 29, 31, 32, 33, 35 and 37)
 
 The blocks marked `fmd-noise` above and the blocks below are verbatim program output. `bricks.sh` gate 13 re-runs
 the first two whenever the data is present and requires an exact match. The block below is
@@ -1773,3 +1809,120 @@ method       0.96      6.5%       43.4%      43.9%
 over 711 foreground tiles and 2534 reference spots
 ```
 <!-- /q2-fidelity-unet-mreb -->
+
+Quality pass Q19 (gate 37 recomputes the threshold decision, the correlated-network choice and the verdict from these
+blocks, checks `train --mode n2v`'s defaults, and re-runs the blocks when `data/fmd`, `data/ext`, `runs/p3/` and
+`runs/q19/` are present). Threshold: `fmd-diagnose --root data/fmd --levels raw --validation-seed 2026 --choose-threshold`.
+Validation: `fmd-eval --weights runs/q19/fmd_unet_indep.bin --weights-correlated <runs/p3/n2v_corr.bin |
+runs/q19/fmd_unet_corr.bin> --root data/fmd --levels raw --validation-seed 2026`. Test: the same with P3's network and
+`--precise`; public sets `ext-eval --dataset <set> --weights runs/q19/<set>_independent.bin` (CARE 2D:
+`<set>_correlated.bin`); MreB fidelity likewise.
+
+<!-- q19-threshold -->
+```text
+validation (seed 2026) level raw: correlated-noise verdicts, blind (noisy image only) vs ground truth
+modality     n  truth blind  blind estimate min-max
+Confocal    22      0     0             0.001-0.266
+TwoPhoton    7      0     0             0.036-0.163
+WideField   17     17    17             0.559-0.574
+✓ every verdict agrees with the ground truth
+routing threshold: 0.400 (kept 0.400: it routes all 46 images by their ground truth)
+```
+<!-- /q19-threshold -->
+
+<!-- q19-selection -->
+```text
+guard 1: routing threshold: 0.400 (kept 0.400: it routes all 46 images by their ground truth)
+correlated network, widefield validation PSNR (routed / widefield images):
+p3 32.17 17/17
+unet 32.19 17/17
+chosen correlated network: p3
+test: FMD 33.2439 (confocal 34.45, two-photon 32.86, widefield 31.76); public mean 26.780 (MreB 26.80, nucleoid 34.42, CARE 2D 19.12), MreB slope 0.96
+verdict: not-adopted
+```
+<!-- /q19-selection -->
+
+<!-- q19-val-fmd-p3 -->
+```text
+validation (seed 2026) level raw: mean PSNR (dB) / SSIM vs ground truth, 8-bit scale
+modality     n  noisy           bilateral       DORA           
+Confocal    22   29.86 / 0.709   32.67 / 0.871   35.50 / 0.905
+TwoPhoton    7   26.18 / 0.464   30.97 / 0.819   33.03 / 0.862
+WideField   17   25.36 / 0.383   26.62 / 0.475   32.17 / 0.810
+all         46   27.64 / 0.551   30.17 / 0.717   33.89 / 0.863
+routed by the noise check: 17 of 46 images to the correlated-noise model
+```
+<!-- /q19-val-fmd-p3 -->
+
+<!-- q19-val-fmd-unet -->
+```text
+validation (seed 2026) level raw: mean PSNR (dB) / SSIM vs ground truth, 8-bit scale
+modality     n  noisy           bilateral       DORA           
+Confocal    22   29.86 / 0.709   32.67 / 0.871   35.50 / 0.905
+TwoPhoton    7   26.18 / 0.464   30.97 / 0.819   33.03 / 0.862
+WideField   17   25.36 / 0.383   26.62 / 0.475   32.19 / 0.804
+all         46   27.64 / 0.551   30.17 / 0.717   33.90 / 0.861
+routed by the noise check: 17 of 46 images to the correlated-noise model
+```
+<!-- /q19-val-fmd-unet -->
+
+<!-- q19-test-fmd -->
+```text
+test_mix level raw: mean PSNR (dB) / SSIM vs ground truth, 8-bit scale
+modality     n  noisy           bilateral       DORA           
+Confocal    20   29.13 / 0.701   31.74 / 0.872   34.45 / 0.903
+TwoPhoton   16   26.32 / 0.473   31.07 / 0.816   32.86 / 0.852
+WideField   12   25.23 / 0.374   26.53 / 0.466   31.76 / 0.807
+all         48   27.22 / 0.543   30.22 / 0.752   33.24 / 0.862
+routed by the noise check: 12 of 48 images to the correlated-noise model
+all, unrounded: noisy 27.2168 dB, bilateral 30.2157 dB, DORA 33.2439 dB
+```
+<!-- /q19-test-fmd -->
+
+<!-- q19-test-mreb -->
+```text
+deepbacs-mreb test, 5 images: PSNR (dB) / SSIM vs the high-SNR reference, CARE's normalization
+method: Noise2Void on deepbacs-mreb training split, noisy images only, those the noise check calls independent: Q19; only the 30 images whose noise check says independent; last epoch 30; val loss 0.007303
+image        noisy           bilateral       method         
+m31.tif       21.19 / 0.328   21.30 / 0.346   26.36 / 0.762
+m32.tif       20.48 / 0.282   20.72 / 0.319   25.57 / 0.752
+m33.tif       22.40 / 0.423   22.41 / 0.424   27.53 / 0.775
+m34.tif       21.81 / 0.359   21.84 / 0.365   26.84 / 0.766
+m35.tif       22.48 / 0.449   22.48 / 0.449   27.68 / 0.761
+mean          21.67 / 0.368   21.75 / 0.381   26.80 / 0.763
+```
+<!-- /q19-test-mreb -->
+
+<!-- q19-test-nucleoid -->
+```text
+deepbacs-nucleoid test, 2 images: PSNR (dB) / SSIM vs the high-SNR reference, CARE's normalization
+method: Noise2Void on deepbacs-nucleoid training split, noisy images only, those the noise check calls independent: Q19; only the 28 images whose noise check says independent; last epoch 30; val loss 0.001354
+image        noisy           bilateral       method         
+m29.tif       26.76 / 0.762   26.95 / 0.782   33.82 / 0.968
+m30.tif       28.01 / 0.854   28.11 / 0.865   35.02 / 0.979
+mean          27.39 / 0.808   27.53 / 0.823   34.42 / 0.973
+```
+<!-- /q19-test-nucleoid -->
+
+<!-- q19-test-care2d -->
+```text
+zerocost-care2d test, 2 images: PSNR (dB) / SSIM vs the high-SNR reference, CARE's normalization
+method: Noise2Void on zerocost-care2d training split, noisy images only, those the noise check calls correlated: Q19; only the 22 images whose noise check says correlated; structured blind spots (diamond-2) on 22 of 22 images; best epoch 27; val loss 0.005942
+image        noisy           bilateral       method         
+23.tif        18.76 / 0.457   18.78 / 0.465   18.58 / 0.421
+24.tif        19.80 / 0.465   19.83 / 0.473   19.66 / 0.437
+mean          19.28 / 0.461   19.30 / 0.469   19.12 / 0.429
+```
+<!-- /q19-test-care2d -->
+
+<!-- q19-fidelity-mreb -->
+```text
+deepbacs-mreb test, 5 images: fidelity vs the high-SNR reference (1.00 / 0% / 100% / 100% is perfect)
+method: Noise2Void on deepbacs-mreb training split, noisy images only, those the noise check calls independent: Q19; only the 30 images whose noise check says independent; last epoch 30; val loss 0.007303
+            slope ratio err spots found spots real
+noisy        1.00      7.1%       55.2%       7.1%
+bilateral    1.01      7.3%       54.6%       8.1%
+method       0.96      6.5%       43.4%      43.9%
+over 711 foreground tiles and 2534 reference spots
+```
+<!-- /q19-fidelity-mreb -->

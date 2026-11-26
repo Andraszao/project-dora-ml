@@ -49,6 +49,35 @@ public static class NoiseDiagnostics
     /// <summary>One-pixel correlation at or above which noise counts as correlated.</summary>
     public const double CorrelatedThreshold = 0.4;
 
+    /// <summary>
+    /// The routing threshold a labelled set supports (quality pass Q19's first guard, applied to validation images only):
+    /// <paramref name="current"/> if it puts every image on the side its ground truth says; else the midpoint of the gap
+    /// between the highest independent estimate and the lowest correlated one; with no gap, the midpoint between
+    /// neighbouring estimates that misroutes the fewest images, ties going to the value nearest <paramref name="current"/>.
+    /// </summary>
+    /// <param name="samples">Each image's blind estimate (the larger one-pixel correlation) and its ground-truth class.</param>
+    /// <param name="current">The threshold in use.</param>
+    /// <returns>The threshold, and why it was chosen.</returns>
+    /// <exception cref="ArgumentException">No samples.</exception>
+    public static (double Threshold, string Reason) ChooseThreshold(IReadOnlyList<(double Estimate, bool Correlated)> samples,
+        double current = CorrelatedThreshold)
+    {
+        if (samples.Count == 0) throw new ArgumentException("No images to choose a threshold on.", nameof(samples));
+        int Misrouted(double t) => samples.Count(s => (s.Estimate >= t) != s.Correlated);
+        if (Misrouted(current) == 0) return (current, $"kept {current:0.000}: it routes all {samples.Count} images by their ground truth");
+        var correlated = samples.Where(s => s.Correlated).Select(s => s.Estimate).ToList();
+        var independent = samples.Where(s => !s.Correlated).Select(s => s.Estimate).ToList();
+        if (correlated.Count > 0 && independent.Count > 0 && independent.Max() < correlated.Min())
+        {
+            double mid = 0.5 * (independent.Max() + correlated.Min());
+            return (mid, $"moved to {mid:0.000}: midpoint of the gap {independent.Max():0.000}-{correlated.Min():0.000} ({Misrouted(current)} misrouted at {current:0.000})");
+        }
+        var sorted = samples.Select(s => s.Estimate).Order().ToList();
+        var candidates = sorted.Zip(sorted.Skip(1), (a, b) => 0.5 * (a + b)).Append(current).ToList();
+        double best = candidates.OrderBy(Misrouted).ThenBy(t => Math.Abs(t - current)).First();
+        return (best, $"moved to {best:0.000}: fewest misrouted ({Misrouted(best)} of {samples.Count}; {Misrouted(current)} at {current:0.000})");
+    }
+
     /// <summary>Fewest usable tiles a diagnosis needs (a 64×64 image has 16).</summary>
     public const int MinTiles = 4;
 

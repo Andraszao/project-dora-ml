@@ -24,7 +24,7 @@ export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_SKIP_FIRST_TIME_EXPE
 
 NAMES=(scaffold nn data io inference training cli godot-build godot-smoke ci-core ci-godot fmd-fetch fmd-loader fmd-eval
        n2v-diagnostic structured-mask vst calibration pool-upsample unet unet-tiling arch-eval
-       bench blocked-conv perf-budget q1-recipe tiff-stack-write q10-routing cli-batch q13-conditioning ext-data q18-ext-bench quant-fidelity q12-n2v-recipe ext-data-2 q2-n2v-stop roofline-wide)
+       bench blocked-conv perf-budget q1-recipe tiff-stack-write q10-routing cli-batch q13-conditioning ext-data q18-ext-bench quant-fidelity q12-n2v-recipe ext-data-2 q2-n2v-stop roofline-wide q19-routed)
 CHECKS=(
   "solution builds (warnings are errors, missing XML docs included); every test class belongs to exactly one brick"
   "ConvLayer/DenoisingNet/Adam/Simd: finite-difference gradient checks, optimizer behavior"
@@ -63,6 +63,7 @@ CHECKS=(
   "dataset manifest pinned, licence policy holds, ATTRIBUTIONS.md generated from it; TIFF/BigTIFF/MRC stacks read per axis (independent fixtures); downloaded stack datasets match their published counts"
   "quality pass Q2: the selection signal decides the epoch (loss never uses ground truth), keep-last and save-last; the recorded choice, verdict and shipped Noise2Void defaults follow the pre-registered rule; with data + runs/q2 the blocks reproduce"
   "512-bit kernels bit-identical to the reference (forced on, any CPU); bench --roofline reports peaks, every kernel shape and the stack-run split; the 512-bit speedup floor is in gate 24's budget"
+  "quality pass Q19: the threshold rule; the recorded threshold decision (validation only), correlated-network choice, verdict and Noise2Void defaults follow the pre-registered rule; with data + runs/q19 the blocks reproduce"
 )
 LAST=$((${#NAMES[@]} - 1))
 LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dora-bricks.XXXXXX")"
@@ -630,6 +631,71 @@ sys.exit(1 if problems else 0)
 PY
 }
 
+gate_37() {   # q19-routed (quality pass Q19, pre-registered in PATHWAY.md, commit 02496b1, before any of its code)
+  test_gate 37-q19-routed || return 1
+  local b
+  for b in q19-threshold q19-selection q19-val-fmd-p3 q19-val-fmd-unet q19-test-fmd q19-test-mreb q19-test-nucleoid \
+           q19-test-care2d q19-fidelity-mreb; do
+    [[ -n "$(recorded_block "$b")" ]] || { echo ">> docs/RESULTS.md needs the $b block"; return 1; }
+  done
+  # Guard 1: the threshold decision on validation, and the shipped threshold equals it.
+  local kept shipped
+  kept="$(recorded_block q19-threshold | sed -n 's/^routing threshold: \([0-9.]*\).*/\1/p')"
+  shipped="$(sed -n 's/.*public const double CorrelatedThreshold = \([0-9.]*\);.*/\1/p' src/DoraBio.Core/NoiseDiagnostics.cs)"
+  awk -v a="$kept" -v b="$shipped" 'BEGIN { exit (a + 0 == b + 0) ? 0 : 1 }' \
+    || { echo ">> validation chose a routing threshold of $kept, but NoiseDiagnostics ships $shipped"; return 1; }
+  # The correlated network: widefield validation PSNR, the U-Net only if more than 0.05 dB ahead of P3's.
+  local p3 unet want chosen
+  p3="$(recorded_block q19-val-fmd-p3 | awk '$1 == "WideField" { print $9 }')"
+  unet="$(recorded_block q19-val-fmd-unet | awk '$1 == "WideField" { print $9 }')"
+  want="$(awk -v p="$p3" -v u="$unet" 'BEGIN { print (u > p + 0.05 + 1e-9) ? "unet" : "p3" }')"
+  chosen="$(recorded_block q19-selection | sed -n 's/^chosen correlated network: //p')"
+  [[ "$want" == "$chosen" ]] || { echo ">> widefield validation ($p3 vs $unet) chooses '$want', but the log says '$chosen'"; return 1; }
+  # The rule, from the test blocks themselves.
+  local expected recorded
+  expected="$( { recorded_block q19-test-fmd | awk '$1 == "all," { print "fmd all", $10 } $1 ~ /^(Confocal|TwoPhoton|WideField)$/ { print "fmd", $1, $9 }'
+                 for b in mreb nucleoid care2d; do recorded_block "q19-test-$b" | awk -v n="$b" '$1 == "mean" { print "set", n, $8 }'; done
+                 recorded_block q19-fidelity-mreb | awk '$1 == "method" { print "slope", $2 }'; } | awk '
+    $1 == "fmd" { f[$2] = $3 } $1 == "set" { s[$2] = $3; mean += $3 / 3 } $1 == "slope" { slope = $2 }
+    END {
+      ok = f["all"] >= 33.17 - 1e-9 && f["Confocal"] >= 33.99 - 1e-9 && f["TwoPhoton"] >= 32.36 - 1e-9 && f["WideField"] >= 31.66 - 1e-9
+      ok = ok && mean >= 26.70 - 1e-9 && slope >= 0.90 - 1e-9
+      ok = ok && s["mreb"] >= 25.73 - 1e-9 && s["nucleoid"] >= 33.61 - 1e-9 && s["care2d"] >= 19.20 - 1e-9
+      printf "%s FMD %.4f, public %.3f (CARE 2D %.2f), MreB slope %.2f\n", ok ? "adopted" : "not-adopted", f["all"], mean, s["care2d"], slope
+    }')"
+  [[ "$(recorded_block q19-selection | sed -n 's/^verdict: //p')" == "${expected%% *}" ]] \
+    || { echo ">> Q19's rule gives '${expected%% *}', but the selection log's verdict line disagrees"; return 1; }
+  recorded="$(sed -n 's/.*<!-- q19-verdict: \([a-z-]*\) -->.*/\1/p' docs/RESULTS.md)"
+  [[ "${expected%% *}" == "$recorded" ]] || { echo ">> Q19's rule gives '${expected%% *}' ($expected), but RESULTS.md records '$recorded'"; return 1; }
+  echo ">> Q19: $expected; recorded verdict agrees"
+  dotnet build tools/DoraBio.Cli -c Release >/dev/null || return 1
+  local defaults
+  defaults="$(dotnet "$CLI_DLL" info --default-n2v)"
+  if [[ "${expected%% *}" == not-adopted ]]; then
+    [[ "$defaults" == "dilated select=auto patience=6 keep=best" ]] \
+      || { echo ">> Q19 wasn't adopted, but train --mode n2v defaults changed to '$defaults'"; return 1; }
+  fi
+  local d
+  for d in deepbacs-mreb deepbacs-nucleoid zerocost-care2d; do
+    [[ -f "$EXT/$d/.complete" ]] || { echo "verdict checked; reproduction skipped (needs data/ext)"; return 77; }
+  done
+  for b in runs/p3/n2v_corr.bin runs/q19/fmd_unet_indep.bin runs/q19/fmd_unet_corr.bin runs/q19/deepbacs-mreb_independent.bin \
+           runs/q19/deepbacs-nucleoid_independent.bin runs/q19/zerocost-care2d_correlated.bin "$FMD/test_mix/.complete"; do
+    [[ -f "$b" ]] || { echo "verdict checked; reproduction skipped (needs data/fmd, runs/p3 and runs/q19)"; return 77; }
+  done
+  reproduces q19-threshold fmd-diagnose --root "$FMD" --levels raw --validation-seed 2026 --choose-threshold || return 1
+  reproduces q19-val-fmd-p3 fmd-eval --weights runs/q19/fmd_unet_indep.bin --weights-correlated runs/p3/n2v_corr.bin \
+    --root "$FMD" --levels raw --validation-seed 2026 || return 1
+  reproduces q19-val-fmd-unet fmd-eval --weights runs/q19/fmd_unet_indep.bin --weights-correlated runs/q19/fmd_unet_corr.bin \
+    --root "$FMD" --levels raw --validation-seed 2026 || return 1
+  reproduces q19-test-fmd fmd-eval --weights runs/q19/fmd_unet_indep.bin --weights-correlated runs/p3/n2v_corr.bin \
+    --root "$FMD" --levels raw --precise || return 1
+  reproduces q19-test-mreb ext-eval --dataset deepbacs-mreb --root "$EXT" --weights runs/q19/deepbacs-mreb_independent.bin || return 1
+  reproduces q19-test-nucleoid ext-eval --dataset deepbacs-nucleoid --root "$EXT" --weights runs/q19/deepbacs-nucleoid_independent.bin || return 1
+  reproduces q19-test-care2d ext-eval --dataset zerocost-care2d --root "$EXT" --weights runs/q19/zerocost-care2d_correlated.bin || return 1
+  reproduces q19-fidelity-mreb fidelity --dataset deepbacs-mreb --root "$EXT" --weights runs/q19/deepbacs-mreb_independent.bin || return 1
+}
+
 gate_21() {   # arch-eval
   test_gate 21-arch-eval || return 1
   # The rule was set before measuring (PATHWAY.md, P4): the U-Net becomes the default only if, at the same training
@@ -725,6 +791,8 @@ MUTATIONS=(
   '35|src/DoraBio.Core/Training/Trainer.cs|if (bestEpoch > 0 && !cfg.KeepLastEpoch)|if (bestEpoch > 0)'
   '36|src/DoraBio.Core/Nn/ConvLayer.Wide.cs|int t1 = d, t2 = 2 * d, t3 = d * pw,|int t1 = 2 * d, t2 = d, t3 = d * pw,'
   '36|src/DoraBio.Core/Nn/ConvLayer.Wide.cs|        int t0 = 2 * d * gw + 2 * d, t1 = 2 * d * gw + d,|        int t0 = 2 * d * gw + d, t1 = 2 * d * gw + 2 * d,'
+  '37|src/DoraBio.Core/NoiseDiagnostics.cs|double mid = 0.5 * (independent.Max() + correlated.Min());|double mid = independent.Max();'
+  '37|docs/RESULTS.md|<!-- q19-verdict: not-adopted -->|<!-- q19-verdict: adopted -->'
 )
 
 self_test() {
