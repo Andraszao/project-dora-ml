@@ -281,7 +281,7 @@ zstd-compressed, which DORA doesn't decode.
 | **Stage 1** | | **Close the self-supervised gap (CPU only)** | |
 | 33 | quality | **Q12:** a Noise2Void U-Net at CAREamics' size (about 0.5M parameters) against today's 26k dilated network, 0.2% against 2% masking, a longer budget; chosen on held-out training images | within 0.3 dB of CAREamics Noise2Void on the Q18 sets **and** MreB slope ≥ 0.9 |
 | 34 ✅ | build | `ext-data-2`: the benchmark data above in `tools/fetch_ext.sh` (the large archives behind `--full`), loaders for 3D and time-lapse stacks, and the attribution manifest | pins, counts and licences recorded; gates stay fast without `--full`. **Done:** `tools/ext_manifest.json` holds all 17 datasets (22 files, 58 GB; Zenodo MD5 + size for each, SHA-256 pinned for every file downloaded); `ATTRIBUTIONS.md` is generated from it and gate-checked; the licence rule (only CC BY / CC0 may train a shipped model) is checked by script and test. Reading the real files changed the plan's picture: the 2025 sets are **training patches** (Tribolium: 15,500 pairs of 16 × 64²; Planaria: 17,900 such pairs plus 45 full volumes), not whole volumes; BioSR+ is **raw SIM** (9 pattern frames per file, MRC) at 8–15 signal levels; two of the three DeepCAD-RT records are **BigTIFF**; ImageJ labels W2S's fields of view "slices" and MDC25's z-slices "channels". So DORA now reads BigTIFF and MRC, and a dataset declares its axes (checked against the file's own shape). Checked on the downloads (`stack-check`, 25 s): W2S 360 planes (S=120 × C=3); Tribolium 15,500 pairs, 248,000 planes, each partner the same shape; BioSR+ CCPs 384 pairs × 9 patterns (512 × 256); zebrafish optic tectum 6,955 frames of 492² read from a 3.4 GB BigTIFF that carries no shape metadata, so its declared TYX is what labels it. The other nine sets are pinned by Zenodo MD5 and size, with their counts taken from the published listings, and get checked when downloaded |
-| 35 | quality | **Q2: when a Noise2Void U-Net should stop** (added after Q12: its early stop on FMD is the one thing between the U-Net and the new default) | pre-registered at the pass; must pass Q12's bar and FMD guard |
+| 35 | quality | **Q2: when a Noise2Void U-Net should stop** (added after Q12: its early stop on FMD is the one thing between the U-Net and the new default) | [pre-registered](#q2-pre-registration-when-a-noise2void-u-net-should-stop-brick-35): Q12's bar and FMD guard, plus a rule-only branch for the dilated default |
 | 35b | quality | **Self-supervised scoreboard:** DORA's best self-supervised recipe against the 2024 challenge leaderboard (W2S, SUPPORT, JUMP) and against CAREamics Noise2Void and N2V2 run here on the 2025 sets | pre-registered at the pass; scored the way each benchmark specifies |
 | **Stage 2** | | **Better blind spots and frame pairs** | |
 | 36 | build | **N2V2** (blur pooling and median replacement, which remove Noise2Void's checkerboard artifacts) and **Noise2Noise** from neighbouring time-lapse frames, plus a spatiotemporal blind spot | gradient checks; the checkerboard test goes away |
@@ -358,7 +358,7 @@ bar and adoption rule are written here **before** it is measured.
 | Q18 | **DORA against CARE and Noise2Void on public data** (`ext-bench`, field validation): the same images, the same scoring (CARE's brightness-matched protocol), and the same patch budget for DORA and for CAREamics run on CPU | the viability question: nobody has compared DORA with the tools biologists already use | ✅ brick 31, **measured, not competitive** ([results](docs/RESULTS.md#quality-pass-q18-dora-against-care-and-noise2void-on-public-data)). Supervised: DORA's U-Net matches CAREamics CARE (+0.07 dB over three sets, ahead on each). Noise2Void: DORA's default (26k-parameter dilated network) is 0.72 dB behind on average and about 1 dB behind on the two sets where Noise2Void works; on CARE 2D neither works, and DORA's noise check says why (correlated noise). By the rule, Q12 moves ahead of the pilot |
 | Q13 | **A noise-conditioned U-Net (FiLM)**: one all-level model that is told how noisy each image is, so it can change its response per image instead of averaging over five noise levels | Q1: the all-level model loses 0.47 dB at raw; Q10: switching between two fixed models can't win it back; FFDNet-style conditioning (FiLM modulation rather than an input noise map) adapts one model smoothly | ✅ brick 29, **measured, not adopted** ([results](docs/RESULTS.md#quality-pass-q13-telling-the-network-how-noisy-each-image-is)). Seed 2026 raw 33.92 vs the 34.63 needed; over three seeds conditioning loses 0.19 dB at raw and 0.11 on cleaner levels, though the network does use its condition (a 2× wrong σ̂ costs 1.2 dB). Lessons: seed spread is about 0.3 dB, and Q1's raw cost was partly a bad seed (three-seed mean: 0.30 below the raw-trained U-Net, not 0.47) |
 | Q12 | **A wider U-Net and a longer budget for all-level training** (24 or 32 base features, more epochs; optionally pretrained on synthetic Poisson–Gaussian pairs, then fine-tuned on FMD) | same; costs about 2–4× the compute. A 60-epoch run takes only about 6 minutes on this CPU, so the budget is cheap to raise. Pretraining on synthetic noise, then fine-tuning on real data, has been tried on FMD before | ✅ brick 33 (self-supervised part), **measured, not adopted** ([results](docs/RESULTS.md#quality-pass-q12-closing-the-self-supervised-gap)). The U-Net (118k) won selection and, on the public sets, closed 60% of the gap (26.70 vs 26.28; CAREamics 27.00) and fixed the contrast compression (MreB slope 0.75 → 0.93, ratio error below the raw frame's). But the FMD guard failed: under Noise2Void the U-Net stops at epoch 4 on FMD and scores 31.21 (needed 31.48). Bigger (0.47M) and 0.2% masking were worse. The supervised all-level part moves to stage 4 |
-| Q2 | **U-Net Noise2Void training**: its run stopped early (best epoch 4) and lost 0.47 dB | P4; **Q12**: the same early stop is the only thing between the U-Net and the new Noise2Void default (it wins the public sets and fixes fidelity) | **next quality pass (brick 35)**: how a U-Net trained by Noise2Void should decide when to stop (its validation loss has the noise as its floor) |
+| Q2 | **U-Net Noise2Void training**: its run stopped early (best epoch 4) and lost 0.47 dB | P4; **Q12**: the same early stop is the only thing between the U-Net and the new Noise2Void default (it wins the public sets and fixes fidelity). The logs show the FMD run chose its epoch on jittery validation PSNR while its masked loss was still falling | **pre-registered, brick 35** ([below](#q2-pre-registration-when-a-noise2void-u-net-should-stop-brick-35)): choose and stop on the masked loss over the full budget, or keep the last epoch; no ground truth in the choice |
 | Q11 | **An all-level model that keeps raw quality**: weight raw frames more in the training mix (e.g. 4 raw frames plus 1 of each other level) | Q1/Q10: the all-level model's raw loss comes from sharing capacity across five levels | open |
 | Q3 | **"Do no harm" on clean inputs**: every model scores below the untouched image on 16-frame averages (bundled model −4.2 dB) | P2, P3, P4 level tables; Q1's all-level U-Net is the first to beat the untouched image overall (40.15 vs 39.70) | open; Q10 is its best candidate |
 | Q4 | **Per-mode default architecture and recipe** (U-Net, and possibly all noise levels, when training with ground truth) | P4 rule kept the dilated default; Q1/Q10: the all-level U-Net trades −0.3 to −0.5 dB on raw frames for +1 to +5 dB on cleaner ones; **needs the owner's decision** | waiting for a decision |
@@ -487,6 +487,58 @@ Written before any of its code exists or anything is run.
     for everyone, the way CAREamics' defaults were picked.
   - CARE 2D's noise is correlated, so no plain Noise2Void can do much there. It stays in the mean, as pre-registered
     for Q18.
+
+### Q2 pre-registration: when a Noise2Void U-Net should stop (brick 35)
+
+Written before any of its code exists or anything is run.
+
+- **What Q12 left.** Q12's U-Net (16 base features, 118k parameters, 2% masking, 30 × 50 steps) closed 60% of the gap to
+  CAREamics on the public sets (26.697 dB against the 26.70 bar) and fixed MreB's contrast (slope 0.93). The FMD guard
+  then failed: 31.21 dB on test_mix raw, against the 31.48 needed.
+- **What the logs show (read after Q12, before this pass).** The trainer picks its best epoch, and stops early, on
+  validation **PSNR whenever the validation images have clean partners** (FMD), and on the masked Noise2Void loss
+  otherwise (the public sets, which load noisy images only). On FMD the U-Net's masked validation loss fell at almost
+  every epoch (0.00531 → 0.00436 over 10 epochs) and its SSIM rose (0.54 → 0.65), but its PSNR on 48 patches only
+  jittered between 25.0 and 25.6 dB after epoch 2. It peaked at epoch 4, so training stopped at epoch 10 with epoch 4's
+  weights. Q12's explanation (the masked loss's noise floor hides real gains) doesn't fit FMD: there the noisy signal
+  was the PSNR, and the masked loss was the one still improving. On the public sets the loss did decide, and runs
+  stopped at epoch 15 (nucleoid) and 28 (MreB).
+  - A self-supervised recipe shouldn't choose its weights with ground truth anyway: a user training on their own
+    images has none.
+- **Candidates** (the Q12 network: U-Net, 16 base features, depth 2, 2% masking, at most 30 × 50 steps).
+  - **A, today's rule:** best epoch and early stopping (patience 6) on validation PSNR when the validation images have
+    clean partners, else on the masked loss.
+  - **B, masked loss, full budget:** best epoch on the masked validation loss always, ground truth or not; no early
+    stopping (all 30 epochs); the plateau learning-rate decay follows the same loss.
+  - **C, last epoch:** B's run, keeping the final weights. It needs no held-out images at all.
+- **Choosing, on validation only.** Mean validation PSNR over four sets: the three public sets (the fifth of each
+  training split held out with seed 2026, scored with CARE's protocol, as in Q12) and FMD (the validation FOVs of a
+  seed-2026 run, raw frames, `fmd-eval --validation-seed 2026`). The highest mean wins. Ties within 0.05 dB go to C,
+  then B (fewer moving parts). A's runs already exist (Q12's `unet16_*` and `fmd_guard`). **If A wins, the pass ends
+  there: not adopted, and the test sets aren't touched.**
+- **Fixed throughout:** batch 16, 64 px patches, seed 2026, Adam at 1e-3 with DORA's plateau decay, dihedral
+  augmentation, plain blind spots; public sets from their training splits' noisy images; FMD with P3's plain
+  Noise2Void settings (raw frames, 4 per FOV, FOV 19 excluded).
+- **Scored once, on test, for the winner:** the U-Net on the three public test splits (PSNR, and MreB's slope) and on
+  FMD test_mix raw. The dilated network (today's default) is also trained and tested under the winning rule, for the
+  third branch below.
+- **Adoption rule.**
+  - **Competitive:** public test mean ≥ 26.70 dB, MreB test slope ≥ 0.90 and FMD test_mix raw ≥ 31.48 (Q12's bar and
+    guard). The U-Net and the winning rule become `train --mode n2v`'s defaults, and the lab pilot is unblocked.
+    Verdict `adopted`.
+  - **Improved:** public test mean ≥ 26.58 (+0.3 dB on today's 26.28), MreB slope ≥ 0.75 (not below today's) and the
+    same FMD guard. Same defaults; the pilot stays blocked. Verdict `improved`.
+  - **The rule alone:** otherwise, if the dilated network under the winning rule loses at most 0.10 dB against today
+    on both the public test mean (≥ 26.18) and FMD test_mix raw (≥ 31.58), the rule becomes the Noise2Void default
+    with the dilated network: model selection without ground truth, at no measured cost. Verdict `rule-only`.
+  - **Otherwise:** not adopted. Verdict `not-adopted`.
+  - Supervised training is untouched.
+- **Known weaknesses, stated now.**
+  - One seed; Q13 measured a spread of about 0.3 dB, which is as large as the margins here.
+  - The guard needs +0.27 dB over the U-Net's 31.21, and the B/C choice uses ground truth on held-out images, as Q12
+    did (it picks one default for everyone).
+  - The rule changes when training stops, not what the network learns. If the U-Net under Noise2Void is simply worse
+    on widefield FMD (it was level with the dilated network there: 27.98 against 27.97), longer training won't fix it.
 
 ## Parking lot (deliberately not on the path)
 
