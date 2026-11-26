@@ -22,6 +22,7 @@ settled first, and so every phase builds only on phases that are already green.
 | **P10** | Release | only runs from the editor or CLI | planned |
 | **FV** | Field validation (alongside P6–P10) | nobody outside this repo has used DORA or compared it with their current tool | 🚧 in progress: 30 `ext-data`, 31 `ext-bench` (Q18: supervised at parity with CARE, Noise2Void 0.7 dB behind), 32 `quant-fidelity` done; the pilot waits for Q12 |
 | **SOTA** | [Road to state of the art](#road-to-state-of-the-art-stages-15-agreed-2026-11-26) (stages 1–5, bricks 33–44+) | DORA trails the standard self-supervised tool and has no broad scoreboard | 🚧 in progress: 33 (Q12: not adopted, blocked only by the U-Net's early stop on FMD) and 34 `ext-data-2` (benchmark data pinned, stack readers) done; next 35 (Q2) |
+| **SYS** | [Systems track](#systems-track-speed-big-data-and-the-viewport-as-an-instrument-proposed-2026-11-26) (S1–S10, alongside stages 1–5) | CPU kernels estimated at about a tenth of peak; stacks bigger than memory can't be browsed; the viewport shows results but measures nothing | 📋 planned: S1 `perf-roofline` and S2 `simd-512` first; S10 (GPU inference) waits for an owner decision |
 
 ## Phase protocol (applies to every phase)
 
@@ -298,6 +299,50 @@ zstd-compressed, which DORA doesn't decode.
 
 **Checkpoints.** The lab pilot starts as soon as stage 1 passes (Q12), not at the end. If Q12 misses, stage 1's
 scoreboard (35) still runs, to show whether the gap is general or specific to the Q18 sets.
+
+---
+
+## Systems track: speed, big data and the viewport as an instrument (proposed 2026-11-26)
+
+The owner proposed a three-layer design: a C++ GDExtension for I/O, memory and SIMD; the C# core for networks and
+training; Godot for display, 3D and ROI tools. Checked against the code before planning:
+
+- **The viewport already keeps the dynamic range.** Frames reach Godot as 32-bit float textures (`Image.Format.Rf`)
+  and are contrast-stretched in a shader; nothing is reduced to 8 bits on the CPU. A 16-bit texture would halve the
+  memory of a big stack, which matters for 3D, but it doesn't fix a precision problem.
+- **C# already has what the C++ layer was for.** .NET 8 maps files into memory (`MemoryMappedFile`), works on
+  unmanaged memory through spans and pointers with no GC involvement, and has AVX-512 (`Vector512`) and ARM NEON
+  (`AdvSimd`) intrinsics. A C++ layer would add a third language and a native build per platform for abilities the
+  core can reach in C#. **Not planned**; it comes back only if S1 finds a hot spot C# can't reach.
+- **On the denoising path, compute dominates, not copying.** A 512² frame takes about 0.27 s to denoise, while reading
+  and converting a 512² uint16 page takes milliseconds. Copies matter for *scrubbing* a large stack in the viewer,
+  which is S3's and S4's job.
+- **The CPU kernels have headroom.** A rough estimate from the parameter count (about 26k multiply-adds per pixel for
+  the dilated network) puts today's speed near 50 GFLOP/s on 4 cores. That's roughly a tenth of this CPU's AVX-512 peak,
+  and DORA's kernels use 256-bit vectors (`Vector<float>`'s default width). S1 measures it properly before anything
+  is changed.
+- **GPU compute through Godot is real but not "milliseconds everywhere".** A rough estimate for the 118k U-Net on a
+  2048² frame (about 0.4 TFLOP) is tens to a few hundred ms on a discrete GPU and around a second on integrated
+  graphics, against about 13 s on this CPU today. It would live in the Godot app only: a headless run has no
+  RenderingDevice, so the CLI and servers keep the CPU path. It also crosses the owner decision of 2026-11-26
+  (inference stays on the CPU), so it waits for a new decision.
+
+| # | Brick | What | Gate |
+|---|---|---|---|
+| S1 | `perf-roofline` | `bench` reports achieved GFLOP/s per kernel (forward, backward, U-Net levels) against the machine's measured peak, and a time breakdown of a stack run (decode, normalize, infer, encode, write) | numbers recorded; decides whether S2 is worth doing |
+| S2 | `simd-512` | 512-bit kernels where the CPU has AVX-512 (`Vector512`), NEON on ARM; Winograd F(2×2, 3×3) only as an optional, tolerance-tested path | bit-identical to the reference kernels (vectorized across pixels, so the summation order doesn't change); training and inference speed-up measured. Faster kernels also make every later quality pass cheaper |
+| S3 | `mmap-stacks` | uncompressed TIFF/BigTIFF/MRC planes read through a memory map (`ImageStack` backend), so a 100 GB stack opens instantly and pages in what is viewed | resident memory flat while scrubbing a multi-GB stack; values identical to the stream reader |
+| S4 | `viewport-chunks` (already planned) + **foveated order** | the tile queue sorted by distance from the viewport centre; tiles under the cursor first, the rest in the background | first visible tile within a stated budget; the finished frame identical to whole-frame inference (exact tiling holds) |
+| S5 | `display-16bit` | R16 textures (half the memory of today's float ones) via `Texture2DRD`, with the contrast shader unchanged | displayed values equal the source within 1/65535; texture memory halved |
+| S6 | `residual-lens` (the planned "what was removed" view) | a loupe showing raw, denoised, residual and the residual's local autocorrelation (from `NoiseDiagnostics`): removed signal shows up as structure, removed noise doesn't | on synthetic data, a deliberately erased filament lights up, and the residual of pure noise doesn't |
+| S7 | `roi-probe` (the planned in-app fidelity report) | draw an ROI; get block-mean slope, bias and noise reduction of denoised against raw, live as Z/T is scrubbed, plus brick 32's metrics when a reference is loaded | without a reference it is labelled a consistency check (denoised should be an unbiased estimate of the raw mean), never "fidelity" |
+| S8 | `live-adapt` | Noise2Void adaptation on a background thread with the preview refreshed every few epochs | the stop signal is whatever Q2 settles (no ground truth); the UI never blocks |
+| S9 | `volume-view` | a 3D texture with maximum-intensity projection, ortho slices and clipping planes, for stage 3's 2.5D results | renders a known synthetic volume correctly; memory stated |
+| S10 | `gpu-infer` (**needs an owner decision**) | U-Net / dilated inference as RenderingDevice compute shaders in the Godot app; the CPU path stays the reference | GPU output within a stated tolerance of the CPU's on every architecture; speed recorded per GPU class |
+
+**Order.** S1 and S2 come first: they're cheap, and faster kernels speed up every later experiment (training uses
+the same convolutions). S3–S7 join stage 5 with `ui-stack`. S8 waits for Q2. S9 waits for stage 3. S10 waits for the
+decision.
 
 ---
 
