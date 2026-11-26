@@ -287,7 +287,7 @@ zstd-compressed, which DORA doesn't decode.
 | 34 ✅ | build | `ext-data-2`: the benchmark data above in `tools/fetch_ext.sh` (the large archives behind `--full`), loaders for 3D and time-lapse stacks, and the attribution manifest | pins, counts and licences recorded; gates stay fast without `--full`. **Done:** `tools/ext_manifest.json` holds all 17 datasets (22 files, 58 GB; Zenodo MD5 + size for each, SHA-256 pinned for every file downloaded); `ATTRIBUTIONS.md` is generated from it and gate-checked; the licence rule (only CC BY / CC0 may train a shipped model) is checked by script and test. Reading the real files changed the plan's picture: the 2025 sets are **training patches** (Tribolium: 15,500 pairs of 16 × 64²; Planaria: 17,900 such pairs plus 45 full volumes), not whole volumes; BioSR+ is **raw SIM** (9 pattern frames per file, MRC) at 8–15 signal levels; two of the three DeepCAD-RT records are **BigTIFF**; ImageJ labels W2S's fields of view "slices" and MDC25's z-slices "channels". So DORA now reads BigTIFF and MRC, and a dataset declares its axes (checked against the file's own shape). Checked on the downloads (`stack-check`, 25 s): W2S 360 planes (S=120 × C=3); Tribolium 15,500 pairs, 248,000 planes, each partner the same shape; BioSR+ CCPs 384 pairs × 9 patterns (512 × 256); zebrafish optic tectum 6,955 frames of 492² read from a 3.4 GB BigTIFF that carries no shape metadata, so its declared TYX is what labels it. The other nine sets are pinned by Zenodo MD5 and size, with their counts taken from the published listings, and get checked when downloaded |
 | 35 ✅ | quality | **Q2: when a Noise2Void U-Net should stop** (added after Q12: its early stop on FMD is the one thing between the U-Net and the new default) | [pre-registered](#q2-pre-registration-when-a-noise2void-u-net-should-stop-brick-35): Q12's bar and FMD guard, plus a rule-only branch for the dilated default. **Measured, not adopted** ([results](docs/RESULTS.md#quality-pass-q2-when-a-noise2void-u-net-should-stop)): keeping the last of 30 epochs (C) gives the U-Net 26.84 dB on the public sets and MreB slope 0.96, but 31.4794 on FMD against the 31.48 guard. Longer training gains on independent noise (confocal +0.84, two-photon +1.02) and loses on correlated widefield noise (−1.69), which the masked loss can't see |
 | 36 ✅ | build | **S1 + S2 (systems track):** `perf-roofline` measures achieved GFLOP/s *and* memory bandwidth per kernel against this CPU's peaks; then the kernels are reworked for whichever bound dominates (512-bit `Vector512` width, or channel-blocked layout / cache tiling) | bit-identical to the reference kernels; speed-up measured for inference and training. **Done** ([results](docs/RESULTS.md#systems-s1--s2-brick-36-where-the-time-goes-and-512-bit-kernels)): every kernel compute-bound (34–75 FLOP/byte, 1–5% of bandwidth), inference 97% of a stack run, so width was the target, not layout; 512-bit forward and input-gradient kernels, bit-identical: 1.3–1.6× on denoise and training steps (interleaved) |
-| 37 | quality | **Q19: the U-Net with routing** (added after Q2) | pre-registered at the pass, with two guards set by the owner: the routing threshold frozen on validation before FMD test is touched, and a per-modality floor next to the overall FMD guard |
+| 37 | quality | **Q19: the U-Net with routing** (added after Q2) | [pre-registered](#q19-pre-registration-the-u-net-with-routing-brick-37), with the owner's two guards: the routing threshold frozen on validation before FMD test is touched, and a per-modality floor next to the overall FMD bar (≥ 33.17 dB against P3's routed 32.97) |
 | 38 | quality | **Self-supervised scoreboard:** DORA's best self-supervised recipe against the 2024 challenge leaderboard (W2S, SUPPORT, JUMP) and against CAREamics Noise2Void and N2V2 run here on the 2025 sets | pre-registered at the pass; scored the way each benchmark specifies |
 | **Stage 2** | | **Better blind spots and frame pairs** | |
 | 39 | build | **N2V2** (blur pooling and median replacement, which remove Noise2Void's checkerboard artifacts) and **Noise2Noise** from neighbouring time-lapse frames, plus a spatiotemporal blind spot | gradient checks; the checkerboard test goes away |
@@ -366,7 +366,7 @@ bar and adoption rule are written here **before** it is measured.
 | Q13 | **A noise-conditioned U-Net (FiLM)**: one all-level model that is told how noisy each image is, so it can change its response per image instead of averaging over five noise levels | Q1: the all-level model loses 0.47 dB at raw; Q10: switching between two fixed models can't win it back; FFDNet-style conditioning (FiLM modulation rather than an input noise map) adapts one model smoothly | ✅ brick 29, **measured, not adopted** ([results](docs/RESULTS.md#quality-pass-q13-telling-the-network-how-noisy-each-image-is)). Seed 2026 raw 33.92 vs the 34.63 needed; over three seeds conditioning loses 0.19 dB at raw and 0.11 on cleaner levels, though the network does use its condition (a 2× wrong σ̂ costs 1.2 dB). Lessons: seed spread is about 0.3 dB, and Q1's raw cost was partly a bad seed (three-seed mean: 0.30 below the raw-trained U-Net, not 0.47) |
 | Q12 | **A wider U-Net and a longer budget for all-level training** (24 or 32 base features, more epochs; optionally pretrained on synthetic Poisson–Gaussian pairs, then fine-tuned on FMD) | same; costs about 2–4× the compute. A 60-epoch run takes only about 6 minutes on this CPU, so the budget is cheap to raise. Pretraining on synthetic noise, then fine-tuning on real data, has been tried on FMD before | ✅ brick 33 (self-supervised part), **measured, not adopted** ([results](docs/RESULTS.md#quality-pass-q12-closing-the-self-supervised-gap)). The U-Net (118k) won selection and, on the public sets, closed 60% of the gap (26.70 vs 26.28; CAREamics 27.00) and fixed the contrast compression (MreB slope 0.75 → 0.93, ratio error below the raw frame's). But the FMD guard failed: under Noise2Void the U-Net stops at epoch 4 on FMD and scores 31.21 (needed 31.48). Bigger (0.47M) and 0.2% masking were worse. The supervised all-level part moves to stage 4 |
 | Q2 | **U-Net Noise2Void training**: its run stopped early (best epoch 4) and lost 0.47 dB | P4; **Q12**: the same early stop is the only thing between the U-Net and the new Noise2Void default (it wins the public sets and fixes fidelity). The logs show the FMD run chose its epoch on jittery validation PSNR while its masked loss was still falling | ✅ brick 35, **measured, not adopted** ([results](docs/RESULTS.md#quality-pass-q2-when-a-noise2void-u-net-should-stop)). The chosen rule (last of 30 epochs) cleared the public bar (26.84) and slope bar (0.96) and missed the FMD guard by 0.0006 dB (31.4794). The early stop on FMD had been protecting widefield: on correlated noise the masked loss keeps falling while the network learns the noise (widefield 27.98 → 26.29). The rule-only branch failed too (dilated −0.37 dB on FMD) |
-| Q19 | **The U-Net with routing**: Q2's U-Net (last of 30 epochs, no ground truth) for images the noise check calls independent, and a structured-blind-spot network for those it calls correlated (P3's routed design, 32.97 dB with the dilated networks) | Q2: the U-Net gains +0.84/+1.02 dB on confocal/two-photon and loses only on correlated widefield noise, which routing already handles | **quality pass 37** (after brick 36): pre-registered at the pass. Guards set by the owner: the routing threshold is frozen on validation before FMD test is touched, and a per-modality floor sits next to the overall FMD guard, so a confocal/two-photon gain can't hide a widefield loss. Its validation rule also adds a per-set floor (Q2's four-set mean hid a 0.37 dB FMD validation loss) |
+| Q19 | **The U-Net with routing**: Q2's U-Net (last of 30 epochs, no ground truth) for images the noise check calls independent, and a structured-blind-spot network for those it calls correlated (P3's routed design, 32.97 dB with the dilated networks) | Q2: the U-Net gains +0.84/+1.02 dB on confocal/two-photon and loses only on correlated widefield noise, which routing already handles | **quality pass 37, [pre-registered](#q19-pre-registration-the-u-net-with-routing-brick-37)**. Guards set by the owner: the routing threshold is frozen on validation before FMD test is touched, and a per-modality floor sits next to the overall FMD guard, so a confocal/two-photon gain can't hide a widefield loss. Its validation rule also adds a per-set floor (Q2's four-set mean hid a 0.37 dB FMD validation loss) |
 | Q11 | **An all-level model that keeps raw quality**: weight raw frames more in the training mix (e.g. 4 raw frames plus 1 of each other level) | Q1/Q10: the all-level model's raw loss comes from sharing capacity across five levels | open |
 | Q3 | **"Do no harm" on clean inputs**: every model scores below the untouched image on 16-frame averages (bundled model −4.2 dB) | P2, P3, P4 level tables; Q1's all-level U-Net is the first to beat the untouched image overall (40.15 vs 39.70) | open; Q10 is its best candidate |
 | Q4 | **Per-mode default architecture and recipe** (U-Net, and possibly all noise levels, when training with ground truth) | P4 rule kept the dilated default; Q1/Q10: the all-level U-Net trades −0.3 to −0.5 dB on raw frames for +1 to +5 dB on cleaner ones; **needs the owner's decision** | waiting for a decision |
@@ -547,6 +547,54 @@ Written before any of its code exists or anything is run.
     did (it picks one default for everyone).
   - The rule changes when training stops, not what the network learns. If the U-Net under Noise2Void is simply worse
     on widefield FMD (it was level with the dilated network there: 27.98 against 27.97), longer training won't fix it.
+
+### Q19 pre-registration: the U-Net with routing (brick 37)
+
+Written before any of its code exists or anything is run.
+
+- **Where it comes from.** Q2: Q12's U-Net under rule C (all 30 epochs, last epoch kept, no ground truth in the choice)
+  gains where noise is independent from pixel to pixel (FMD confocal +0.84, two-photon +1.02 dB; public sets 26.84, MreB
+  slope 0.96) and loses on widefield, whose noise is correlated (−1.69 dB), because the masked loss rewards it for
+  learning that noise. P3: routing each image by DORA's noise check to one of two networks (plain blind spots for
+  independent noise, structured diamond-2 blind spots for correlated noise) is DORA's best ground-truth-free result on
+  FMD: **32.97 dB** on raw test_mix (confocal 34.09, two-photon 32.46, widefield 31.76).
+- **The candidate: P3's routed pair with one network changed.** The network for images the noise check calls
+  independent becomes the U-Net under Q2's rule C (16 base features, depth 2, 2% masking, `--select loss --patience 0
+  --keep last`), trained only on those images, as P3's plain network was. The network for images it calls correlated
+  is chosen on validation (below) between P3's own (dilated, diamond-2, `runs/p3/n2v_corr.bin`) and a U-Net with diamond-2
+  blind spots under rule C, trained on the correlated images.
+- **Guard 1 (owner): the routing threshold is frozen on validation.** Disclosed: the noise check's threshold of 0.4 was
+  placed in brick 14 in the gap between FMD's *test* images' estimates. Before test is touched, every validation FOV
+  (the FOVs a seed-2026 run holds out, raw frames) gets the noise check's estimate and the ground-truth correlation
+  (noisy minus clean). If 0.4 puts every validation FOV on the side its ground truth says (truth ≥ 0.4 is correlated),
+  it stays. Otherwise the threshold becomes the midpoint of the validation gap, or, with no gap, the value that
+  misroutes the fewest validation FOVs (ties go to the value nearest 0.4). It is frozen before scoring test, and the same
+  threshold routes training images, validation images and test images.
+- **Choosing the correlated network: on validation, widefield only.** Mean validation PSNR over the validation FOVs whose
+  (frozen) noise check says correlated. The higher wins; within 0.05 dB, P3's (no new network). No averaging across
+  microscope types: Q2's four-set mean hid a 0.37 dB FMD validation loss.
+- **Public sets, same recipe per set.** Each set's training images are routed by the frozen noise check: images called
+  independent train the U-Net under rule C, images called correlated train the chosen correlated design with diamond-2
+  blind spots, and each test image goes to its routed network. (If a set has images of only one kind, only that
+  network is trained.) Scored with CARE's protocol as in Q18; MreB fidelity as in brick 32.
+- **Fixed throughout:** batch 16, 64 px patches, seed 2026, Adam at 1e-3 with DORA's plateau decay, dihedral
+  augmentation, at most 30 × 50 steps; FMD with P3's settings (raw frames, 4 per FOV, FOV 19 excluded); FMD scores
+  unrounded (`fmd-eval --precise`).
+- **Adoption rule (all on test, after the choices above).**
+  - **FMD, against P3's routed pair:** overall ≥ 33.17 dB (32.97 + 0.2), **and** (guard 2, owner) every microscope type
+    at least its P3 routed score − 0.1 dB: confocal ≥ 33.99, two-photon ≥ 32.36, widefield ≥ 31.66.
+  - **Public sets:** mean ≥ 26.70 dB and MreB slope ≥ 0.90 (Q12's bar), and no set more than 0.1 dB below today's
+    Noise2Void default there (Q18: MreB 25.83, nucleoid 33.71, CARE 2D 19.30).
+  - **All met: adopted.** `train --mode n2v` routes by the noise check: its training images that are called independent
+    train the U-Net under rule C, the ones called correlated train the chosen correlated design (a mixed set yields two
+    weights files, the second for `denoise --weights-correlated`), and `info --default-n2v` reports it. The lab pilot is
+    unblocked.
+  - **Otherwise: not adopted.** Nothing ships; the routed pair stays an opt-in recipe.
+- **Known weaknesses, stated now.**
+  - One seed, and the margins (0.1–0.2 dB) are within Q13's measured seed spread of about 0.3 dB.
+  - FMD's test images were looked at for P3's routed pair (design 2 was devised after design 1's test results) and for
+    the 0.4 threshold; this pass's baseline therefore carries that history.
+  - Two networks cost twice the training of one.
 
 ## Parking lot (deliberately not on the path)
 
