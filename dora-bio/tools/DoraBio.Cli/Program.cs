@@ -34,6 +34,8 @@ public static class Program
                    FMD folders: [--fmd-frames 4] [--fmd-levels raw,avg2,avg4,avg8,avg16] [--fmd-categories A,B]
                    (FOV 19, FMD's test FOV, is always excluded from training)
           denoise  --weights WEIGHTS.bin --in IMAGE --out OUT.tif [--baseline BASELINE.tif] [--tile 128]
+                   (IMAGE may be a multi-page TIFF stack: OUT.tif is then a stack with the same pages; or a folder:
+                    --out and --baseline are then folders, and every image in it is denoised. Frames stream one at a time)
                    [--weights-correlated W2.bin]  (used instead if the image's noise check says correlated)
                    [--vst]  (for models trained with --vst)
                    Output is float32 TIFF in the input's original intensity units.
@@ -254,47 +256,82 @@ public static class Program
     /// <c>denoise</c>: normalize, denoise with tiled inference, then map back to the input's own intensity units and
     /// write float32 TIFF. Writing float rather than 16-bit keeps sub-count precision, which downstream intensity
     /// measurements need. <c>--baseline</c> also writes the bilateral result for comparison.
+    /// <para>
+    /// The input can be one image, a multi-page TIFF stack (the output is a stack with the same pages), or a folder
+    /// (every image in it, written to the <c>--out</c> folder under the same names). Stacks and folders stream one frame
+    /// at a time through <see cref="BatchDenoising"/>, so memory stays at one frame's worth whatever their length; every
+    /// frame goes through the same <see cref="FrameDenoiser"/> as a single image, so it comes out identical.
+    /// </para>
     /// </summary>
     private static int Denoise(Options o)
     {
         var (net, info) = WeightsFile.Load(o.Required("weights"));
-        var raw = ImageLoader.Load(o.Required("in"));
-        var map = Normalization.FromPercentiles(raw.Pixels);
-        var input = Normalization.Apply(raw, map);
-        // --weights-correlated: route by the noise check, as fmd-eval does (P3's two-network design).
-        if (o.StringOrNull("weights-correlated") is { } correlatedPath && IsCorrelated(raw))
+        DenoisingNet? correlatedNet = null;
+        if (o.StringOrNull("weights-correlated") is { } correlatedPath)
         {
-            (net, info) = WeightsFile.Load(correlatedPath);
-            Console.WriteLine("🔎 noise check: correlated, so the --weights-correlated model is used");
+            (correlatedNet, var correlatedInfo) = WeightsFile.Load(correlatedPath);
+            Console.WriteLine($"🧬 correlated-noise model: {correlatedInfo.Provenance}");
         }
+        var denoiser = new FrameDenoiser(net, correlatedNet, o.Has("vst"), o.Int("tile", TiledInference.DefaultTileCore));
+        Console.WriteLine($"🧬 model: {info.Provenance}");
+        string input = o.Required("in"), output = o.Required("out");
+        string? baseline = o.StringOrNull("baseline");
 
         var clock = Stopwatch.StartNew();
-        GrayImage output, denoised;
-        if (o.Has("vst"))
+        if (Directory.Exists(input))
         {
-            (output, var model) = VarianceStabilization.Denoise(net, raw, o.Int("tile", TiledInference.DefaultTileCore));
-            denoised = Normalization.Apply(output, map);
-            Console.WriteLine($"📐 noise model: variance = {model.Gain:G4} · intensity {model.Intercept:+0.###;-0.###}");
+            var plan = BatchDenoising.PlanFolder(input, output);
+            Directory.CreateDirectory(output);
+            if (baseline is not null) Directory.CreateDirectory(baseline);
+            int pages = 0;
+            foreach (var (file, target) in plan)
+            {
+                string? baselineTarget = baseline is null ? null : Path.Combine(baseline, Path.GetFileName(target));
+                int correlated = 0;
+                int n = BatchDenoising.DenoiseFile(denoiser, file, target, baselineTarget, (_, _, r) => correlated += r.UsedCorrelatedModel ? 1 : 0);
+                pages += n;
+                string routed = correlatedNet is null ? "" : $", {correlated} by the correlated-noise model";
+                Console.WriteLine($"   {Path.GetFileName(file)} → {target} ({n} page{(n == 1 ? "" : "s")}{routed})");
+            }
+            Console.WriteLine($"✨ denoised {plan.Count} files, {pages} pages in {clock.Elapsed.TotalSeconds:0.00}s → {output}");
+            ReportPeakMemory();
+            return 0;
         }
-        else
-        {
-            denoised = TiledInference.Denoise(net, input, o.Int("tile", TiledInference.DefaultTileCore));
-            output = Normalization.Invert(denoised, map);
-        }
-        double seconds = clock.Elapsed.TotalSeconds;
 
-        File.WriteAllBytes(o.Required("out"), TiffCodec.Encode(output, TiffSampleType.Float32));
-        Console.WriteLine($"🧬 model: {info.Provenance}");
-        Console.WriteLine($"✨ denoised {raw.Width}×{raw.Height} in {seconds:0.00}s → {o.Required("out")}");
-        Console.WriteLine($"   estimated noise σ (normalized): {Metrics.EstimateNoiseSigma(input):0.0000} → {Metrics.EstimateNoiseSigma(denoised):0.0000}");
-
-        if (o.StringOrNull("baseline") is { } baselinePath)
+        int total = BatchDenoising.CountPages(input);
+        int routedPages = 0;
+        BatchDenoising.PageDone report = total == 1
+            ? (_, raw, r) =>
+            {
+                if (r.UsedCorrelatedModel) Console.WriteLine("🔎 noise check: correlated, so the --weights-correlated model is used");
+                Console.WriteLine($"✨ denoised {raw.Width}×{raw.Height} in {clock.Elapsed.TotalSeconds:0.00}s → {output}");
+                Console.WriteLine($"   estimated noise σ (normalized): {r.SigmaBefore:0.0000} → {r.SigmaAfter:0.0000}");
+                if (r.NoiseModel is { } m) Console.WriteLine($"📐 noise model: variance = {m.Gain:G4} · intensity {m.Intercept:+0.###;-0.###}");
+                if (r.BaselineSigma is { } b) Console.WriteLine($"   bilateral baseline σ: {b:0.0000} → {baseline}");
+            }
+            : (page, raw, r) =>
+            {
+                routedPages += r.UsedCorrelatedModel ? 1 : 0;
+                string model = r.UsedCorrelatedModel ? " (correlated-noise model)" : "";
+                Console.WriteLine($"   page {page + 1}/{total}: {raw.Width}×{raw.Height}, noise σ {r.SigmaBefore:0.0000} → {r.SigmaAfter:0.0000}{model}");
+            };
+        BatchDenoising.DenoiseFile(denoiser, input, output, baseline, report);
+        if (total > 1)
         {
-            var baseline = BilateralBaseline.FilterAuto(input);
-            File.WriteAllBytes(baselinePath, TiffCodec.Encode(Normalization.Invert(baseline, map), TiffSampleType.Float32));
-            Console.WriteLine($"   bilateral baseline σ: {Metrics.EstimateNoiseSigma(baseline):0.0000} → {baselinePath}");
+            double seconds = clock.Elapsed.TotalSeconds;
+            Console.WriteLine($"✨ denoised {total} pages in {seconds:0.00}s ({seconds / total:0.00}s per page) → {output}" +
+                              (baseline is null ? "" : $", baseline → {baseline}"));
+            if (correlatedNet is not null) Console.WriteLine($"   {routedPages} of {total} pages used the correlated-noise model");
+            ReportPeakMemory();
         }
         return 0;
+    }
+
+    /// <summary>The process's peak resident memory so far (the OS high-water mark), for stack and folder runs.</summary>
+    private static void ReportPeakMemory()
+    {
+        using var self = Process.GetCurrentProcess();
+        Console.WriteLine($"   peak memory: {self.PeakWorkingSet64 / (1024.0 * 1024.0):0} MB");
     }
 
     /// <summary>
@@ -361,7 +398,7 @@ public static class Program
         DenoisingNet Pick(GrayImage noisy)
         {
             var second = correlatedNet ?? cleanNet;
-            bool useSecond = correlatedNet is not null ? IsCorrelated(noisy) : cleanNet is not null && NoiseLevelRouter.Sigma(noisy) <= noiseThreshold;
+            bool useSecond = correlatedNet is not null ? FrameDenoiser.LooksCorrelated(noisy) : cleanNet is not null && NoiseLevelRouter.Sigma(noisy) <= noiseThreshold;
             if (!useSecond) return net;
             routed++;
             return second!;
@@ -385,13 +422,6 @@ public static class Program
                     Console.WriteLine($"  {s.Name,-40} {s.NoisyPsnr,6:0.00} {s.BilateralPsnr,6:0.00} {s.DoraPsnr,6:0.00}");
         }
         return 0;
-    }
-
-    /// <summary>The noise check's verdict; images too small to judge count as independent.</summary>
-    private static bool IsCorrelated(GrayImage noisy)
-    {
-        try { return NoiseDiagnostics.Diagnose(noisy).Correlated; }
-        catch (ArgumentException) { return false; }
     }
 
     /// <summary>

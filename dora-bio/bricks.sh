@@ -24,7 +24,7 @@ export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_SKIP_FIRST_TIME_EXPE
 
 NAMES=(scaffold nn data io inference training cli godot-build godot-smoke ci-core ci-godot fmd-fetch fmd-loader fmd-eval
        n2v-diagnostic structured-mask vst calibration pool-upsample unet unet-tiling arch-eval
-       bench blocked-conv perf-budget q1-recipe tiff-stack-write q10-routing)
+       bench blocked-conv perf-budget q1-recipe tiff-stack-write q10-routing cli-batch)
 CHECKS=(
   "solution builds (warnings are errors, missing XML docs included); every test class belongs to exactly one brick"
   "ConvLayer/DenoisingNet/Adam/Simd: finite-difference gradient checks, optimizer behavior"
@@ -54,6 +54,7 @@ CHECKS=(
   "quality pass Q1: the recorded verdict follows the pre-registered rule; with data + weights the blocks reproduce"
   "multi-page TIFF stacks round-trip in every sample type; Pillow (an independent reader) reads a written stack exactly"
   "quality pass Q10: router unit tests; the recorded verdict follows the pre-registered rule; with data + weights the blocks reproduce"
+  "stacks and folders stream one frame at a time: pages decode exactly, no frame outlives the next; CLI denoises a stack and a folder; peak memory flat in stack length"
 )
 LAST=$((${#NAMES[@]} - 1))
 LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dora-bricks.XXXXXX")"
@@ -298,6 +299,44 @@ gate_27() {   # q10-routing (quality pass Q10, pre-registered in PATHWAY.md befo
   reproduces q10-routed fmd-eval --weights $a --weights-clean $b --noise-threshold "$threshold" --root "$FMD" --levels raw,avg2,avg4,avg8,avg16 || return 1
 }
 
+gate_28() (   # cli-batch (subshell: set -e stops only this gate)
+  set -e
+  test_gate 28-cli-batch
+  dotnet build tools/DoraBio.Cli -c Release >/dev/null
+  local t="$LOG_DIR/batch" w=godot/models/dora_bio_weights.bin
+  dotnet "$CLI_DLL" synth --out "$t/data" --count 3 --size 48 --seed 8 --stack "$t/stack.tif" >/dev/null
+  dotnet "$CLI_DLL" denoise --weights $w --in "$t/stack.tif" --out "$t/stack_out.tif" --baseline "$t/stack_base.tif" | tee "$t/stack.log"
+  grep -q "^✨ denoised 3 pages" "$t/stack.log"
+  grep -q "^   peak memory: [0-9]* MB" "$t/stack.log"
+  dotnet "$CLI_DLL" denoise --weights $w --in "$t/data/noisy" --out "$t/folder" | tee "$t/folder.log"
+  grep -q "^✨ denoised 3 files, 3 pages" "$t/folder.log"
+  test -s "$t/stack_base.tif" && test -s "$t/folder/synthetic_002.tif"
+  # Peak memory must not grow with the stack's length: 40 pages of 512² may peak at most 160 MB above 3 pages (measured:
+  # about 180 MB for 3 pages and +90 MB for 40; without the batch's periodic collection, +290 MB, and still rising).
+  local p3 p40
+  dotnet "$CLI_DLL" synth --out "$t/mem3" --count 3 --size 512 --seed 3 --stack "$t/mem3.tif" >/dev/null
+  dotnet "$CLI_DLL" synth --out "$t/mem40" --count 40 --size 512 --seed 3 --stack "$t/mem40.tif" >/dev/null
+  p3="$(dotnet "$CLI_DLL" denoise --weights $w --in "$t/mem3.tif" --out "$t/mem3_out.tif" | sed -n 's/^   peak memory: \([0-9]*\) MB$/\1/p')"
+  p40="$(dotnet "$CLI_DLL" denoise --weights $w --in "$t/mem40.tif" --out "$t/mem40_out.tif" | sed -n 's/^   peak memory: \([0-9]*\) MB$/\1/p')"
+  echo "peak memory: 3 pages $p3 MB, 40 pages $p40 MB"
+  (( p40 - p3 <= 160 )) || { echo ">> peak memory grows with the stack's length (+$((p40 - p3)) MB for 37 more pages)"; exit 1; }
+  # The stack's pages must equal the folder's files: Pillow, an independent reader, compares them when installed.
+  python3 -I -c "import PIL" 2>/dev/null || { echo "page-for-file comparison skipped (Pillow not installed); unit tests cover it"; exit 0; }
+  python3 -I - "$t/stack_out.tif" "$t/folder" <<'PY'
+import sys
+from pathlib import Path
+from PIL import Image
+stack = Image.open(sys.argv[1])
+files = sorted(Path(sys.argv[2]).glob("*.tif"))
+assert stack.n_frames == len(files) == 3, (stack.n_frames, len(files))
+for page, file in enumerate(files):
+    stack.seek(page)
+    single = Image.open(file)
+    assert stack.mode == single.mode == "F" and stack.tobytes() == single.tobytes(), f"page {page} differs from {file.name}"
+print("stack pages equal the folder's files (Pillow)")
+PY
+)
+
 gate_21() {   # arch-eval
   test_gate 21-arch-eval || return 1
   # The rule was set before measuring (PATHWAY.md, P4): the U-Net becomes the default only if, at the same training
@@ -374,8 +413,10 @@ MUTATIONS=(
   '23|src/DoraBio.Core/Nn/ConvLayer.Blocked.cs|a7 += new Vector<float>(Unsafe.Add(ref weights, t + 7 * ic9)) * v;|a7 += new Vector<float>(Unsafe.Add(ref weights, t + 6 * ic9)) * v;'
   '24|src/DoraBio.Core/Nn/DenoisingNet.cs|    internal bool ReferenceKernels { get; set; }|    internal bool ReferenceKernels { get; set; } = true;'
   '25|docs/RESULTS.md|<!-- q1-verdict: not-adopted -->|<!-- q1-verdict: adopted -->'
-  '26|src/DoraBio.Core/IO/TiffCodec.cs|pointerAt = ifdOffset + ifd.Length - 4;|pointerAt = 4;'
+  '26|src/DoraBio.Core/IO/TiffStack.cs|_pointerAt = ifdOffset + ifd.Length - 4;|_pointerAt = 4;'
   '27|docs/RESULTS.md|<!-- q10-verdict: not-adopted -->|<!-- q10-verdict: adopted -->'
+  '28|src/DoraBio.Core/BatchDenoising.cs|output.Append(result.Output);|output.Append(raw);'
+  '28|src/DoraBio.Core/BatchDenoising.cs|                GC.Collect();|'
 )
 
 self_test() {

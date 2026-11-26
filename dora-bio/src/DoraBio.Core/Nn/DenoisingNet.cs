@@ -428,6 +428,26 @@ public sealed partial class DenoisingNet
         private int _capacityPixels;
         private int _capacityPadded;
         private float[] _alignedInput = [], _alignedTarget = [], _alignedMask = [];
+        private float[] _tileIn = [], _tileOut = [];
+
+        /// <summary>
+        /// Sizes every buffer for images up to <paramref name="height"/> × <paramref name="width"/> (rounded up to the
+        /// tile alignment, as <see cref="Predict"/> pads U-Net inputs). Buffers only grow, so calling this once for the
+        /// largest tile means a workspace reused across tiles of several sizes, or across frames, allocates nothing
+        /// more. Every buffer is cleared or overwritten before it's read, so its size never changes a result.
+        /// </summary>
+        internal void Reserve(int height, int width)
+        {
+            int align = _net.Config.TileAlignment;
+            Ensure((height + align - 1) / align * align, (width + align - 1) / align * align);
+        }
+
+        /// <summary>Input and output windows for one tile of <see cref="TiledInference"/>, at least <paramref name="length"/> long.</summary>
+        internal (float[] Input, float[] Output) TileBuffers(int length)
+        {
+            if (_tileIn.Length < length) (_tileIn, _tileOut) = (new float[length], new float[length]);
+            return (_tileIn, _tileOut);
+        }
 
         /// <summary>A zero-padding buffer for <see cref="Predict"/> on sizes that aren't multiples of 2^Depth.</summary>
         internal Span<float> AlignedInput(int length)

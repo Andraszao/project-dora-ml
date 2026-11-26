@@ -17,9 +17,9 @@ All numbers come from this repo, run on a 4-core cloud VM with no GPU.
 
 | Check | Result |
 |---|---|
-| Core unit tests (`dotnet test`) | 163 passing in ~5 s, including finite-difference gradient checks for both architectures (mutation-tested) |
-| Brick gates (`./bricks.sh`) | all 25 green (gates 11–15 and 21 with the FMD data and experiment weights present); documentation of every public member is enforced by the build |
-| Gates can fail (`./bricks.sh --self-test`) | one planted bug per gate 0–7 and 11–24 (two for gate 0), all 23 caught (after a clean control copy passes) |
+| Core unit tests (`dotnet test`) | 191 passing in ~5 s, including finite-difference gradient checks for both architectures (mutation-tested) |
+| Brick gates (`./bricks.sh`) | all 29 green (gates 11–15, 21, 25 and 27 with the FMD data and experiment weights present); documentation of every public member is enforced by the build |
+| Gates can fail (`./bricks.sh --self-test`) | one planted bug per gate 0–7 and 11–28 (two for gates 0 and 28), all 28 caught (after a clean control copy passes) |
 | CI (GitHub Actions) | all gates incl. headless Godot, on PRs into `main`, pushes to `main` and manual runs (docs-only changes skipped): [run #1](https://github.com/Andraszao/project-dora-ml/actions/runs/45617118232) green in 150 s of runner time, 0 billable minutes (public repo) |
 | Codecs vs. independent encoders | TIFF/PNG fixtures written by Pillow, ImageMagick and libtiff decode exactly |
 | Tiled vs. whole-image inference | identical (≤1e-5) for ragged tiles, tiles smaller than the receptive field, etc. |
@@ -34,6 +34,7 @@ All numbers come from this repo, run on a 4-core cloud VM with no GPU.
 | Train/test leakage on FMD | `dora-bio fmd-check`: every test image is FOV 19 pixel for pixel, and FOV 19 never enters training |
 | Godot 4.5.1 .NET smoke test (headless) | loads model and sample, denoises off-thread, adapts, stays responsive; exit code 0 |
 | Speed (`dora-bio bench`, 4 cores, no GPU) | 512×512 frame in **0.27 s** (dilated) / 0.30 s (U-Net); one training step (batch 16 at 64 px) 0.13 s. The register-blocked kernels are 2.1–2.4× (denoise) and 1.5–1.8× (training) faster than the original ones, and bit-identical to them |
+| Stacks and folders (`dora-bio denoise --in STACK.tif` or a folder) | streamed one frame at a time: every page comes out bit for bit as the same frame denoised alone, and peak memory stays flat in the stack's length (512² frames: 182 MB for 3 pages, 265 MB for 160, at 0.22 s per page) |
 | Performance guard (gate 24) | budgets in `tools/ci/perf_budget.json`, plus a check that the blocked kernels stay ≥ 1.5× (denoise) and ≥ 1.25× (training step) faster than the reference kernels, timed interleaved in the same run so it holds on any machine |
 
 ## Quick start
@@ -72,6 +73,8 @@ dora-bio synth   --out data/synth --count 10 --size 256
 dora-bio train   --data data/synth --out runs/w.bin --mode n2v --journey runs/journey.json
 dora-bio eval    --weights runs/w.bin --data data/heldout
 dora-bio denoise --weights godot/models/dora_bio_weights.bin --in my_image.tif --out clean.tif --baseline bilateral.tif
+dora-bio denoise --weights godot/models/dora_bio_weights.bin --in my_stack.tif --out clean_stack.tif   # every page
+dora-bio denoise --weights godot/models/dora_bio_weights.bin --in my_folder/ --out denoised/          # every image
 ```
 
 **Your own data.** Use TIFF (8/16/32-bit) or PNG. A training folder can be:
@@ -147,7 +150,8 @@ The plan this rebuild started from had a few errors. Where the build differs fro
 
 [`PATHWAY.md`](PATHWAY.md) lays out phases P0–P10: the foundation (P0), CI (P1), validation on real FMD data (P2),
 noise-model fidelity (P3: correlated-noise check, structured blind spots, variance stabilization), a U-Net (P4) and
-performance (P5: benchmarks, faster bit-identical kernels, time budgets) are done. Next come stacks and batch (P6),
+performance (P5: benchmarks, faster bit-identical kernels, time budgets) are done. Stacks and batch (P6) are under way
+(multi-page TIFF writing and streamed stack/folder denoising are in), alternating with pre-registered quality passes. Then
 analysis tools, model management, more formats, and a release. Each phase is a set of gated bricks.
 
 ## Honesty notes and limitations
@@ -175,7 +179,8 @@ analysis tools, model management, more formats, and a release. Each phase is a s
   ([quality pass Q1](docs/RESULTS.md#quality-pass-q1-the-best-supervised-recipe)).
 - The "estimated noise σ" in the UI is Immerkær's white-noise estimate: a rough image-wide figure, not calibrated.
 - C# Godot projects **cannot export to the web** (Godot 4.5), so v2 targets desktop and mobile only.
-- CPU only. That's fine for 512² frames and small models; large stacks or 3D volumes would need GPU work.
+- CPU only. That's fine for 512² frames and small models: a stack takes about 0.22 s per 512² page, in bounded memory.
+  3D volumes (denoising across z, not page by page) would need GPU work.
 
 ## Layout
 

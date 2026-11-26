@@ -24,7 +24,7 @@ public sealed record BenchTiming(string Name, string Architecture, string Detail
 /// </summary>
 public static class PerformanceBench
 {
-    /// <summary>Times <see cref="TiledInference.Denoise"/> on a seeded synthetic frame.</summary>
+    /// <summary>Times <see cref="TiledInference.Denoise(DenoisingNet, GrayImage, int, CancellationToken)"/> on a seeded synthetic frame.</summary>
     /// <param name="net">The model (only read).</param>
     /// <param name="size">Frame side length in pixels.</param>
     /// <param name="runs">Timed runs (at least 1).</param>

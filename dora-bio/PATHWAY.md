@@ -15,7 +15,7 @@ settled first, and so every phase builds only on phases that are already green.
 | **P3** | Noise-model fidelity | Noise2Void's assumptions failing on real cameras (measured in P2 on widefield) | ✅ done: bricks 14–17, [results](docs/RESULTS.md#p3-correlated-noise-and-structured-blind-spots) |
 | **P4** | Model capacity (U-Net) | the small CNN being the ceiling | ✅ done: bricks 18–21, [results](docs/RESULTS.md#p4-a-u-net-against-the-dilated-network) |
 | **P5** | Performance | slowness on large frames and stacks | ✅ done: bricks 22–24 (2.1× faster denoise, bit-identical) |
-| **P6** | Stacks, time-lapse, batch | **single 2-D frames only** | 🚧 in progress: 25 (quality, Q1), 26 `tiff-stack-write`, 27 (quality, Q10) done; next 28 `cli-batch`, then 29 (quality, Q13) |
+| **P6** | Stacks, time-lapse, batch | **single 2-D frames only** | 🚧 in progress: 25 (quality, Q1), 26 `tiff-stack-write`, 27 (quality, Q10), 28 `cli-batch` done; next 29 (quality, Q13) |
 | **P7** | Analysis UX | can see but can't measure or export | planned |
 | **P8** | Model and session management | adaptation lost on restart; no way back to a known-good model | planned |
 | **P9** | Format coverage | "my file won't open" (LZW, OME-TIFF, HDF5) | planned |
@@ -176,7 +176,7 @@ wasn't kept).
 | Brick | Delivers | Gate |
 |---|---|---|
 | 26 `tiff-stack-write` ✅ | multi-page TIFF writer (the reader already handles pages) | round-trip 3-page stacks in every sample type; Pillow reads a written stack exactly |
-| `cli-batch` | `denoise` over stacks and folders, streaming one frame at a time with bounded memory | gate 6 denoises a 3-page synthetic stack; peak memory checked |
+| 28 `cli-batch` ✅ | `denoise` over stacks and folders, streaming one frame at a time with bounded memory | gate 28: a 3-page stack and a folder through the CLI (the stack's pages equal the folder's files); no frame outlives the next; 40 pages of 512² peak at most 160 MB above 3 (measured: 182 → 269 MB; before the fix, workspaces reallocated per frame and 160 pages peaked at 850 MB) |
 | `ui-stack` | page/frame slider in the UI, denoising the current frame or the whole stack (cancellable) | smoke test loads a stack, steps pages, denoises one frame |
 
 ## P7: Analysis UX

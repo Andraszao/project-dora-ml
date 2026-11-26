@@ -56,13 +56,23 @@ public static class TiffCodec
     public static int CountPages(ReadOnlySpan<byte> data)
     {
         var reader = OpenHeader(data, out uint ifd);
-        int pages = 0;
-        while (ifd != 0)
+        return PageDirectories(reader, ifd).Count;
+    }
+
+    /// <summary>
+    /// Offsets of every page's IFD, in order, following the next-IFD chain from <paramref name="first"/>. A chain that
+    /// points back to an IFD it already visited would never end, so it's rejected as a corrupt file.
+    /// </summary>
+    private static List<uint> PageDirectories(TiffReader reader, uint first)
+    {
+        var offsets = new List<uint>();
+        var seen = new HashSet<uint>();
+        for (uint ifd = first; ifd != 0; ifd = reader.NextIfd(ifd))
         {
-            pages++;
-            ifd = reader.NextIfd(ifd);
+            if (!seen.Add(ifd)) throw new InvalidDataException("TIFF page directories form a loop.");
+            offsets.Add(ifd);
         }
-        return pages;
+        return offsets;
     }
 
     /// <summary>Decodes one page into raw sample values (no normalization).</summary>
@@ -103,38 +113,13 @@ public static class TiffCodec
     {
         if (pages.Count == 0) throw new ArgumentException("A TIFF needs at least one page.", nameof(pages));
         using var file = new MemoryStream();
-        Span<byte> header = stackalloc byte[8];
-        "II"u8.CopyTo(header);
-        BinaryPrimitives.WriteUInt16LittleEndian(header[2..], 42);
-        file.Write(header);   // the first-IFD offset (bytes 4–7) is patched once IFD₀'s position is known
-
-        long pointerAt = 4;   // where the offset of the next IFD goes: the header for page 0, then each IFD's tail
-        foreach (var page in pages)
-        {
-            var (strip, ifd) = EncodePage(page, sampleType, deflate, (uint)file.Length);
-            file.Write(strip);
-            if (file.Length % 2 == 1) file.WriteByte(0);   // IFDs start on a word boundary
-            long ifdOffset = file.Length;
-            if (ifdOffset + ifd.Length > uint.MaxValue) throw new ArgumentException("Stack is too large for a TIFF (4 GB).", nameof(pages));
-            file.Write(ifd);
-            Patch(file, pointerAt, (uint)ifdOffset);
-            pointerAt = ifdOffset + ifd.Length - 4;     // stays 0 if this is the last page
-        }
+        using (var writer = new TiffStackWriter(file, sampleType, deflate, leaveOpen: true))
+            foreach (var page in pages) writer.Append(page);
         return file.ToArray();
     }
 
-    private static void Patch(MemoryStream file, long at, uint value)
-    {
-        Span<byte> bytes = stackalloc byte[4];
-        BinaryPrimitives.WriteUInt32LittleEndian(bytes, value);
-        long end = file.Position;
-        file.Position = at;
-        file.Write(bytes);
-        file.Position = end;
-    }
-
     /// <summary>One page's pixel strip and its IFD (next-IFD offset 0), with the strip to be written at <paramref name="stripOffset"/>.</summary>
-    private static (byte[] Strip, byte[] Ifd) EncodePage(GrayImage image, TiffSampleType sampleType, bool deflate, uint stripOffset)
+    internal static (byte[] Strip, byte[] Ifd) EncodePage(GrayImage image, TiffSampleType sampleType, bool deflate, uint stripOffset)
     {
         int bytesPerSample = sampleType switch { TiffSampleType.UInt8 => 1, TiffSampleType.UInt16 => 2, _ => 4 };
         var pixelBytes = new byte[image.Length * bytesPerSample];
@@ -187,14 +172,35 @@ public static class TiffCodec
     /// <summary>Validates the 8-byte header and returns a reader for its byte order, plus the first IFD's offset.</summary>
     private static TiffReader OpenHeader(ReadOnlySpan<byte> data, out uint firstIfd)
     {
-        // BigTIFF uses magic 43 and 64-bit offsets. Reject it explicitly rather than misreading it.
-        if (data.Length >= 4 && (data[2] == 43 || data[3] == 43))
-            throw new NotSupportedException("BigTIFF files are not supported.");
-        if (!HasTiffSignature(data)) throw new InvalidDataException("Not a TIFF file.");
-        var reader = new TiffReader(data, littleEndian: data[0] == 'I');
+        var reader = new TiffReader(data, littleEndian: CheckHeader(data));
         firstIfd = reader.U32(4);
         return reader;
     }
+
+    /// <summary>Validates the first bytes of a file; returns true for little-endian ("II").</summary>
+    internal static bool CheckHeader(ReadOnlySpan<byte> header)
+    {
+        // BigTIFF uses magic 43 and 64-bit offsets. Reject it explicitly rather than misreading it.
+        if (header.Length >= 4 && (header[2] == 43 || header[3] == 43))
+            throw new NotSupportedException("BigTIFF files are not supported.");
+        if (!HasTiffSignature(header)) throw new InvalidDataException("Not a TIFF file.");
+        return header[0] == 'I';
+    }
+
+    /// <summary>Offsets of every page's IFD in a TIFF on a seekable stream (the stream's position is changed).</summary>
+    internal static List<uint> PageDirectories(Stream stream, out bool littleEndian)
+    {
+        Span<byte> header = stackalloc byte[8];
+        stream.Position = 0;
+        int read = stream.ReadAtLeast(header, header.Length, throwOnEndOfStream: false);
+        littleEndian = CheckHeader(header[..read]);
+        var reader = new TiffReader(stream, littleEndian);
+        return PageDirectories(reader, reader.U32(4));
+    }
+
+    /// <summary>Decodes the page whose IFD is at <paramref name="ifd"/>, reading only that page's bytes from the stream.</summary>
+    internal static GrayImage DecodePage(Stream stream, bool littleEndian, uint ifd) =>
+        DecodePage(new TiffReader(stream, littleEndian), ifd);
 
     /// <summary>
     /// Decodes the page described by the IFD at <paramref name="ifd"/> in four steps: read the tags, reject
@@ -373,13 +379,18 @@ public static class TiffCodec
     }
 
     /// <summary>
-    /// Bounds-checked, byte-order-aware reads from the file. Every offset in a TIFF comes from the file
-    /// itself, so every access is checked: a corrupt or malicious file raises <see cref="InvalidDataException"/>
-    /// rather than reading out of bounds.
+    /// Bounds-checked reads in the file's byte order. Every offset in a TIFF comes from the file itself, so every access
+    /// is checked: a corrupt or malicious file raises <see cref="InvalidDataException"/> rather than reading out of
+    /// bounds. Reads come from either the whole file in memory or a seekable stream. In
+    /// stream mode each read seeks and copies just the bytes asked for, so a page can be decoded without loading the
+    /// rest of a stack (<see cref="TiffStackReader"/>). Offsets are checked against the file length before anything is
+    /// allocated, so a corrupt count can't trigger a huge allocation.
     /// </summary>
     private readonly ref struct TiffReader
     {
         private readonly ReadOnlySpan<byte> _data;
+        private readonly Stream? _stream;
+        private readonly long _length;
 
         /// <summary>True for "II" files, false for "MM" (big-endian) files.</summary>
         public bool LittleEndian { get; }
@@ -387,29 +398,42 @@ public static class TiffCodec
         public TiffReader(ReadOnlySpan<byte> data, bool littleEndian)
         {
             _data = data;
+            _stream = null;
+            _length = data.Length;
+            LittleEndian = littleEndian;
+        }
+
+        public TiffReader(Stream stream, bool littleEndian)
+        {
+            _data = default;
+            _stream = stream;
+            _length = stream.Length;
             LittleEndian = littleEndian;
         }
 
         /// <summary>Unsigned 16-bit value at <paramref name="offset"/>, in the file's byte order.</summary>
-        public ushort U16(long offset)
-        {
-            var s = Slice(offset, 2);
-            return LittleEndian ? BinaryPrimitives.ReadUInt16LittleEndian(s) : BinaryPrimitives.ReadUInt16BigEndian(s);
-        }
+        public ushort U16(long offset) => Read16(Slice(offset, 2));
 
         /// <summary>Unsigned 32-bit value at <paramref name="offset"/>, in the file's byte order.</summary>
-        public uint U32(long offset)
-        {
-            var s = Slice(offset, 4);
-            return LittleEndian ? BinaryPrimitives.ReadUInt32LittleEndian(s) : BinaryPrimitives.ReadUInt32BigEndian(s);
-        }
+        public uint U32(long offset) => Read32(Slice(offset, 4));
 
-        /// <summary>A checked view of <paramref name="length"/> bytes at <paramref name="offset"/>.</summary>
+        private ushort Read16(ReadOnlySpan<byte> s) =>
+            LittleEndian ? BinaryPrimitives.ReadUInt16LittleEndian(s) : BinaryPrimitives.ReadUInt16BigEndian(s);
+
+        private uint Read32(ReadOnlySpan<byte> s) =>
+            LittleEndian ? BinaryPrimitives.ReadUInt32LittleEndian(s) : BinaryPrimitives.ReadUInt32BigEndian(s);
+
+        /// <summary>A checked view (span mode) or copy (stream mode) of <paramref name="length"/> bytes at <paramref name="offset"/>.</summary>
         public ReadOnlySpan<byte> Slice(long offset, long length)
         {
-            if (offset < 0 || length < 0 || offset + length > _data.Length)
+            if (offset < 0 || length < 0 || offset + length > _length)
                 throw new InvalidDataException("TIFF offset points outside the file.");
-            return _data.Slice((int)offset, (int)length);
+            if (_stream is null) return _data.Slice((int)offset, (int)length);
+            if (length > Array.MaxLength) throw new InvalidDataException("TIFF block is too large to read.");
+            var buffer = new byte[length];
+            _stream.Position = offset;
+            _stream.ReadExactly(buffer);
+            return buffer;
         }
 
         /// <summary>Offset of the IFD after this one (0 if this is the last page): it follows the entry table.</summary>
@@ -418,29 +442,33 @@ public static class TiffCodec
         /// <summary>Values of an integer tag (BYTE/SHORT/LONG); empty if absent.</summary>
         /// <remarks>
         /// Entry layout: tag (2 bytes), type (2), count (4), value-or-offset (4). The values sit inline in the
-        /// last 4 bytes when count × size ≤ 4, otherwise those bytes hold their file offset.
+        /// last 4 bytes when count × size ≤ 4, otherwise those bytes hold their file offset. The entry table and
+        /// each value array are read as one block (one seek in stream mode, even for thousands of strip offsets).
         /// </remarks>
         public uint[] Tag(uint ifd, ushort tag, bool required = false)
         {
             int count = U16(ifd);
+            var table = Slice(ifd + 2, count * 12L);
             for (int e = 0; e < count; e++)
             {
-                long entry = ifd + 2 + e * 12L;
-                if (U16(entry) != tag) continue;
+                var entry = table.Slice(e * 12, 12);
+                if (Read16(entry) != tag) continue;
 
-                ushort type = U16(entry + 2);
-                uint n = U32(entry + 4);
+                ushort type = Read16(entry[2..]);
+                uint n = Read32(entry[4..]);
                 int size = type switch { 1 or 6 or 7 => 1, 3 or 8 => 2, 4 or 9 => 4, _ => 0 };
                 if (size == 0) throw new InvalidDataException($"TIFF tag {tag} has unexpected type {type}.");
 
-                long valuesAt = n * size <= 4 ? entry + 8 : U32(entry + 8);
+                long entryAt = ifd + 2 + e * 12L;
+                long valuesAt = (long)n * size <= 4 ? entryAt + 8 : Read32(entry[8..]);
+                var block = Slice(valuesAt, (long)n * size);
                 var values = new uint[n];
                 for (int k = 0; k < n; k++)
                     values[k] = size switch
                     {
-                        1 => Slice(valuesAt + k, 1)[0],
-                        2 => U16(valuesAt + k * 2L),
-                        _ => U32(valuesAt + k * 4L),
+                        1 => block[k],
+                        2 => Read16(block.Slice(k * 2)),
+                        _ => Read32(block.Slice(k * 4)),
                     };
                 return values;
             }

@@ -31,12 +31,17 @@ public static class VarianceStabilization
     /// <param name="tileCore">Tile core size for inference.</param>
     /// <param name="cancellation">Checked between tiles.</param>
     public static (GrayImage Denoised, NoiseModel Model) Denoise(DenoisingNet net, GrayImage noisy,
-        int tileCore = TiledInference.DefaultTileCore, CancellationToken cancellation = default)
+        int tileCore = TiledInference.DefaultTileCore, CancellationToken cancellation = default) =>
+        Denoise(net, noisy, tileCore, cancellation, new WorkspacePool(net));
+
+    /// <summary>As the public overload, with inference workspaces from <paramref name="pool"/> (see <see cref="FrameDenoiser"/>).</summary>
+    internal static (GrayImage Denoised, NoiseModel Model) Denoise(DenoisingNet net, GrayImage noisy, int tileCore,
+        CancellationToken cancellation, WorkspacePool pool)
     {
         var model = NoiseCalibration.Estimate(noisy);
         var transformed = Anscombe.Forward(noisy, model);
         var map = Normalization.FromPercentiles(transformed.Pixels);
-        var denoised = Normalization.Invert(TiledInference.Denoise(net, Normalization.Apply(transformed, map), tileCore, cancellation), map);
+        var denoised = Normalization.Invert(TiledInference.Denoise(net, Normalization.Apply(transformed, map), tileCore, cancellation, pool), map);
         return (Anscombe.InverseUnbiased(denoised, model), model);
     }
 }

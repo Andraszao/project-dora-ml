@@ -22,10 +22,11 @@ src/DoraBio.Core/              ALL ML/IO code. net8.0. No Godot, no NuGet depend
   Data/      GrayImage, Normalization, Anscombe (variance stabilization), Dihedral, V1Augment, BlindSpot (+MaskFootprint),
              PatchSampler, ImagePair/DatasetSplit,
              DatasetLoader, FmdDataset (real FMD layouts + test-FOV exclusion), SyntheticFluorescence
-  IO/        TiffCodec, PngDecoder, ImageLoader, WeightsFile, Crc32
+  IO/        TiffCodec, TiffStack (page-by-page reader and writer), PngDecoder, ImageLoader, WeightsFile, Crc32
   Training/  Trainer (+BatchStepper), ValidationSet, ProgressiveTargets, TrainingJob, JourneyLog,
              OnlineAdapter, TrainerConfig
   Metrics.cs, TiledInference.cs, BilateralBaseline.cs, FmdBenchmark.cs (held-out FMD scores, noise correlation),
+  BatchDenoising.cs (FrameDenoiser: the one per-frame pipeline; stacks and folders streamed frame by frame),
   NoiseDiagnostics.cs (is the noise pixel-independent? from the noisy image alone),
   NoiseCalibration.cs (variance = gain · intensity + intercept, from the noisy image alone)
 tests/DoraBio.Core.Tests/      xunit. Fixtures/ written by Pillow/ImageMagick (make_fixtures.py)
@@ -49,7 +50,7 @@ godot/                         Godot 4.5 .NET project (open THIS folder in Godot
 Work follows [`PATHWAY.md`](PATHWAY.md): phases **P0 → P10**, each a group of bricks with gates. P0 (bricks 0–8),
 P1 (bricks 9–10, CI), P2 (bricks 11–13, real FMD data), P3 (bricks 14–17, noise-model fidelity), P4 (bricks 18–21,
 U-Net) and P5 (bricks 22–24, performance) are done. **The current phase is P6 (stacks, time-lapse and batch)**:
-bricks 25–27 are done; next is brick 28 (`cli-batch`), then quality pass 29 (Q13, pre-registered in `PATHWAY.md`).
+bricks 25–28 are done; next is quality pass 29 (Q13, pre-registered in `PATHWAY.md`), then `ui-stack`.
 Pick up the next unfinished brick of the current phase, follow the phase protocol there, and update its status table when a phase closes. Read `docs/RESULTS.md` before
 changing training or the model: it records what actually works on real data.
 
@@ -88,6 +89,7 @@ before anything is built on top.** `./bricks.sh` runs the gates in order and sto
 | 25 | q1-recipe (quality pass) | `tools/experiments/q1_supervised.sh`, `docs/RESULTS.md` | Q1's recorded verdict follows its pre-registered rule (`<!-- q1-verdict -->`); with data + weights the blocks reproduce |
 | 26 | tiff-stack-write | `IO/TiffCodec.cs` (`EncodeStack`), CLI `synth --stack`, `tools/ci/check_tiff_stack.py` | `Brick=26-tiff-stack-write` (3-page round trips, every sample type, ±Deflate); Pillow reads a written stack exactly (SKIPPED without Pillow; CI installs it) |
 | 27 | q10-routing (quality pass) | `NoiseLevelRouter.cs`, `FmdBenchmark.ValidationPlan`, CLI `fmd-route` / `fmd-eval --weights-clean`, `tools/experiments/q10_routing.sh` | `Brick=27-q10-routing`; Q10's recorded verdict follows its pre-registered rule; with data + weights the blocks reproduce |
+| 28 | cli-batch | `BatchDenoising.cs` (`FrameDenoiser`, `BatchDenoising`), `IO/TiffStack.cs` (`TiffStackReader`/`TiffStackWriter`), CLI `denoise` on stacks and folders | `Brick=28-cli-batch`: streamed pages decode exactly; every prefix of a written stack is a valid TIFF; a stack page equals the frame on its own; no frame outlives the next (weak references); the CLI denoises a 3-page stack and a folder (pages = files, by Pillow), and 40 pages peak ≤ 160 MB above 3 |
 
 Gates 11–15 and 21 need the dataset (the reproductions in gates 15 and 21 also need the weights from `tools/experiments/`) (`tools/fetch_fmd.sh`, about 9 GB into the gitignored `data/fmd/`). Without it, their
 data-dependent part reports SKIPPED (exit code 77) while the pins, unit tests and RESULTS.md checks still run. CI has
@@ -184,6 +186,10 @@ cd godot && dotnet build && godot --headless --path . --import \
     data/ and runs/ are gitignored. Credit Zhang et al., CVPR 2019 wherever FMD numbers appear.
 13. **Label synthetic things as synthetic.** The bundled sample and weights come from `SyntheticFluorescence`.
     Don't describe them as real microscope data, and don't claim real-data accuracy that hasn't been measured.
+14. **Stacks stream; nothing holds a past frame.** `BatchDenoising` reads a page, denoises it, writes it, and lets it
+    go; `FrameDenoiser` keeps the inference workspaces for its lifetime instead of reallocating them per frame. Gate 28
+    checks both (weak references, and peak memory flat in stack length). Every frame, stack page or single image, goes
+    through `FrameDenoiser.Denoise`, so they can't drift apart.
 
 ## Godot ⇄ C# gotchas
 
@@ -204,7 +210,7 @@ cd godot && dotnet build && godot --headless --path . --import \
   features + depth (U-Net), parameter count, float32 LE[], CRC-32. Format 1 (no architecture byte, always dilated:
   the bundled model) still loads. v1 JSON `.dat` files are rejected with a clear message.
 - **Images out:** TIFF, uint8/uint16/float32, uncompressed or Deflate, single pages or multi-page stacks
-  (`TiffCodec.EncodeStack`).
+  (`TiffCodec.EncodeStack`, or `TiffStackWriter` page by page: the file is a valid TIFF after every page).
 - **Images in:** TIFF (8/16/32-bit int/float; none/Deflate/PackBits; predictor 2; LE/BE; strips; multi-page)
   and PNG (8/16-bit gray/RGB(A), all filters). Not supported, each with a clear error: LZW, tiled TIFF,
   BigTIFF, palettes, interlaced PNG, **HDF5**.

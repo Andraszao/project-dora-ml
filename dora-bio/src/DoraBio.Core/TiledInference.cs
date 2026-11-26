@@ -37,7 +37,15 @@ public static class TiledInference
     /// <param name="tileCore">Side length of the region each tile writes (at least 8).</param>
     /// <param name="cancellation">Stops scheduling further tiles. Throws <see cref="OperationCanceledException"/>.</param>
     /// <returns>The denoised image, same size and scale as <paramref name="input"/>.</returns>
-    public static GrayImage Denoise(DenoisingNet net, GrayImage input, int tileCore = DefaultTileCore, CancellationToken cancellation = default)
+    public static GrayImage Denoise(DenoisingNet net, GrayImage input, int tileCore = DefaultTileCore, CancellationToken cancellation = default) =>
+        Denoise(net, input, tileCore, cancellation, new WorkspacePool(net));
+
+    /// <summary>
+    /// As the public overload, with workspaces taken from (and returned to) <paramref name="pool"/>, so a caller that
+    /// denoises many frames (<see cref="FrameDenoiser"/>) allocates the tens of MB of activations per thread once,
+    /// not once per frame.
+    /// </summary>
+    internal static GrayImage Denoise(DenoisingNet net, GrayImage input, int tileCore, CancellationToken cancellation, WorkspacePool pool)
     {
         if (tileCore < 8) throw new ArgumentOutOfRangeException(nameof(tileCore));
         int align = net.Config.TileAlignment;
@@ -51,9 +59,18 @@ public static class TiledInference
             for (int x = 0; x < w; x += tileCore)
                 tiles.Add((x, y, Math.Min(w, x + tileCore), Math.Min(h, y + tileCore)));
 
-        var pool = new WorkspacePool(net);
-        var options = new ParallelOptions { CancellationToken = cancellation };
-        Parallel.For(0, tiles.Count, options, () => pool.Rent(), (t, _, workspace) =>
+        // Every workspace is sized once for the largest window, so tiles of different sizes (edges are smaller)
+        // never make it reallocate.
+        int maxWindowW = Math.Min(w, tileCore + 2 * margin), maxWindowH = Math.Min(h, tileCore + 2 * margin);
+        // At most one task per core: Parallel.For would otherwise let the thread pool add workers over a long run,
+        // and each new worker rents (and the pool then keeps) another workspace of tens of MB.
+        var options = new ParallelOptions { CancellationToken = cancellation, MaxDegreeOfParallelism = Environment.ProcessorCount };
+        Parallel.For(0, tiles.Count, options, () =>
+        {
+            var workspace = pool.Rent();
+            workspace.Reserve(maxWindowH, maxWindowW);
+            return workspace;
+        }, (t, _, workspace) =>
         {
             // Window = core grown by the margin on every side, clipped to the image.
             var (cx0, cy0, cx1, cy1) = tiles[t];
@@ -61,16 +78,17 @@ public static class TiledInference
             int wx1 = Math.Min(w, cx1 + margin), wy1 = Math.Min(h, cy1 + margin);
             int ww = wx1 - wx0, wh = wy1 - wy0;
 
-            var window = new float[ww * wh];
+            var (windowBuffer, denoisedBuffer) = workspace.TileBuffers(maxWindowW * maxWindowH);
+            var window = windowBuffer.AsSpan(0, ww * wh);
             for (int row = 0; row < wh; row++)
-                input.Pixels.AsSpan((wy0 + row) * w + wx0, ww).CopyTo(window.AsSpan(row * ww, ww));
+                input.Pixels.AsSpan((wy0 + row) * w + wx0, ww).CopyTo(window.Slice(row * ww, ww));
 
-            var denoised = new float[ww * wh];
+            var denoised = denoisedBuffer.AsSpan(0, ww * wh);
             net.Predict(window, wh, ww, denoised, workspace);
 
             // Keep only the core. Each tile writes a disjoint region, so no locking is needed.
             for (int y = cy0; y < cy1; y++)
-                denoised.AsSpan((y - wy0) * ww + (cx0 - wx0), cx1 - cx0).CopyTo(output.Pixels.AsSpan(y * w + cx0, cx1 - cx0));
+                denoised.Slice((y - wy0) * ww + (cx0 - wx0), cx1 - cx0).CopyTo(output.Pixels.AsSpan(y * w + cx0, cx1 - cx0));
             return workspace;
         }, pool.Return);
 
