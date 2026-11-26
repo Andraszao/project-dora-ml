@@ -21,7 +21,8 @@ src/DoraBio.Core/              ALL ML/IO code. net8.0. No Godot, no NuGet depend
              upsample), AdamOptimizer, Simd, WorkspacePool
   Data/      GrayImage, Normalization, Anscombe (variance stabilization), Dihedral, V1Augment, BlindSpot (+MaskFootprint),
              PatchSampler, ImagePair/DatasetSplit,
-             DatasetLoader, FmdDataset (real FMD layouts + test-FOV exclusion), SyntheticFluorescence
+             DatasetLoader, FmdDataset (real FMD layouts + test-FOV exclusion), ExtDatasets (the public paired sets in data/ext),
+             SyntheticFluorescence
   IO/        TiffCodec, TiffStack (page-by-page reader and writer), PngDecoder, ImageLoader, WeightsFile, Crc32
   Training/  Trainer (+BatchStepper), ValidationSet, ProgressiveTargets, TrainingJob, JourneyLog,
              OnlineAdapter, TrainerConfig
@@ -34,6 +35,8 @@ tests/DoraBio.Core.Tests/      xunit. Fixtures/ written by Pillow/ImageMagick (m
 tools/DoraBio.Cli/             `dora-bio` CLI: synth | train | denoise | eval | info | bench | diagnose | fmd-check | fmd-eval |
                                fmd-noise | fmd-diagnose | fmd-route
 tools/fetch_fmd.sh             downloads + verifies the real FMD dataset into data/fmd/ (gitignored)
+tools/fetch_ext.sh             downloads + verifies the public paired datasets of the field-validation track into data/ext/
+                               (DeepBacs, ZeroCostDL4Mic CARE; CC BY 4.0, gitignored); tools/extract_zip.py checks every entry
 tools/experiments/p2_fmd.sh    every P2 training run and evaluation behind docs/RESULTS.md
 docs/RESULTS.md                measured results on real microscope data (FMD), with reproducible blocks
 godot/                         Godot 4.5 .NET project (open THIS folder in Godot)
@@ -51,7 +54,7 @@ godot/                         Godot 4.5 .NET project (open THIS folder in Godot
 Work follows [`PATHWAY.md`](PATHWAY.md): phases **P0 → P10**, each a group of bricks with gates. P0 (bricks 0–8),
 P1 (bricks 9–10, CI), P2 (bricks 11–13, real FMD data), P3 (bricks 14–17, noise-model fidelity), P4 (bricks 18–21,
 U-Net) and P5 (bricks 22–24, performance) are done. **The current phase is P6 (stacks, time-lapse and batch)**:
-bricks 25–29 are done; next is `ui-stack`, then quality pass 31 (Q12).
+bricks 25–30 are done (30 opened the field-validation track, FV); next is `ext-bench`.
 Pick up the next unfinished brick of the current phase, follow the phase protocol there, and update its status table when a phase closes. Read `docs/RESULTS.md` before
 changing training or the model: it records what actually works on real data.
 
@@ -92,6 +95,7 @@ before anything is built on top.** `./bricks.sh` runs the gates in order and sto
 | 27 | q10-routing (quality pass) | `NoiseLevelRouter.cs`, `FmdBenchmark.ValidationPlan`, CLI `fmd-route` / `fmd-eval --weights-clean`, `tools/experiments/q10_routing.sh` | `Brick=27-q10-routing`; Q10's recorded verdict follows its pre-registered rule; with data + weights the blocks reproduce |
 | 28 | cli-batch | `BatchDenoising.cs` (`FrameDenoiser`, `BatchDenoising`), `IO/TiffStack.cs` (`TiffStackReader`/`TiffStackWriter`), CLI `denoise` on stacks and folders | `Brick=28-cli-batch`: streamed pages decode exactly; every prefix of a written stack is a valid TIFF; a stack page equals the frame on its own; no frame outlives the next (weak references); the CLI denoises a 3-page stack and a folder (pages = files, by Pillow), and 40 pages peak ≤ 160 MB above 3 |
 | 29 | q13-conditioning (quality pass) | `Nn/DenoisingNet.Film.cs` (FiLM generator, effective parameters), `NoiseConditioning.cs`, `NetConfig.Conditioning`, weights format 3, CLI `train --condition`, `fmd-eval --validation-seed / --sigma-scale`, `tools/experiments/q13_conditioning.sh` | `Brick=29-q13-conditioning`: whole-network and tight chain-rule finite differences, untrained = plain bit for bit, exact tiling with the whole frame's condition; Q13's recorded verdict and supervised training's default `--condition` follow the pre-registered rule; with data + weights the blocks reproduce |
+| 30 | ext-data (field validation) | `tools/fetch_ext.sh`, `tools/extract_zip.py`, `Data/ExtDatasets.cs`, CLI `ext-check` | `Brick=30-ext-data` (pairs match by name, never by position); every archive pinned (record, size, SHA-256); with data: every `.complete` matches its pin and `ext-check` finds the published counts, partners of equal size, and files that decode |
 
 Gates 11–15 and 21 need the dataset (the reproductions in gates 15 and 21 also need the weights from `tools/experiments/`) (`tools/fetch_fmd.sh`, about 9 GB into the gitignored `data/fmd/`). Without it, their
 data-dependent part reports SKIPPED (exit code 77) while the pins, unit tests and RESULTS.md checks still run. CI has
@@ -134,6 +138,7 @@ cd dora-bio
 ./bricks.sh --only 3                                      # iterate on one brick
 ./bricks.sh --self-test                                   # plant one bug per gate; each must turn red (~1 min)
 tools/fetch_fmd.sh                                        # FMD dataset, ~9 GB, into data/fmd/ (needs drive.usercontent.google.com)
+tools/fetch_ext.sh                                        # public paired sets (DeepBacs, CARE 2D), ~740 MB, into data/ext/ (needs zenodo.org)
 dotnet tools/DoraBio.Cli/bin/Release/net8.0/dora-bio.dll fmd-eval --weights W.bin --root data/fmd   # held-out test_mix
 tools/experiments/p2_fmd.sh                               # retrain + evaluate every P2 model (~45 min CPU)
 tools/experiments/p3_struct.sh                            # P3: plain vs structured blind spots (~50 min CPU)
@@ -185,7 +190,7 @@ cd godot && dotnet build && godot --headless --path . --import \
     +0.98 dB, but lost Noise2Void); gate 21 fails if `NetConfig.Default` disagrees with the recorded results.
 11. **Never train on FMD's test FOV (19).** `FmdOptions.ExcludedFovs` defaults to it, the CLI doesn't expose it, and
     gate 12 proves test_mix is FOV 19 and absent from the training plan. Report results on test_mix only.
-12. **Don't commit FMD data, or weights trained on it, without a license decision.** The data is CC BY-SA 4.0;
+12. **Don't commit FMD or external data, or weights trained on them, without a license decision.** The data is CC BY-SA 4.0;
     data/ and runs/ are gitignored. Credit Zhang et al., CVPR 2019 wherever FMD numbers appear.
 13. **Label synthetic things as synthetic.** The bundled sample and weights come from `SyntheticFluorescence`.
     Don't describe them as real microscope data, and don't claim real-data accuracy that hasn't been measured.

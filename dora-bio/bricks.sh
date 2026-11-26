@@ -24,7 +24,7 @@ export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_SKIP_FIRST_TIME_EXPE
 
 NAMES=(scaffold nn data io inference training cli godot-build godot-smoke ci-core ci-godot fmd-fetch fmd-loader fmd-eval
        n2v-diagnostic structured-mask vst calibration pool-upsample unet unet-tiling arch-eval
-       bench blocked-conv perf-budget q1-recipe tiff-stack-write q10-routing cli-batch q13-conditioning)
+       bench blocked-conv perf-budget q1-recipe tiff-stack-write q10-routing cli-batch q13-conditioning ext-data)
 CHECKS=(
   "solution builds (warnings are errors, missing XML docs included); every test class belongs to exactly one brick"
   "ConvLayer/DenoisingNet/Adam/Simd: finite-difference gradient checks, optimizer behavior"
@@ -56,6 +56,7 @@ CHECKS=(
   "quality pass Q10: router unit tests; the recorded verdict follows the pre-registered rule; with data + weights the blocks reproduce"
   "stacks and folders stream one frame at a time: pages decode exactly, no frame outlives the next; CLI denoises a stack and a folder; peak memory flat in stack length"
   "quality pass Q13: FiLM gradients, untrained = plain bit for bit, exact tiling; the recorded verdict and the default follow the pre-registered rule; with data + weights the blocks reproduce"
+  "external datasets: fetch_ext.sh pins every archive (record, size, sha256); pairing by name; with data: ext-check consistent"
 )
 LAST=$((${#NAMES[@]} - 1))
 LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dora-bricks.XXXXXX")"
@@ -135,6 +136,7 @@ gate_9() {
 gate_10() { python3 tools/ci/check_workflow.py "$WORKFLOW" godot; }
 
 FMD=data/fmd
+EXT=data/ext
 CLI_DLL=tools/DoraBio.Cli/bin/Release/net8.0/dora-bio.dll
 
 gate_11() {   # fmd-fetch
@@ -384,6 +386,25 @@ gate_29() {   # q13-conditioning (quality pass Q13, pre-registered in PATHWAY.md
   done
 }
 
+gate_30() {   # ext-data (field validation: the public paired datasets from tools/fetch_ext.sh)
+  bash -n tools/fetch_ext.sh || return 1
+  local entries pinned
+  entries="$(grep -cE '^  "[a-z0-9-]+\|' tools/fetch_ext.sh)"
+  pinned="$(grep -cE '^  "[a-z0-9-]+\|[0-9]+\|[^|]+\.zip\|[0-9]+\|[0-9a-f]{64}"$' tools/fetch_ext.sh)"
+  [[ "$entries" -eq 4 && "$pinned" -eq 4 ]] || { echo ">> $pinned of $entries archives fully pinned (need 4 with record, file, size and sha256)"; return 1; }
+  test_gate 30-ext-data || return 1
+  local name sha missing=0
+  while IFS='|' read -r name _ _ _ sha; do
+    sha="${sha%\"}"
+    if [[ ! -f "$EXT/$name/.complete" ]]; then missing=$((missing + 1)); continue; fi
+    [[ "$(cat "$EXT/$name/.complete")" == "$sha" ]] || { echo ">> $name was extracted from an archive that doesn't match its pin"; return 1; }
+  done < <(grep -E '^  "[a-z0-9-]+\|' tools/fetch_ext.sh | sed 's/^  "//')
+  [[ $missing -lt 4 ]] || { echo "pins and unit tests OK; data check skipped (run tools/fetch_ext.sh)"; return 77; }
+  dotnet build tools/DoraBio.Cli -c Release >/dev/null || return 1
+  dotnet "$CLI_DLL" ext-check --root "$EXT" || return 1
+  [[ $missing -eq 0 ]] || { echo "present datasets verified; $missing not downloaded"; return 77; }
+}
+
 gate_21() {   # arch-eval
   test_gate 21-arch-eval || return 1
   # The rule was set before measuring (PATHWAY.md, P4): the U-Net becomes the default only if, at the same training
@@ -466,6 +487,7 @@ MUTATIONS=(
   '28|src/DoraBio.Core/BatchDenoising.cs|                GC.Collect();|'
   '29|src/DoraBio.Core/Nn/DenoisingNet.Film.cs|gradients[FilmW1 + i] += dHidden[i] * ws.Condition;|gradients[FilmW1 + i] += dHidden[i];'
   '29|docs/RESULTS.md|<!-- q13-verdict: not-adopted -->|<!-- q13-verdict: adopted -->'
+  '30|src/DoraBio.Core/Data/ExtDatasets.cs|.Where(n => !clean.Contains(n)).ToList();|.Where(n => false).ToList();'
 )
 
 self_test() {

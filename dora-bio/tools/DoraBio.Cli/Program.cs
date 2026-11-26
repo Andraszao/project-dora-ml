@@ -48,6 +48,8 @@ public static class Program
                    Timings: denoise a frame and one training step, for both architectures (see PerformanceBench).
           diagnose --in IMAGE
                    Does the image's noise look independent between pixels, as Noise2Void assumes? (no ground truth needed)
+          ext-check [--root data/ext]
+                   Verify the public paired datasets from tools/fetch_ext.sh: counts, pairing, decoding, brightness.
           fmd-check --root data/fmd
                    Verify a downloaded FMD dataset: structure, test_mix, and no train/test leakage.
           fmd-eval  --weights WEIGHTS.bin --root data/fmd [--levels raw,avg2,...] [--per-image]
@@ -92,6 +94,7 @@ public static class Program
                 "eval" => Eval(options),
                 "info" => Info(options),
                 "fmd-check" => FmdCheck(options),
+                "ext-check" => ExtCheck(options),
                 "fmd-eval" => FmdEval(options),
                 "fmd-noise" => FmdNoise(options),
                 "fmd-diagnose" => FmdDiagnose(options),
@@ -611,6 +614,66 @@ public static class Program
     /// recorded verdict): "noise" only if the conditioned U-Net met its pre-registered bar.
     /// </summary>
     private const string DefaultCondition = "none";
+
+    /// <summary>
+    /// <c>ext-check</c>: for every external dataset that <c>tools/fetch_ext.sh</c> has downloaded, checks that the train
+    /// and test splits hold the published numbers of images, that every noisy image has a clean partner of the same size,
+    /// and that every file decodes. Also reports each set's brightness ratio, clean over noisy: the high-SNR images were
+    /// taken with more light, so they are brighter, which is why the benchmark scores outputs after a least-squares
+    /// brightness match. Exit 1 on any inconsistency; datasets not downloaded are listed, not failed.
+    /// </summary>
+    private static int ExtCheck(Options o)
+    {
+        string root = o.String("root", "data/ext");
+        int problems = 0, missing = 0;
+        Console.WriteLine($"external datasets in {root}");
+        Console.WriteLine($"{"name",-20} {"train",7} {"test",7}  {"size",-11} {"noisy max",9}  clean/noisy brightness");
+        foreach (var d in ExtDatasets.All)
+        {
+            if (!ExtDatasets.IsPresent(root, d))
+            {
+                Console.WriteLine($"{d.Name,-20} not downloaded (tools/fetch_ext.sh {d.Name})");
+                missing++;
+                continue;
+            }
+            var train = ExtDatasets.PlanNoisy(root, d, ExtSplit.Train);
+            var test = ExtDatasets.PlanNoisy(root, d, ExtSplit.Test);
+            var sizes = new SortedSet<string>(StringComparer.Ordinal);
+            var ratios = new List<double>();
+            double noisyMax = 0;
+            void Note(string problem) { Console.WriteLine($"  ✗ {d.Name}: {problem}"); problems++; }
+            if (train.Count != d.TrainCount) Note($"{train.Count} training images, expected {d.TrainCount}");
+            if (test.Count != d.TestCount) Note($"{test.Count} test images, expected {d.TestCount}");
+            if (d.HasGroundTruth)
+            {
+                foreach (var split in new[] { ExtSplit.Train, ExtSplit.Test })
+                    foreach (var p in ExtDatasets.PlanPairs(root, d, split))
+                    {
+                        var noisy = ImageLoader.Load(p.NoisyPath);
+                        var clean = ImageLoader.Load(p.CleanPath);
+                        if ((noisy.Width, noisy.Height) != (clean.Width, clean.Height)) Note($"{p.Name}: noisy and clean differ in size");
+                        sizes.Add($"{noisy.Width}×{noisy.Height}");
+                        noisyMax = Math.Max(noisyMax, noisy.Pixels.Max());
+                        double noisyMean = noisy.Pixels.Average(v => (double)v);
+                        if (noisyMean > 0) ratios.Add(clean.Pixels.Average(v => (double)v) / noisyMean);
+                    }
+            }
+            else
+                foreach (var path in train.Concat(test))
+                {
+                    var noisy = ImageLoader.Load(path);
+                    sizes.Add($"{noisy.Width}×{noisy.Height}");
+                    noisyMax = Math.Max(noisyMax, noisy.Pixels.Max());
+                }
+            ratios.Sort();
+            string brightness = ratios.Count == 0 ? "(no ground truth)" : $"{ratios[ratios.Count / 2]:0.00}× (median over {ratios.Count} pairs)";
+            Console.WriteLine($"{d.Name,-20} {$"{train.Count}/{d.TrainCount}",7} {$"{test.Count}/{d.TestCount}",7}  {string.Join(",", sizes),-11} {noisyMax,9:0.##}  {brightness}");
+        }
+        if (problems > 0) { Console.WriteLine($"✗ {problems} problem(s)"); return 1; }
+        Console.WriteLine(missing == 0 ? $"✓ all {ExtDatasets.All.Count} datasets present and consistent"
+                                       : $"✓ the {ExtDatasets.All.Count - missing} present datasets are consistent; {missing} not downloaded");
+        return 0;
+    }
 
     /// <summary><c>info</c>: prints a weights file's version, architecture, size, save time and provenance.</summary>
     private static int Info(Options o)

@@ -20,7 +20,7 @@ settled first, and so every phase builds only on phases that are already green.
 | **P8** | Model and session management | adaptation lost on restart; no way back to a known-good model | planned |
 | **P9** | Format coverage | "my file won't open" (LZW, OME-TIFF, HDF5) | planned |
 | **P10** | Release | only runs from the editor or CLI | planned |
-| **FV** | Field validation (alongside P6–P10) | nobody outside this repo has used DORA or compared it with their current tool | planned: `ext-data` first |
+| **FV** | Field validation (alongside P6–P10) | nobody outside this repo has used DORA or compared it with their current tool | 🚧 in progress: 30 `ext-data` done; next `ext-bench` |
 
 ## Phase protocol (applies to every phase)
 
@@ -232,7 +232,7 @@ preprints. They give the answer that matters: which tool they would actually use
 
 | Brick | Delivers | Gate |
 |---|---|---|
-| `ext-data` | `tools/fetch_ext.sh`: the Zenodo records above, pinned (record id, file, size, SHA-256, licence), into the gitignored `data/ext/`; loaders for their low/high-SNR layouts | pins verified; with data: file and pair counts match |
+| 30 `ext-data` ✅ | `tools/fetch_ext.sh`: the Zenodo records above, pinned (record id, file, size, SHA-256, licence), into the gitignored `data/ext/`; loaders for their low/high-SNR layouts | pins verified; with data: counts and pairing checked by `ext-check`. Measured on the four sets fetched so far (MreB, nucleoid, *B. subtilis*, CARE 2D): DORA's own reader opens all 194 TIFFs, including Micro-Manager OME-TIFF stacks and big-endian 16-bit; the high-SNR partners are 3.3–10.8× brighter than their low-SNR images, so outputs must be brightness-matched before scoring |
 | `ext-bench` | DORA (self-supervised on the noisy images alone, and supervised on each set's own training split) against the bilateral filter, against the CARE models those records ship, and against Noise2Void and CARE run the way a Fiji or napari user would (CAREamics, CPU, default settings) | recorded blocks reproduce; the baselines' settings and versions are recorded with their numbers |
 | `quant-fidelity` | what scientists measure, beyond PSNR: intensity linearity (slope and offset of denoised against reference in ROIs), mean-intensity bias, and invented or erased structure (residuals at puncta and dim filaments in the high-SNR reference) | metrics exact on synthetic ground truth; recorded on FMD and the `ext-data` sets |
 | `vendor-corpus` | the OME sample files (.nd2, .czi, .lif, .oib, OME-TIFF) as a test corpus: every file either opens or fails with a message that names its format and the conversion route | a recorded table of every sample file and its outcome, and no crash on any of them. P9's reader order follows what this shows |
