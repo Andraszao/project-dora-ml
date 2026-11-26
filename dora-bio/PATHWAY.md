@@ -178,12 +178,14 @@ wasn't kept).
 | 26 `tiff-stack-write` ✅ | multi-page TIFF writer (the reader already handles pages) | round-trip 3-page stacks in every sample type; Pillow reads a written stack exactly |
 | 28 `cli-batch` ✅ | `denoise` over stacks and folders, streaming one frame at a time with bounded memory | gate 28: a 3-page stack and a folder through the CLI (the stack's pages equal the folder's files); no frame outlives the next; 40 pages of 512² peak at most 160 MB above 3 (measured: 182 → 269 MB; before the fix, workspaces reallocated per frame and 160 pages peaked at 850 MB) |
 | `ui-stack` | page/frame slider in the UI, denoising the current frame or the whole stack (cancellable) | smoke test loads a stack, steps pages, denoises one frame |
+| `train-stream` | training data streamed as a working set of frames read from disk (seeded, so runs stay reproducible), instead of every frame in RAM (Q1's 2,280 FMD frames are 2.3 GB of noisy pixels) | peak memory flat in dataset size; a streamed run equals an in-memory run with the same seed and schedule; needed before Q12 adds data |
 
 ## P7: Analysis UX
 
 | Brick | Delivers | Gate |
 |---|---|---|
 | `sync-view` | synchronized zoom and pan across the three panels | smoke test: same view transform on all panels after a zoom |
+| `viewport-chunks` | denoise what's on screen first, as game engines stream textures: one cheap whole-frame pass (normalization, and the noise condition for conditioned models), then chunks on the tile grid, nearest the viewport centre first, kept in a cache that the model or settings invalidate; the rest fills in the background | chunks finished in any order stitch to exactly the whole-image result (tiling is exact); cancelling stops within one chunk; smoke test pans and sees visible chunks finish first |
 | `measure` | line profile and ROI mean/σ on raw, baseline and DORA | profile values equal the image values exactly (test) |
 | `export` | "Export denoised…" writes float32 TIFF in original units | the UI export is byte-identical to `dora-bio denoise` with the same model and input |
 | `compare` | before/after wipe slider and colormaps (display only) | screenshot review recorded; data path untouched (gate 8) |
@@ -201,7 +203,7 @@ wasn't kept).
 | Brick | Delivers | Gate |
 |---|---|---|
 | `tiff-lzw` | LZW decode (the most common "won't open" case today) | libtiff/Pillow LZW fixtures decode exactly |
-| `tiff-tiled-big` | tiled TIFF and BigTIFF | fixtures from libtiff |
+| `tiff-tiled-big` | tiled TIFF and BigTIFF, and huge single frames read strip by strip and denoised one row of tiles at a time (a 30k × 30k mosaic is 3.6 GB as floats) | fixtures from libtiff; peak memory flat in frame size |
 | `ome-metadata` | OME-TIFF pixel size and channel names read, and carried into outputs | metadata round-trip test |
 | `hdf5` | HDF5 reader as a **separate** optional project (`DoraBio.Hdf5`) so the core stays dependency-free | fixture test; gate 0 asserts the core still has zero `PackageReference`s |
 
