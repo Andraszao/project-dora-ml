@@ -20,6 +20,7 @@ settled first, and so every phase builds only on phases that are already green.
 | **P8** | Model and session management | adaptation lost on restart; no way back to a known-good model | planned |
 | **P9** | Format coverage | "my file won't open" (LZW, OME-TIFF, HDF5) | planned |
 | **P10** | Release | only runs from the editor or CLI | planned |
+| **FV** | Field validation (alongside P6–P10) | nobody outside this repo has used DORA or compared it with their current tool | planned: `ext-data` first |
 
 ## Phase protocol (applies to every phase)
 
@@ -217,6 +218,34 @@ wasn't kept).
 
 **Exit:** v2.0.0 tagged. **Needs your decisions:** app signing and notarization (Apple and Windows accounts) and
 the release license text.
+
+## FV: Field validation (runs alongside P6–P10)
+
+Whether anyone would choose DORA can only be measured outside this repo: on other people's data, against the tools
+they already use, and by asking them. Two sources. **Public datasets** that come with low- and high-SNR pairs, and in
+some cases with the CARE or Noise2Void models trained on them (Zenodo, CC BY 4.0, checked 2026-11-26): DeepBacs
+*E. coli* MreB (record 6460867, 0.22 GB) and nucleoid (5551112), DeepBacs *B. subtilis* (5551135), the ZeroCostDL4Mic
+CARE 2D example (3713330), and the AI4Life 2025 denoising challenge sets (Tribolium 15615943, Planaria 15615592).
+Also the OME sample files of native vendor formats (downloads.openmicroscopy.org). **Labs**, reached through
+forum.image.sc, light-microscopy core facilities (BINA, ABRF, Euro-BioImaging) and first authors of recent live-cell
+preprints. They give the answer that matters: which tool they would actually use, and why.
+
+| Brick | Delivers | Gate |
+|---|---|---|
+| `ext-data` | `tools/fetch_ext.sh`: the Zenodo records above, pinned (record id, file, size, SHA-256, licence), into the gitignored `data/ext/`; loaders for their low/high-SNR layouts | pins verified; with data: file and pair counts match |
+| `ext-bench` | DORA (self-supervised on the noisy images alone, and supervised on each set's own training split) against the bilateral filter, against the CARE models those records ship, and against Noise2Void and CARE run the way a Fiji or napari user would (CAREamics, CPU, default settings) | recorded blocks reproduce; the baselines' settings and versions are recorded with their numbers |
+| `quant-fidelity` | what scientists measure, beyond PSNR: intensity linearity (slope and offset of denoised against reference in ROIs), mean-intensity bias, and invented or erased structure (residuals at puncta and dim filaments in the high-SNR reference) | metrics exact on synthetic ground truth; recorded on FMD and the `ext-data` sets |
+| `vendor-corpus` | the OME sample files (.nd2, .czi, .lif, .oib, OME-TIFF) as a test corpus: every file either opens or fails with a message that names its format and the conversion route | a recorded table of every sample file and its outcome, and no crash on any of them. P9's reader order follows what this shows |
+| `pilot` | the outreach kit (an image.sc post, emails to core facilities and first authors, the data spec below), 3–5 consented lab datasets, a side-by-side report for each against the lab's current tool, and their answer to "which would you use?" | recorded per lab, with consent; lab data is never committed |
+
+**Data spec for labs.**
+- **Unprocessed 16-bit raw counts.** No 8-bit exports, no auto-contrast, deconvolution or background subtraction.
+- **Low-photon data.** Live-cell time-lapses or deep z-stacks taken at reduced laser power, not bright fixed slides.
+- **A high-SNR reference of the same sample, where they have one.** It shows whether DORA invents puncta or erases dim filaments.
+- **Their downstream measurement** (Cellpose segmentation, TrackMate tracking, or intensity quantification), because
+  that, not PSNR, decides whether denoising helped.
+- **Practicalities:** pixel size and exposure (and camera gain and offset if known), a download link rather than
+  attachments, and consent for what may be published (aggregate numbers only, unless they say otherwise).
 
 ---
 
