@@ -17,7 +17,7 @@ loaded sample in-app, or train on synthetic data or on a folder.
 ```
 DoraBio.sln                    core + tests + CLI (no Godot)
 src/DoraBio.Core/              ALL ML/IO code. net8.0. No Godot, no NuGet dependencies.
-  Nn/        ConvLayer (3×3 dilated conv fwd/bwd), DenoisingNet (+ .UNet.cs: the U-Net graph), Resample (2×2 pool,
+  Nn/        ConvLayer (3×3 dilated conv fwd/bwd), DenoisingNet (+ .UNet.cs: the U-Net graph; .Film.cs: noise conditioning), Resample (2×2 pool,
              upsample), AdamOptimizer, Simd, WorkspacePool
   Data/      GrayImage, Normalization, Anscombe (variance stabilization), Dihedral, V1Augment, BlindSpot (+MaskFootprint),
              PatchSampler, ImagePair/DatasetSplit,
@@ -28,10 +28,11 @@ src/DoraBio.Core/              ALL ML/IO code. net8.0. No Godot, no NuGet depend
   Metrics.cs, TiledInference.cs, BilateralBaseline.cs, FmdBenchmark.cs (held-out FMD scores, noise correlation),
   BatchDenoising.cs (FrameDenoiser: the one per-frame pipeline; stacks and folders streamed frame by frame),
   NoiseDiagnostics.cs (is the noise pixel-independent? from the noisy image alone),
-  NoiseCalibration.cs (variance = gain · intensity + intercept, from the noisy image alone)
+  NoiseCalibration.cs (variance = gain · intensity + intercept, from the noisy image alone),
+  NoiseConditioning.cs (the per-frame condition a noise-conditioned network gets: ln(σ̂ / 0.05) of the whole frame)
 tests/DoraBio.Core.Tests/      xunit. Fixtures/ written by Pillow/ImageMagick (make_fixtures.py)
-tools/DoraBio.Cli/             `dora-bio` CLI: synth | train | denoise | eval | info | diagnose | fmd-check | fmd-eval |
-                               fmd-noise | fmd-diagnose
+tools/DoraBio.Cli/             `dora-bio` CLI: synth | train | denoise | eval | info | bench | diagnose | fmd-check | fmd-eval |
+                               fmd-noise | fmd-diagnose | fmd-route
 tools/fetch_fmd.sh             downloads + verifies the real FMD dataset into data/fmd/ (gitignored)
 tools/experiments/p2_fmd.sh    every P2 training run and evaluation behind docs/RESULTS.md
 docs/RESULTS.md                measured results on real microscope data (FMD), with reproducible blocks
@@ -50,7 +51,7 @@ godot/                         Godot 4.5 .NET project (open THIS folder in Godot
 Work follows [`PATHWAY.md`](PATHWAY.md): phases **P0 → P10**, each a group of bricks with gates. P0 (bricks 0–8),
 P1 (bricks 9–10, CI), P2 (bricks 11–13, real FMD data), P3 (bricks 14–17, noise-model fidelity), P4 (bricks 18–21,
 U-Net) and P5 (bricks 22–24, performance) are done. **The current phase is P6 (stacks, time-lapse and batch)**:
-bricks 25–28 are done; next is quality pass 29 (Q13, pre-registered in `PATHWAY.md`), then `ui-stack`.
+bricks 25–29 are done; next is `ui-stack`, then quality pass 31 (Q12).
 Pick up the next unfinished brick of the current phase, follow the phase protocol there, and update its status table when a phase closes. Read `docs/RESULTS.md` before
 changing training or the model: it records what actually works on real data.
 
@@ -90,6 +91,7 @@ before anything is built on top.** `./bricks.sh` runs the gates in order and sto
 | 26 | tiff-stack-write | `IO/TiffCodec.cs` (`EncodeStack`), CLI `synth --stack`, `tools/ci/check_tiff_stack.py` | `Brick=26-tiff-stack-write` (3-page round trips, every sample type, ±Deflate); Pillow reads a written stack exactly (SKIPPED without Pillow; CI installs it) |
 | 27 | q10-routing (quality pass) | `NoiseLevelRouter.cs`, `FmdBenchmark.ValidationPlan`, CLI `fmd-route` / `fmd-eval --weights-clean`, `tools/experiments/q10_routing.sh` | `Brick=27-q10-routing`; Q10's recorded verdict follows its pre-registered rule; with data + weights the blocks reproduce |
 | 28 | cli-batch | `BatchDenoising.cs` (`FrameDenoiser`, `BatchDenoising`), `IO/TiffStack.cs` (`TiffStackReader`/`TiffStackWriter`), CLI `denoise` on stacks and folders | `Brick=28-cli-batch`: streamed pages decode exactly; every prefix of a written stack is a valid TIFF; a stack page equals the frame on its own; no frame outlives the next (weak references); the CLI denoises a 3-page stack and a folder (pages = files, by Pillow), and 40 pages peak ≤ 160 MB above 3 |
+| 29 | q13-conditioning (quality pass) | `Nn/DenoisingNet.Film.cs` (FiLM generator, effective parameters), `NoiseConditioning.cs`, `NetConfig.Conditioning`, weights format 3, CLI `train --condition`, `fmd-eval --validation-seed / --sigma-scale`, `tools/experiments/q13_conditioning.sh` | `Brick=29-q13-conditioning`: whole-network and tight chain-rule finite differences, untrained = plain bit for bit, exact tiling with the whole frame's condition; Q13's recorded verdict and supervised training's default `--condition` follow the pre-registered rule; with data + weights the blocks reproduce |
 
 Gates 11–15 and 21 need the dataset (the reproductions in gates 15 and 21 also need the weights from `tools/experiments/`) (`tools/fetch_fmd.sh`, about 9 GB into the gitignored `data/fmd/`). Without it, their
 data-dependent part reports SKIPPED (exit code 77) while the pins, unit tests and RESULTS.md checks still run. CI has
@@ -177,7 +179,8 @@ cd godot && dotnet build && godot --headless --path . --import \
 10. **Structured blind spots and variance stabilization are opt-in** (`--struct auto`, `--vst`): on FMD the first
     wins on noisy input and loses on clean input (and one network trained on mixed data loses on the independent
     images), and the second lost overall (docs/RESULTS.md, P3). Don't make either a default without new held-out
-    evidence. Choose footprints and other settings on validation data, never on test_mix.
+    evidence. Choose footprints and other settings on validation data, never on test_mix. Noise conditioning
+    (`--condition noise`, Q13) is opt-in for the same reason: it lost to the plain U-Net on every seed.
     The same goes for the architecture: by P4's rule the dilated network is the default (the U-Net won supervised,
     +0.98 dB, but lost Noise2Void); gate 21 fails if `NetConfig.Default` disagrees with the recorded results.
 11. **Never train on FMD's test FOV (19).** `FmdOptions.ExcludedFovs` defaults to it, the CLI doesn't expose it, and
@@ -190,6 +193,11 @@ cd godot && dotnet build && godot --headless --path . --import \
     go; `FrameDenoiser` keeps the inference workspaces for its lifetime instead of reallocating them per frame. Gate 28
     checks both (weak references, and peak memory flat in stack length). Every frame, stack page or single image, goes
     through `FrameDenoiser.Denoise`, so they can't drift apart.
+15. **A noise-conditioned network's condition is per frame, never per tile or patch.** `TiledInference` measures it once
+    on the whole normalized frame and gives every tile the same value; training measures each training image once. A
+    per-tile value would differ between tiles and break exact tiling (the same goes for anything global: percentile
+    normalization, or channel attention that pools over the image). FiLM is folded into the convolution weights
+    (`DenoisingNet.Film.cs`), so the kernels and their bit-identical blocked versions are untouched.
 
 ## Godot ⇄ C# gotchas
 
@@ -205,9 +213,10 @@ cd godot && dotnet build && godot --headless --path . --import \
 
 ## File formats
 
-- **Weights** (`WeightsFile`): `"DORABIO\0"`, u16 format = 2, model version `"2.0.0-bio"`, provenance string,
-  saved-UTC ticks, architecture byte (0 dilated, 1 U-Net), then features + layer count + dilations[] (dilated) or
-  features + depth (U-Net), parameter count, float32 LE[], CRC-32. Format 1 (no architecture byte, always dilated:
+- **Weights** (`WeightsFile`): `"DORABIO\0"`, u16 format = 2 (3 for a noise-conditioned network), model version
+  `"2.0.0-bio"`, provenance string, saved-UTC ticks, architecture byte (0 dilated, 1 U-Net), then features + layer
+  count + dilations[] (dilated) or features + depth (U-Net), format 3 only: conditioning byte + u16 generator hidden
+  units (16), parameter count, float32 LE[], CRC-32. Plain networks still write format 2, byte for byte as before. Format 1 (no architecture byte, always dilated:
   the bundled model) still loads. v1 JSON `.dat` files are rejected with a clear message.
 - **Images out:** TIFF, uint8/uint16/float32, uncompressed or Deflate, single pages or multi-page stacks
   (`TiffCodec.EncodeStack`, or `TiffStackWriter` page by page: the file is a valid TIFF after every page).

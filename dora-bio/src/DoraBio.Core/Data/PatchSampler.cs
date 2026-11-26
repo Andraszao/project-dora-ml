@@ -32,6 +32,12 @@ public sealed class TrainingBatch
     /// <summary>All per-pixel loss weights (0 or 1), patch after patch.</summary>
     public float[] Masks { get; }
 
+    /// <summary>
+    /// Per sample: the condition (<see cref="NoiseConditioning.Of"/>) of the whole training image the patch was cut from.
+    /// Only noise-conditioned networks read it.
+    /// </summary>
+    public float[] Conditions { get; }
+
     /// <summary>Allocates a batch of <paramref name="count"/> patches of <paramref name="size"/>×<paramref name="size"/> pixels.</summary>
     public TrainingBatch(int count, int size)
     {
@@ -41,6 +47,7 @@ public sealed class TrainingBatch
         Inputs = new float[count * Plane];
         Targets = new float[count * Plane];
         Masks = new float[count * Plane];
+        Conditions = new float[count];
     }
 
     /// <summary>Input plane of sample <paramref name="i"/> (a view, not a copy).</summary>
@@ -68,6 +75,7 @@ public sealed class PatchSampler
     private readonly float[] _noisyPatch;
     private readonly float[] _cleanPatch;
     private readonly float[] _scratch;
+    private readonly float[] _conditions;   // per image, measured on first use (NaN until then)
 
     /// <summary>Side length of the square patches this sampler produces.</summary>
     public int PatchSize { get; }
@@ -119,6 +127,8 @@ public sealed class PatchSampler
         _noisyPatch = new float[plane];
         _cleanPatch = new float[plane];
         _scratch = new float[plane];
+        _conditions = new float[usable.Count];
+        Array.Fill(_conditions, float.NaN);
     }
 
     /// <summary>Overwrites every sample in <paramref name="batch"/> with a freshly drawn, augmented patch.</summary>
@@ -126,16 +136,20 @@ public sealed class PatchSampler
     {
         if (batch.Size != PatchSize) throw new ArgumentException("Batch patch size does not match the sampler.");
         for (int i = 0; i < batch.Count; i++)
-            FillSample(batch.Input(i), batch.Target(i), batch.Mask(i));
+            batch.Conditions[i] = FillSample(batch.Input(i), batch.Target(i), batch.Mask(i));
     }
 
     /// <summary>
     /// Draws one patch: pick an image, pick a position, pick one of the 8 symmetries, and apply the same
     /// symmetry to noisy and clean so they stay aligned. Then build input, target and mask for the mode.
+    /// Returns the condition of the image the patch came from: measured once per image on the whole image (never on
+    /// the patch), and without touching the random generator, so runs of plain networks are unchanged by it.
     /// </summary>
-    private void FillSample(Span<float> input, Span<float> target, Span<float> mask)
+    private float FillSample(Span<float> input, Span<float> target, Span<float> mask)
     {
-        var image = PickImage();
+        int index = PickImage();
+        var image = _images[index];
+        if (float.IsNaN(_conditions[index])) _conditions[index] = NoiseConditioning.Of(image.Noisy);
         if (Augmentation == AugmentationMode.V1RotateScale)
         {
             // v1's recipe: one random angle and scale, applied identically to noisy and clean.
@@ -168,18 +182,19 @@ public sealed class PatchSampler
             _noisyPatch.CopyTo(target);
             BlindSpot.Apply(_noisyPatch, input, mask, PatchSize, MaskRatio, _rng, footprint: image.Footprint);
         }
+        return _conditions[index];
     }
 
     /// <summary>
     /// Area-weighted choice: a uniform draw on [0, total area) is located in the cumulative-area table, so
     /// every pixel in the dataset is equally likely to start a patch, however the images vary in size.
     /// </summary>
-    private ImagePair PickImage()
+    private int PickImage()
     {
         double r = _rng.NextDouble() * _cumulativeArea[^1];
         int index = Array.BinarySearch(_cumulativeArea, r);
         if (index < 0) index = ~index;
-        return _images[Math.Min(index, _images.Count - 1)];
+        return Math.Min(index, _images.Count - 1);
     }
 
     /// <summary>Copies the PatchSize² window at (x, y) into scratch, then writes its dihedral transform to <paramref name="destination"/>.</summary>

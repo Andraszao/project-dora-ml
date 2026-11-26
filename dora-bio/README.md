@@ -17,9 +17,9 @@ All numbers come from this repo, run on a 4-core cloud VM with no GPU.
 
 | Check | Result |
 |---|---|
-| Core unit tests (`dotnet test`) | 191 passing in ~5 s, including finite-difference gradient checks for both architectures (mutation-tested) |
-| Brick gates (`./bricks.sh`) | all 29 green (gates 11–15, 21, 25 and 27 with the FMD data and experiment weights present); documentation of every public member is enforced by the build |
-| Gates can fail (`./bricks.sh --self-test`) | one planted bug per gate 0–7 and 11–28 (two for gates 0 and 28), all 28 caught (after a clean control copy passes) |
+| Core unit tests (`dotnet test`) | 205 passing in ~5 s, including finite-difference gradient checks for both architectures (mutation-tested) |
+| Brick gates (`./bricks.sh`) | all 30 green (gates 11–15, 21, 25, 27 and 29 with the FMD data and experiment weights present); documentation of every public member is enforced by the build |
+| Gates can fail (`./bricks.sh --self-test`) | one planted bug per gate 0–7 and 11–29 (two for gates 0, 28 and 29), all 30 caught (after a clean control copy passes) |
 | CI (GitHub Actions) | all gates incl. headless Godot, on PRs into `main`, pushes to `main` and manual runs (docs-only changes skipped): [run #1](https://github.com/Andraszao/project-dora-ml/actions/runs/45617118232) green in 150 s of runner time, 0 billable minutes (public repo) |
 | Codecs vs. independent encoders | TIFF/PNG fixtures written by Pillow, ImageMagick and libtiff decode exactly |
 | Tiled vs. whole-image inference | identical (≤1e-5) for ragged tiles, tiles smaller than the receptive field, etc. |
@@ -34,6 +34,7 @@ All numbers come from this repo, run on a 4-core cloud VM with no GPU.
 | Train/test leakage on FMD | `dora-bio fmd-check`: every test image is FOV 19 pixel for pixel, and FOV 19 never enters training |
 | Godot 4.5.1 .NET smoke test (headless) | loads model and sample, denoises off-thread, adapts, stays responsive; exit code 0 |
 | Speed (`dora-bio bench`, 4 cores, no GPU) | 512×512 frame in **0.27 s** (dilated) / 0.30 s (U-Net); one training step (batch 16 at 64 px) 0.13 s. The register-blocked kernels are 2.1–2.4× (denoise) and 1.5–1.8× (training) faster than the original ones, and bit-identical to them |
+| Noise-conditioned U-Net (quality pass Q13, three seeds) | measured, not adopted: 0.19 dB worse at raw on average than the plain all-level U-Net, though it does use its noise input. The first seed spread: 0.29 dB at raw, so single-run differences under ~0.3 dB are noise ([details](docs/RESULTS.md#quality-pass-q13-telling-the-network-how-noisy-each-image-is)) |
 | Stacks and folders (`dora-bio denoise --in STACK.tif` or a folder) | streamed one frame at a time: every page comes out bit for bit as the same frame denoised alone, and peak memory stays flat in the stack's length (512² frames: 182 MB for 3 pages, 265 MB for 160, at 0.22 s per page) |
 | Performance guard (gate 24) | budgets in `tools/ci/perf_budget.json`, plus a check that the blocked kernels stay ≥ 1.5× (denoise) and ≥ 1.25× (training step) faster than the reference kernels, timed interleaved in the same run so it holds on any machine |
 

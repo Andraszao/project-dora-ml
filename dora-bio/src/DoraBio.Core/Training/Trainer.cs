@@ -159,7 +159,7 @@ internal sealed class BatchStepper
         {
             Array.Clear(_sampleGradients[i]);
             _sampleLoss[i] = _net.AccumulateGradients(_batch.Input(i), _batch.Target(i), _batch.Mask(i),
-                size, size, scale, _sampleGradients[i], ws);
+                size, size, scale, _sampleGradients[i], ws, _batch.Conditions[i]);
             return ws;
         }, _pool.Return);
 

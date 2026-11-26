@@ -86,7 +86,7 @@ public sealed partial class DenoisingNet
         var final = _layers[FinalLayer];
         final.Pad(current, height, width, ws.Padded[FinalLayer]);
         var residual = ws.Activations[FinalLayer].AsSpan(0, height * width);
-        ConvForward(final, ws.Padded[FinalLayer], height, width, residual);
+        ConvForward(final, ws.Padded[FinalLayer], height, width, residual, ws);
         return residual;
     }
 
@@ -96,7 +96,7 @@ public sealed partial class DenoisingNet
         var conv = _layers[layer];
         conv.Pad(input, height, width, ws.Padded[layer]);
         var output = ws.Activations[layer].AsSpan(0, conv.OutChannels * height * width);
-        ConvForward(conv, ws.Padded[layer], height, width, output);
+        ConvForward(conv, ws.Padded[layer], height, width, output, ws);
         Relu(output);
         return output;
     }
@@ -148,7 +148,7 @@ public sealed partial class DenoisingNet
             if (l == 0)
             {
                 // The first layer's input is the image itself, so no input gradient is needed.
-                ConvBackward(_layers[Enc(0, 0)], ws.Padded[Enc(0, 0)], gA, hl, wl, gradients, Span<float>.Empty);
+                ConvBackward(_layers[Enc(0, 0)], ws.Padded[Enc(0, 0)], gA, hl, wl, gradients, Span<float>.Empty, ws);
                 break;
             }
             var gPooled = ConvInputGradient(Enc(l, 0), gA, hl, wl, gradients, ws, c);
@@ -164,7 +164,7 @@ public sealed partial class DenoisingNet
         Span<float> gradients, Workspace ws, float[] into)
     {
         var conv = _layers[layer];
-        ConvBackward(conv, ws.Padded[layer], gradOutput, height, width, gradients, ws.GradPadded);
+        ConvBackward(conv, ws.Padded[layer], gradOutput, height, width, gradients, ws.GradPadded, ws);
         var gradInput = into.AsSpan(0, conv.InChannels * height * width);
         conv.Unpad(ws.GradPadded, height, width, gradInput);
         return gradInput;

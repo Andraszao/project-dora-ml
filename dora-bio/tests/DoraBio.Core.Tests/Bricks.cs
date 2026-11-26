@@ -34,6 +34,7 @@ internal static class Bricks
     public const string TiffStackWrite = "26-tiff-stack-write";  // multi-page TIFF writer
     public const string NoiseRouting = "27-q10-routing";         // quality pass Q10: route by noise level
     public const string CliBatch = "28-cli-batch";               // streamed stack and folder denoising
+    public const string NoiseConditioning = "29-q13-conditioning"; // quality pass Q13: FiLM noise conditioning
 }
 
 [Trait(Bricks.Trait, Bricks.Scaffold)]
@@ -43,7 +44,7 @@ public class BrickWiringTests
         [Bricks.Scaffold, Bricks.Nn, Bricks.Data, Bricks.IO, Bricks.Inference, Bricks.Training, Bricks.Fmd, Bricks.FmdEval,
          Bricks.NoiseDiagnostic, Bricks.StructuredMask, Bricks.Vst, Bricks.Calibration,
          Bricks.PoolUpsample, Bricks.UNet, Bricks.UNetTiling, Bricks.ArchEval,
-         Bricks.Bench, Bricks.BlockedConv, Bricks.PerfBudget, Bricks.TiffStackWrite, Bricks.NoiseRouting, Bricks.CliBatch];
+         Bricks.Bench, Bricks.BlockedConv, Bricks.PerfBudget, Bricks.TiffStackWrite, Bricks.NoiseRouting, Bricks.CliBatch, Bricks.NoiseConditioning];
 
     /// <summary>An untagged test would silently run in no gate, so treat a missing or unknown brick as a build error.</summary>
     [Xunit.Fact]

@@ -24,6 +24,7 @@ public static class Program
           train    --data DIR --out WEIGHTS.bin [--mode n2v|supervised] [--epochs 30] [--steps 50]
                    [--batch 16] [--patch 64] [--lr 0.001] [--journey FILE.json] [--seed 1234]
                    [--arch dilated|unet] [--features 24 (dilated) / 16 (unet)] [--depth 2 (unet)]
+                   [--condition none|noise]  (noise: tell the network each frame's noise level, FiLM; quality pass Q13)
                    [--init WEIGHTS.bin]   (fine-tune existing weights instead of starting fresh)
                    [--describe TEXT]      (what the data is; stored in the weights' provenance)
                    [--augment dihedral|v1] (v1 = v1's ±15° rotation + 0.85-1.15 scale, nearest neighbour; for comparison)
@@ -42,6 +43,7 @@ public static class Program
           eval     --weights WEIGHTS.bin --data DIR
                    Per-image PSNR/SSIM of noisy, bilateral and DORA against clean (needs clean images).
           info     --weights WEIGHTS.bin   |   info --default-arch   (prints dilated or unet)
+                   |   info --default-condition   (supervised training's default --condition: none or noise)
           bench    [--quick] [--json OUT.json]
                    Timings: denoise a frame and one training step, for both architectures (see PerformanceBench).
           diagnose --in IMAGE
@@ -49,6 +51,8 @@ public static class Program
           fmd-check --root data/fmd
                    Verify a downloaded FMD dataset: structure, test_mix, and no train/test leakage.
           fmd-eval  --weights WEIGHTS.bin --root data/fmd [--levels raw,avg2,...] [--per-image]
+                   [--validation-seed S]  (score the FOVs a training run with --seed S held out, one frame each, not test_mix)
+                   [--sigma-scale K]  (noise-conditioned models: tell them K × each image's measured noise σ)
                    [--weights-correlated W2.bin]  (images whose noise check says correlated go to W2 instead)
                    [--weights-clean W2.bin --noise-threshold S]  (images with noise σ ≤ S go to W2 instead)
           fmd-route --weights A.bin --weights-clean B.bin --root data/fmd [--seed 2026]
@@ -173,6 +177,7 @@ public static class Program
         DenoisingNet net;
         if (o.Has("init"))
         {
+            if (o.Has("condition")) throw new ArgumentException("--condition comes from the --init weights; leave it out when fine-tuning.");
             net = WeightsFile.Load(o.Required("init")).Net;
             Console.WriteLine($"🔁 fine-tuning {o.Required("init")}");
         }
@@ -185,6 +190,12 @@ public static class Program
                 "dilated" => new NetConfig(o.Int("features", 24), [1, 2, 4, 8, 4, 2, 1]),
                 "unet" => NetConfig.UNet(o.Int("features", 16), o.Int("depth", 2)),
                 _ => throw new ArgumentException($"Unknown --arch '{arch}' (use dilated or unet)."),
+            };
+            architecture = o.String("condition", mode == TrainingMode.Supervised ? DefaultCondition : "none") switch
+            {
+                "none" => architecture,
+                "noise" => architecture with { Conditioning = NetConditioning.NoiseLevel },
+                var c => throw new ArgumentException($"Unknown --condition '{c}' (use none or noise)."),
             };
             architecture.Validate();
             net = DenoisingNet.Create(architecture, config.Seed);
@@ -405,11 +416,18 @@ public static class Program
         }
         string testMix = Path.Combine(o.Required("root"), "test_mix");
         var levels = o.String("levels", "raw").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        double sigmaScale = o.Double("sigma-scale", 1);
+        if (!(sigmaScale > 0)) throw new ArgumentException("--sigma-scale must be positive.");
+        int? validationSeed = o.Has("validation-seed") ? o.Int("validation-seed", 0) : null;
+        string scope = validationSeed is { } vs ? $"validation (seed {vs})" : "test_mix";
+        string scaled = sigmaScale == 1 ? "" : $", condition from {sigmaScale:0.###}× the measured noise σ";
         foreach (string level in levels)
         {
             routed = 0;
-            var scores = FmdBenchmark.Evaluate(Pick, testMix, level, stabilize: o.Has("vst"));
-            Console.WriteLine($"test_mix level {level}: mean PSNR (dB) / SSIM vs ground truth, 8-bit scale");
+            var scores = validationSeed is { } seed
+                ? FmdBenchmark.EvaluatePlan(Pick, FmdBenchmark.ValidationPlan(o.Required("root"), seed, [level]), stabilize: o.Has("vst"), sigmaScale: sigmaScale)
+                : FmdBenchmark.Evaluate(Pick, testMix, level, stabilize: o.Has("vst"), sigmaScale: sigmaScale);
+            Console.WriteLine($"{scope} level {level}: mean PSNR (dB) / SSIM vs ground truth, 8-bit scale{scaled}");
             Console.WriteLine($"{"modality",-10} {"n",3}  {"noisy",-15} {"bilateral",-15} {"DORA",-15}");
             foreach (var (group, count, m) in FmdBenchmark.Summarize(scores))
                 Console.WriteLine($"{group,-10} {count,3}  {m.NoisyPsnr,6:0.00} / {m.NoisySsim:0.000}  {m.BilateralPsnr,6:0.00} / {m.BilateralSsim:0.000}  {m.DoraPsnr,6:0.00} / {m.DoraSsim:0.000}");
@@ -588,9 +606,20 @@ public static class Program
         return 0;
     }
 
+    /// <summary>
+    /// Supervised training's default <c>--condition</c>. Quality pass Q13 decides it (gate 29 checks that it follows the
+    /// recorded verdict): "noise" only if the conditioned U-Net met its pre-registered bar.
+    /// </summary>
+    private const string DefaultCondition = "none";
+
     /// <summary><c>info</c>: prints a weights file's version, architecture, size, save time and provenance.</summary>
     private static int Info(Options o)
     {
+        if (o.Has("default-condition"))
+        {
+            Console.WriteLine(DefaultCondition);
+            return 0;
+        }
         if (o.Has("default-arch"))
         {
             Console.WriteLine(NetConfig.Default.Architecture == NetArchitecture.UNet ? "unet" : "dilated");

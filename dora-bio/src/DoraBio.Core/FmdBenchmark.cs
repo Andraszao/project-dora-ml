@@ -71,9 +71,11 @@ public static class FmdBenchmark
     /// its <see cref="Anscombe"/> transform, and map the result back with the unbiased inverse. The noisy and bilateral
     /// columns are unaffected.
     /// </param>
+    /// <param name="sigmaScale">Noise-conditioned models only: multiply each image's measured noise σ by this before it
+    /// becomes the condition. 1 is the honest value; 2 and 0.5 test whether the model uses its condition at all (Q13).</param>
     public static List<FmdScore> Evaluate(Func<GrayImage, DenoisingNet> pickNet, string testMixDir, string level = "raw",
-        int tileCore = TiledInference.DefaultTileCore, bool stabilize = false) =>
-        EvaluatePlan(pickNet, FmdDataset.PlanTestMix(testMixDir, level), tileCore, stabilize);
+        int tileCore = TiledInference.DefaultTileCore, bool stabilize = false, double sigmaScale = 1) =>
+        EvaluatePlan(pickNet, FmdDataset.PlanTestMix(testMixDir, level), tileCore, stabilize, sigmaScale);
 
     /// <summary>
     /// The same protocol on any planned pairs, e.g. <see cref="ValidationPlan"/>: per image, normalize, denoise with the
@@ -83,8 +85,9 @@ public static class FmdBenchmark
     /// <param name="plan">The pairs to score.</param>
     /// <param name="tileCore">Tile core size for inference.</param>
     /// <param name="stabilize">Denoise through the variance-stabilized domain (models trained with --vst).</param>
+    /// <param name="sigmaScale">Noise-conditioned models only: scales the measured σ behind each image's condition.</param>
     public static List<FmdScore> EvaluatePlan(Func<GrayImage, DenoisingNet> pickNet, IReadOnlyList<FmdDataset.PlannedPair> plan,
-        int tileCore = TiledInference.DefaultTileCore, bool stabilize = false)
+        int tileCore = TiledInference.DefaultTileCore, bool stabilize = false, double sigmaScale = 1)
     {
         var scores = new List<FmdScore>();
         foreach (var p in plan)
@@ -93,9 +96,13 @@ public static class FmdBenchmark
             var clean = ImageLoader.Load(p.CleanPath);
             var map = Normalization.FromPercentiles(noisy.Pixels);
             var input = Normalization.Apply(noisy, map);
+            var net = pickNet(noisy);
             var dora = stabilize
-                ? DenoiseStabilized(pickNet(noisy), noisy, tileCore)
-                : ToSensorUnits(TiledInference.Denoise(pickNet(noisy), input, tileCore), map);
+                ? DenoiseStabilized(net, noisy, tileCore)
+                : ToSensorUnits(net.Config.IsConditioned && sigmaScale != 1
+                    ? TiledInference.Denoise(net, input, tileCore, default, new WorkspacePool(net),
+                        NoiseConditioning.FromSigma(Metrics.EstimateNoiseSigma(input) * sigmaScale))
+                    : TiledInference.Denoise(net, input, tileCore), map);
             var bilateral = ToSensorUnits(BilateralBaseline.FilterAuto(input), map);
 
             string category = p.GroupId.Split('/')[0];

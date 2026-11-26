@@ -13,6 +13,19 @@ public enum NetArchitecture
     UNet,
 }
 
+/// <summary>What a network is told about each frame besides its pixels.</summary>
+public enum NetConditioning
+{
+    /// <summary>Nothing: the network infers everything from the pixels it sees.</summary>
+    None,
+
+    /// <summary>
+    /// The frame's estimated noise level (<see cref="NoiseConditioning"/>), applied as FiLM modulation of every hidden
+    /// convolution (quality pass Q13; see DenoisingNet.Film.cs).
+    /// </summary>
+    NoiseLevel,
+}
+
 /// <summary>
 /// Architecture of the denoiser.
 /// <list type="bullet">
@@ -40,6 +53,12 @@ public sealed record NetConfig(int Features, int[] Dilations)
 
     /// <summary>U-Net only: number of 2×2 pooling steps (1 to 4). Image sides are padded to multiples of 2^Depth.</summary>
     public int Depth { get; init; }
+
+    /// <summary>None (the default), or <see cref="NetConditioning.NoiseLevel"/> for a noise-conditioned network.</summary>
+    public NetConditioning Conditioning { get; init; }
+
+    /// <summary>True if the network needs a per-frame condition (see <see cref="NoiseConditioning"/>).</summary>
+    public bool IsConditioned => Conditioning != NetConditioning.None;
 
     /// <summary>A U-Net with <paramref name="features"/> channels at full resolution and <paramref name="depth"/> levels below it.</summary>
     /// <remarks>16 features and depth 2 cost about as much compute per pixel as <see cref="Default"/>, with 4.5× the parameters.</remarks>
@@ -76,6 +95,7 @@ public sealed record NetConfig(int Features, int[] Dilations)
     public void Validate()
     {
         if (Features <= 0) throw new ArgumentOutOfRangeException(nameof(Features), "Features must be positive.");
+        if (!Enum.IsDefined(Conditioning)) throw new ArgumentOutOfRangeException(nameof(Conditioning));
         if (Architecture == NetArchitecture.UNet)
         {
             if (Depth is < 1 or > 4) throw new ArgumentOutOfRangeException(nameof(Depth), "U-Net depth must be 1 to 4.");
@@ -87,19 +107,20 @@ public sealed record NetConfig(int Features, int[] Dilations)
     }
 
     /// <summary>Human-readable summary, e.g. "7 conv layers × 24 features, dilations [1,2,4,8,4,2,1], receptive field 45px".</summary>
-    public override string ToString() => Architecture == NetArchitecture.UNet
+    public override string ToString() => (Architecture == NetArchitecture.UNet
         ? $"U-Net, depth {Depth}, {string.Join("→", Enumerable.Range(0, Depth + 1).Select(l => Features << l))} features, " +
           $"{LayerCount} conv layers, receptive field up to {2 * ReceptiveRadius + 1}px"
-        : $"{LayerCount} conv layers × {Features} features, dilations [{string.Join(",", Dilations)}], receptive field {2 * ReceptiveRadius + 1}px";
+        : $"{LayerCount} conv layers × {Features} features, dilations [{string.Join(",", Dilations)}], receptive field {2 * ReceptiveRadius + 1}px")
+        + (IsConditioned ? ", noise-conditioned (FiLM)" : "");
 
-    /// <summary>Equal when the architecture, feature count, depth and every dilation match.</summary>
+    /// <summary>Equal when the architecture, feature count, depth, conditioning and every dilation match.</summary>
     /// <remarks>
     /// Records compare array members by reference, which would make two identical configs unequal.
     /// Weight loading and <see cref="DenoisingNet.CopyParametersFrom"/> rely on content equality.
     /// </remarks>
     public bool Equals(NetConfig? other) =>
         other is not null && Architecture == other.Architecture && Features == other.Features && Depth == other.Depth
-        && Dilations.AsSpan().SequenceEqual(other.Dilations);
+        && Conditioning == other.Conditioning && Dilations.AsSpan().SequenceEqual(other.Dilations);
 
     /// <summary>Content-based hash, consistent with <see cref="Equals(NetConfig?)"/>.</summary>
     public override int GetHashCode()
@@ -108,6 +129,7 @@ public sealed record NetConfig(int Features, int[] Dilations)
         hash.Add(Architecture);
         hash.Add(Features);
         hash.Add(Depth);
+        hash.Add(Conditioning);
         foreach (int d in Dilations) hash.Add(d);
         return hash.ToHashCode();
     }
@@ -152,17 +174,18 @@ public sealed partial class DenoisingNet
     /// </summary>
     internal bool ReferenceKernels { get; set; }
 
-    private void ConvForward(ConvLayer layer, ReadOnlySpan<float> padded, int height, int width, Span<float> output)
+    // The kernels read ws.Active: Parameters itself, or a conditioned network's effective parameters for this call.
+    private void ConvForward(ConvLayer layer, ReadOnlySpan<float> padded, int height, int width, Span<float> output, Workspace ws)
     {
-        if (ReferenceKernels) layer.ForwardReference(Parameters, padded, height, width, output);
-        else layer.Forward(Parameters, padded, height, width, output);
+        if (ReferenceKernels) layer.ForwardReference(ws.Active, padded, height, width, output);
+        else layer.Forward(ws.Active, padded, height, width, output);
     }
 
     private void ConvBackward(ConvLayer layer, ReadOnlySpan<float> padded, ReadOnlySpan<float> gradOutput, int height, int width,
-        Span<float> gradients, Span<float> gradPadded)
+        Span<float> gradients, Span<float> gradPadded, Workspace ws)
     {
-        if (ReferenceKernels) layer.BackwardReference(Parameters, padded, gradOutput, height, width, gradients, gradPadded);
-        else layer.Backward(Parameters, padded, gradOutput, height, width, gradients, gradPadded);
+        if (ReferenceKernels) layer.BackwardReference(ws.Active, padded, gradOutput, height, width, gradients, gradPadded);
+        else layer.Backward(ws.Active, padded, gradOutput, height, width, gradients, gradPadded);
     }
 
     private DenoisingNet(NetConfig config, float[]? parameters)
@@ -178,6 +201,7 @@ public sealed partial class DenoisingNet
             _layers[i] = new ConvLayer(shapes[i].In, shapes[i].Out, shapes[i].Dilation, offset);
             offset += _layers[i].ParameterCount;
         }
+        offset += SetUpConditioning(offset);
 
         if (parameters is not null && parameters.Length != offset)
             throw new ArgumentException($"Architecture needs {offset} parameters but {parameters.Length} were given.");
@@ -209,6 +233,7 @@ public sealed partial class DenoisingNet
             for (int k = 0; k < layer.WeightCount; k++)
                 net.Parameters[layer.WeightOffset + k] = (rng.NextSingle() * 2f - 1f) * bound;
         }
+        net.InitializeConditioning(rng);   // after the convolutions, so they match a plain network with the same seed
         return net;
     }
 
@@ -236,13 +261,17 @@ public sealed partial class DenoisingNet
     /// <param name="width">Plane width in pixels.</param>
     /// <param name="output">Receives the denoised plane (same size). May not alias <paramref name="input"/>.</param>
     /// <param name="workspace">This thread's scratch buffers (from <see cref="CreateWorkspace"/>).</param>
-    public void Predict(ReadOnlySpan<float> input, int height, int width, Span<float> output, Workspace workspace)
+    /// <param name="condition">
+    /// Noise-conditioned networks only: the whole frame's <see cref="NoiseConditioning.Of"/> (required; ignored otherwise).
+    /// </param>
+    public void Predict(ReadOnlySpan<float> input, int height, int width, Span<float> output, Workspace workspace,
+        float condition = float.NaN)
     {
         CheckPlane(input, height, width);
         int a = Config.TileAlignment;
         if (height % a == 0 && width % a == 0)
         {
-            var residual = Forward(input, height, width, workspace);
+            var residual = Forward(input, height, width, workspace, condition);
             for (int i = 0; i < residual.Length; i++)
                 output[i] = input[i] - residual[i];
             return;
@@ -252,7 +281,7 @@ public sealed partial class DenoisingNet
         int ph = RoundUp(height, a), pw = RoundUp(width, a);
         var padded = workspace.AlignedInput(ph * pw);
         PadTo(input, height, width, padded, pw);
-        var paddedResidual = Forward(padded, ph, pw, workspace);
+        var paddedResidual = Forward(padded, ph, pw, workspace, condition);
         for (int y = 0; y < height; y++)
             for (int x = 0; x < width; x++)
                 output[y * width + x] = input[y * width + x] - paddedResidual[y * pw + x];
@@ -286,6 +315,9 @@ public sealed partial class DenoisingNet
     /// </param>
     /// <param name="gradients">Gradient accumulator in parameter layout; this sample's gradient is added to it.</param>
     /// <param name="workspace">This thread's scratch buffers.</param>
+    /// <param name="condition">
+    /// Noise-conditioned networks only: the condition of the frame the sample comes from (required; ignored otherwise).
+    /// </param>
     public double AccumulateGradients(
         ReadOnlySpan<float> input,
         ReadOnlySpan<float> target,
@@ -294,7 +326,8 @@ public sealed partial class DenoisingNet
         int width,
         float scale,
         Span<float> gradients,
-        Workspace workspace)
+        Workspace workspace,
+        float condition = float.NaN)
     {
         CheckPlane(input, height, width);
         CheckPlane(target, height, width);
@@ -316,10 +349,10 @@ public sealed partial class DenoisingNet
                 for (int y = 0; y < height; y++) pm.Slice(y * pw, width).Fill(1f);
             }
             else PadTo(mask, height, width, pm, pw);
-            return AccumulateGradients(pi, pt, pm, ph, pw, scale, gradients, workspace);
+            return AccumulateGradients(pi, pt, pm, ph, pw, scale, gradients, workspace, condition);
         }
 
-        var residual = Forward(input, height, width, workspace);
+        var residual = Forward(input, height, width, workspace, condition);
         var gradResidual = workspace.LossGradient.AsSpan(0, residual.Length);
 
         // Loss gradient with respect to the network's raw output (the predicted noise r):
@@ -336,7 +369,16 @@ public sealed partial class DenoisingNet
             gradResidual[i] = -2f * scale * m * diff;
         }
 
-        Backward(height, width, gradResidual, gradients, workspace);
+        if (!Config.IsConditioned)
+        {
+            Backward(height, width, gradResidual, gradients, workspace);
+            return sse;
+        }
+        // Conditioned: backpropagate to the effective parameters, then on to the real ones (DenoisingNet.Film.cs).
+        var effectiveGradient = workspace.EffectiveGradient.AsSpan();
+        effectiveGradient.Clear();
+        Backward(height, width, gradResidual, effectiveGradient, workspace);
+        ConditioningBackward(effectiveGradient, gradients, workspace);
         return sse;
     }
 
@@ -344,8 +386,9 @@ public sealed partial class DenoisingNet
     /// Runs every layer, keeping each layer's padded input and output in the workspace for the backward pass.
     /// Returns the last layer's output: the predicted noise, one channel.
     /// </summary>
-    private Span<float> Forward(ReadOnlySpan<float> input, int height, int width, Workspace ws)
+    private Span<float> Forward(ReadOnlySpan<float> input, int height, int width, Workspace ws, float condition)
     {
+        ws.Active = ActiveParameters(condition, ws);
         if (Config.Architecture == NetArchitecture.UNet) return ForwardUNet(input, height, width, ws);
         ws.Ensure(height, width);
         int plane = height * width;
@@ -356,7 +399,7 @@ public sealed partial class DenoisingNet
             var layer = _layers[l];
             layer.Pad(current, height, width, ws.Padded[l]);
             var output = ws.Activations[l].AsSpan(0, layer.OutChannels * plane);
-            ConvForward(layer, ws.Padded[l], height, width, output);
+            ConvForward(layer, ws.Padded[l], height, width, output, ws);
             if (l < _layers.Length - 1) Relu(output);
             current = output;
         }
@@ -387,11 +430,11 @@ public sealed partial class DenoisingNet
             if (l == 0)
             {
                 // The input is data, not a parameter, so its gradient is not needed.
-                ConvBackward(layer, ws.Padded[l], gOut, height, width, gradients, Span<float>.Empty);
+                ConvBackward(layer, ws.Padded[l], gOut, height, width, gradients, Span<float>.Empty, ws);
                 break;
             }
 
-            ConvBackward(layer, ws.Padded[l], gOut, height, width, gradients, ws.GradPadded);
+            ConvBackward(layer, ws.Padded[l], gOut, height, width, gradients, ws.GradPadded, ws);
             var gIn = gradIn.AsSpan(0, layer.InChannels * plane);
             layer.Unpad(ws.GradPadded, height, width, gIn);
 
@@ -429,6 +472,9 @@ public sealed partial class DenoisingNet
         private int _capacityPadded;
         private float[] _alignedInput = [], _alignedTarget = [], _alignedMask = [];
         private float[] _tileIn = [], _tileOut = [];
+
+        /// <summary>The parameters the kernels read during the current pass (set by Forward).</summary>
+        internal float[] Active { get; set; } = [];
 
         /// <summary>
         /// Sizes every buffer for images up to <paramref name="height"/> × <paramref name="width"/> (rounded up to the

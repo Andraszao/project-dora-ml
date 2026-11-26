@@ -45,7 +45,15 @@ public static class TiledInference
     /// denoises many frames (<see cref="FrameDenoiser"/>) allocates the tens of MB of activations per thread once,
     /// not once per frame.
     /// </summary>
-    internal static GrayImage Denoise(DenoisingNet net, GrayImage input, int tileCore, CancellationToken cancellation, WorkspacePool pool)
+    internal static GrayImage Denoise(DenoisingNet net, GrayImage input, int tileCore, CancellationToken cancellation, WorkspacePool pool) =>
+        Denoise(net, input, tileCore, cancellation, pool, net.Config.IsConditioned ? NoiseConditioning.Of(input) : float.NaN);
+
+    /// <summary>
+    /// As above with an explicit condition for a noise-conditioned network. Normally it is measured on the whole
+    /// <paramref name="input"/>; evaluations pass a deliberately wrong one to test whether the network uses it (Q13).
+    /// </summary>
+    internal static GrayImage Denoise(DenoisingNet net, GrayImage input, int tileCore, CancellationToken cancellation,
+        WorkspacePool pool, float condition)
     {
         if (tileCore < 8) throw new ArgumentOutOfRangeException(nameof(tileCore));
         int align = net.Config.TileAlignment;
@@ -84,7 +92,9 @@ public static class TiledInference
                 input.Pixels.AsSpan((wy0 + row) * w + wx0, ww).CopyTo(window.Slice(row * ww, ww));
 
             var denoised = denoisedBuffer.AsSpan(0, ww * wh);
-            net.Predict(window, wh, ww, denoised, workspace);
+            // A conditioned network gets the whole frame's condition in every tile, so tiles still agree with a
+            // whole-image pass (a condition measured per tile would differ from tile to tile).
+            net.Predict(window, wh, ww, denoised, workspace, condition);
 
             // Keep only the core. Each tile writes a disjoint region, so no locking is needed.
             for (int y = cy0; y < cy1; y++)

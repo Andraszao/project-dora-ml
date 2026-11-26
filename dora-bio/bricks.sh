@@ -24,7 +24,7 @@ export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_SKIP_FIRST_TIME_EXPE
 
 NAMES=(scaffold nn data io inference training cli godot-build godot-smoke ci-core ci-godot fmd-fetch fmd-loader fmd-eval
        n2v-diagnostic structured-mask vst calibration pool-upsample unet unet-tiling arch-eval
-       bench blocked-conv perf-budget q1-recipe tiff-stack-write q10-routing cli-batch)
+       bench blocked-conv perf-budget q1-recipe tiff-stack-write q10-routing cli-batch q13-conditioning)
 CHECKS=(
   "solution builds (warnings are errors, missing XML docs included); every test class belongs to exactly one brick"
   "ConvLayer/DenoisingNet/Adam/Simd: finite-difference gradient checks, optimizer behavior"
@@ -55,6 +55,7 @@ CHECKS=(
   "multi-page TIFF stacks round-trip in every sample type; Pillow (an independent reader) reads a written stack exactly"
   "quality pass Q10: router unit tests; the recorded verdict follows the pre-registered rule; with data + weights the blocks reproduce"
   "stacks and folders stream one frame at a time: pages decode exactly, no frame outlives the next; CLI denoises a stack and a folder; peak memory flat in stack length"
+  "quality pass Q13: FiLM gradients, untrained = plain bit for bit, exact tiling; the recorded verdict and the default follow the pre-registered rule; with data + weights the blocks reproduce"
 )
 LAST=$((${#NAMES[@]} - 1))
 LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dora-bricks.XXXXXX")"
@@ -337,6 +338,52 @@ print("stack pages equal the folder's files (Pillow)")
 PY
 )
 
+gate_29() {   # q13-conditioning (quality pass Q13, pre-registered in PATHWAY.md, commit c14066f, before any of its code)
+  test_gate 29-q13-conditioning || return 1
+  # Rule (seed 2026, test_mix all 48): raw >= A's raw - 0.1 (A = p4-unet-sup); mean over avg2..avg16 >= B's mean - 0.1
+  # (B = q1-candidate, the plain all-level U-Net, seed 2026); no level below B's - 0.2; and over seeds 2026-2028 the
+  # conditioned recipe's mean raw >= the plain recipe's + 0.2. All met: adopted. Else raw >= B's raw + 0.2 and < A - 0.1:
+  # improvement-recorded. Else: not-adopted.
+  local block blocks=(p4-unet-sup q1-candidate q13-cond-2026 q13-cond-2027 q13-cond-2028 q13-plain-2027 q13-plain-2028)
+  for block in "${blocks[@]}"; do
+    [[ -n "$(recorded_block "$block")" ]] || { echo ">> docs/RESULTS.md needs the $block block"; return 1; }
+  done
+  local expected recorded
+  expected="$( { echo "a raw $(recorded_block p4-unet-sup | awk '$1 == "all" { print $9 }')"
+                 recorded_block q1-candidate | levels_all | sed 's/^/b /'
+                 for block in "${blocks[@]:2}"; do recorded_block "$block" | levels_all | sed "s/^/${block#q13-} /"; done; } | awk '
+    { v[$1 "," $2] = $3 }
+    END {
+      split("avg2 avg4 avg8 avg16", L, " "); cm = 0; bm = 0; low = 1
+      for (i = 1; i <= 4; i++) {
+        c = v["cond-2026," L[i]]; b = v["b," L[i]]; cm += c / 4; bm += b / 4
+        if (c < b - 0.2 - 1e-9) low = 0
+      }
+      craw = v["cond-2026,raw"]
+      seeds = (v["cond-2026,raw"] + v["cond-2027,raw"] + v["cond-2028,raw"]) / 3 - (v["b,raw"] + v["plain-2027,raw"] + v["plain-2028,raw"]) / 3
+      met = craw >= v["a,raw"] - 0.1 - 1e-9 && cm >= bm - 0.1 - 1e-9 && low && seeds >= 0.2 - 1e-9
+      verdict = met ? "adopted" : (craw >= v["b,raw"] + 0.2 - 1e-9 && craw < v["a,raw"] - 0.1 - 1e-9 ? "improvement-recorded" : "not-adopted")
+      printf "%s raw %+.2f vs A, %+.2f vs B; lower levels %+.2f vs B; seed-mean raw gain over plain %+.2f\n", verdict, craw - v["a,raw"], craw - v["b,raw"], cm - bm, seeds
+    }')"
+  recorded="$(sed -n 's/.*<!-- q13-verdict: \([a-z-]*\) -->.*/\1/p' docs/RESULTS.md)"
+  [[ "${expected%% *}" == "$recorded" ]] || { echo ">> Q13's rule gives '${expected%% *}' ($expected), but RESULTS.md records '$recorded'"; return 1; }
+  echo ">> Q13: $expected; recorded verdict agrees"
+  # The shipped default follows the verdict: conditioning is opt-in unless Q13 was adopted.
+  local default_condition
+  default_condition="$(dotnet "$CLI_DLL" info --default-condition supervised)" || return 1
+  [[ ( "$recorded" == adopted && "$default_condition" == noise ) || ( "$recorded" != adopted && "$default_condition" == none ) ]] \
+    || { echo ">> supervised training's default --condition is '$default_condition', but Q13 was '$recorded'"; return 1; }
+  local seed name
+  for name in cond_s2026 cond_s2027 cond_s2028 plain_s2027 plain_s2028; do
+    [[ -f runs/q13/$name.bin ]] || { echo "verdict checked on the recorded results; reproduction skipped (needs FMD data and runs/q13 weights)"; return 77; }
+  done
+  [[ -f "$FMD/test_mix/.complete" ]] || { echo "verdict checked on the recorded results; reproduction skipped (needs FMD data)"; return 77; }
+  for name in cond_s2026 cond_s2027 cond_s2028 plain_s2027 plain_s2028; do
+    block="q13-${name/_s/-}"
+    reproduces "$block" fmd-eval --weights runs/q13/$name.bin --root "$FMD" --levels raw,avg2,avg4,avg8,avg16 || return 1
+  done
+}
+
 gate_21() {   # arch-eval
   test_gate 21-arch-eval || return 1
   # The rule was set before measuring (PATHWAY.md, P4): the U-Net becomes the default only if, at the same training
@@ -417,6 +464,8 @@ MUTATIONS=(
   '27|docs/RESULTS.md|<!-- q10-verdict: not-adopted -->|<!-- q10-verdict: adopted -->'
   '28|src/DoraBio.Core/BatchDenoising.cs|output.Append(result.Output);|output.Append(raw);'
   '28|src/DoraBio.Core/BatchDenoising.cs|                GC.Collect();|'
+  '29|src/DoraBio.Core/Nn/DenoisingNet.Film.cs|gradients[FilmW1 + i] += dHidden[i] * ws.Condition;|gradients[FilmW1 + i] += dHidden[i];'
+  '29|docs/RESULTS.md|<!-- q13-verdict: not-adopted -->|<!-- q13-verdict: adopted -->'
 )
 
 self_test() {

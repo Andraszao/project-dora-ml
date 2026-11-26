@@ -25,7 +25,7 @@ internal sealed class ValidationSet
     /// One fixed validation patch. The blind-spot mask is drawn once, so the Noise2Void loss is comparable
     /// from epoch to epoch.
     /// </summary>
-    private sealed record Patch(float[] Noisy, float[] MaskedInput, float[] Mask, float[]? Clean);
+    private sealed record Patch(float[] Noisy, float[] MaskedInput, float[] Mask, float[]? Clean, float Condition);
 
     /// <summary>True when every validation patch has ground truth, so PSNR, SSIM and progressive targets are available.</summary>
     public bool HasClean { get; }
@@ -70,7 +70,8 @@ internal sealed class ValidationSet
             var mask = new float[noisy.Length];
             // The same blind spot as in training, so the Noise2Void validation loss scores what training optimizes.
             BlindSpot.Apply(noisy, masked, mask, _size, config.MaskRatio, rng, footprint: image.Footprint);
-            _patches.Add(new Patch(noisy, masked, mask, clean));
+            // The whole frame's condition, as in training and inference (read only by conditioned networks).
+            _patches.Add(new Patch(noisy, masked, mask, clean, NoiseConditioning.Of(image.Noisy)));
         }
 
         PatchSources = sources;
@@ -109,7 +110,7 @@ internal sealed class ValidationSet
 
             if (_mode == TrainingMode.Noise2Void)
             {
-                net.Predict(p.MaskedInput, _size, _size, output, ws);
+                net.Predict(p.MaskedInput, _size, _size, output, ws, p.Condition);
                 double sse = 0, count = 0;
                 for (int j = 0; j < output.Length; j++)
                 {
@@ -123,7 +124,7 @@ internal sealed class ValidationSet
 
             if (p.Clean is not null)
             {
-                net.Predict(p.Noisy, _size, _size, output, ws);
+                net.Predict(p.Noisy, _size, _size, output, ws, p.Condition);
                 mses[i] = Metrics.Mse(output, p.Clean);
                 ssims[i] = Metrics.Ssim(new GrayImage(_size, _size, output), new GrayImage(_size, _size, p.Clean));
                 if (_mode == TrainingMode.Supervised) losses[i] = mses[i];
