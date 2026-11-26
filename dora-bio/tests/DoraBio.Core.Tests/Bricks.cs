@@ -38,6 +38,7 @@ internal static class Bricks
     public const string ExtData = "30-ext-data";                 // public paired datasets (field validation)
     public const string ExtBench = "31-q18-ext-bench";           // quality pass Q18: DORA vs CARE and Noise2Void
     public const string QuantFidelity = "32-quant-fidelity";     // proportionality, bias, invented/erased spots
+    public const string SelfSupervisedRecipe = "33-q12-n2v-recipe"; // quality pass Q12: the Noise2Void recipe
 }
 
 [Trait(Bricks.Trait, Bricks.Scaffold)]
@@ -47,7 +48,7 @@ public class BrickWiringTests
         [Bricks.Scaffold, Bricks.Nn, Bricks.Data, Bricks.IO, Bricks.Inference, Bricks.Training, Bricks.Fmd, Bricks.FmdEval,
          Bricks.NoiseDiagnostic, Bricks.StructuredMask, Bricks.Vst, Bricks.Calibration,
          Bricks.PoolUpsample, Bricks.UNet, Bricks.UNetTiling, Bricks.ArchEval,
-         Bricks.Bench, Bricks.BlockedConv, Bricks.PerfBudget, Bricks.TiffStackWrite, Bricks.NoiseRouting, Bricks.CliBatch, Bricks.NoiseConditioning, Bricks.ExtData, Bricks.ExtBench, Bricks.QuantFidelity];
+         Bricks.Bench, Bricks.BlockedConv, Bricks.PerfBudget, Bricks.TiffStackWrite, Bricks.NoiseRouting, Bricks.CliBatch, Bricks.NoiseConditioning, Bricks.ExtData, Bricks.ExtBench, Bricks.QuantFidelity, Bricks.SelfSupervisedRecipe];
 
     /// <summary>An untagged test would silently run in no gate, so treat a missing or unknown brick as a build error.</summary>
     [Xunit.Fact]

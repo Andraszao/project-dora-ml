@@ -97,6 +97,21 @@ public static class ExtDatasets
         }).ToList();
     }
 
+    /// <summary>
+    /// The training pairs that a training run with <paramref name="seed"/> holds out for validation
+    /// (<see cref="DatasetSplit.Split"/> with <paramref name="fraction"/>). The split depends only on the set of groups
+    /// (one per image here) and the seed, so this reproduces it exactly without loading anything. Quality passes choose
+    /// settings on these images and touch the test split only once (quality pass Q12).
+    /// </summary>
+    public static List<FmdDataset.PlannedPair> ValidationPlan(string root, ExtDataset dataset, int seed, double fraction = 0.2)
+    {
+        var pairs = PlanPairs(root, dataset, ExtSplit.Train);
+        var placeholder = new GrayImage(1, 1);
+        var (_, held) = DatasetSplit.Split(pairs.Select(p => new ImagePair(placeholder, null, p.GroupId, p.Name)).ToList(), fraction, seed);
+        var heldOut = held.Select(p => p.GroupId).ToHashSet();
+        return pairs.Where(p => heldOut.Contains(p.GroupId)).ToList();
+    }
+
     /// <summary>Loads and normalizes a split's pairs (each by its noisy image's percentiles, as at inference).</summary>
     public static List<ImagePair> LoadPairs(string root, ExtDataset dataset, ExtSplit split) =>
         FmdDataset.Load(PlanPairs(root, dataset, split));

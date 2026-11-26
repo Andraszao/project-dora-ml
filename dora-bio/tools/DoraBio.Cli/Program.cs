@@ -26,6 +26,7 @@ public static class Program
                    [--arch dilated|unet] [--features 24 (dilated) / 16 (unet)] [--depth 2 (unet)]
                    [--condition none|noise]  (noise: tell the network each frame's noise level, FiLM; quality pass Q13)
                    [--init WEIGHTS.bin]   (fine-tune existing weights instead of starting fresh)
+                   [--mask-ratio 0.02]    (Noise2Void: fraction of pixels hidden per patch)
                    [--describe TEXT]      (what the data is; stored in the weights' provenance)
                    [--augment dihedral|v1] (v1 = v1's ±15° rotation + 0.85-1.15 scale, nearest neighbour; for comparison)
                    [--struct off|auto|always] [--footprint diamond-2]  (Noise2Void: structured blind spots for
@@ -56,6 +57,7 @@ public static class Program
                    What scientists measure, vs the high-SNR reference: are regional intensities still proportional
                    (slope 1.00) and how far off (ratio error), and are spots kept (found) and not invented (real)?
           ext-eval --dataset NAME (--weights WEIGHTS.bin | --predictions DIR [--label TEXT]) [--root data/ext]
+                   [--split test|validation --seed S]  (validation: the training images a run with seed S held out)
                    Score a model, or another tool's outputs (DIR/<test file name>), on an external set's test images with
                    CARE's protocol: reference normalized by its 0.1-99.9 percentiles, outputs matched by least squares.
           fmd-check --root data/fmd
@@ -193,6 +195,7 @@ public static class Program
                 var a => throw new ArgumentException($"Unknown --augment '{a}' (use dihedral or v1)."),
             },
             PatchSize = o.Int("patch", 64),
+            MaskRatio = (float)o.Double("mask-ratio", 0.02),
             LearningRate = (float)o.Double("lr", 1e-3),
             Seed = o.Int("seed", 1234),
         };
@@ -656,8 +659,9 @@ public static class Program
         }
         else throw new ArgumentException("ext-eval needs --weights or --predictions.");
 
-        var scores = ExtBenchmark.Evaluate(root, dataset, method);
-        Console.WriteLine($"{dataset.Name} test, {scores.Count} images: PSNR (dB) / SSIM vs the high-SNR reference, CARE's normalization");
+        var (plan, scope) = ExtPlan(o, root, dataset);
+        var scores = ExtBenchmark.Evaluate(plan, method);
+        Console.WriteLine($"{dataset.Name} {scope}, {scores.Count} images: PSNR (dB) / SSIM vs the high-SNR reference, CARE's normalization");
         Console.WriteLine($"method: {label}");
         Console.WriteLine($"{"image",-12} {"noisy",-15} {"bilateral",-15} {"method",-15}");
         foreach (var s in scores)
@@ -667,6 +671,18 @@ public static class Program
                           $"{scores.Average(s => s.MethodPsnr),6:0.00} / {scores.Average(s => s.MethodSsim):0.000}");
         return 0;
     }
+
+    /// <summary>
+    /// The pairs <c>ext-eval</c> and <c>fidelity</c> score: the test split by default, or with <c>--split validation
+    /// --seed S</c> the training images a run with that seed held out (quality passes choose settings there).
+    /// </summary>
+    private static (List<FmdDataset.PlannedPair> Plan, string Scope) ExtPlan(Options o, string root, ExtDataset dataset) =>
+        o.String("split", "test") switch
+        {
+            "test" => (ExtDatasets.PlanPairs(root, dataset, ExtSplit.Test), "test"),
+            "validation" => (ExtDatasets.ValidationPlan(root, dataset, o.Int("seed", 2026)), $"validation (seed {o.Int("seed", 2026)})"),
+            var other => throw new ArgumentException($"Unknown --split '{other}' (use test or validation)."),
+        };
 
     /// <summary>
     /// <c>fidelity</c>: the measurements of brick 32 (<see cref="Fidelity"/>) for the noisy input, the bilateral filter and a
@@ -686,9 +702,9 @@ public static class Program
         else
         {
             var dataset = ExtDatasets.Get(o.Required("dataset"));
-            plan = ExtDatasets.PlanPairs(o.String("root", "data/ext"), dataset, ExtSplit.Test)
-                .Select(p => (Path.GetFileName(p.NoisyPath), p.NoisyPath, p.CleanPath)).ToList();
-            scope = $"{dataset.Name} test";
+            var (pairs, split) = ExtPlan(o, o.String("root", "data/ext"), dataset);
+            plan = pairs.Select(p => (Path.GetFileName(p.NoisyPath), p.NoisyPath, p.CleanPath)).ToList();
+            scope = $"{dataset.Name} {split}";
         }
 
         Func<string, GrayImage, GrayImage> method;

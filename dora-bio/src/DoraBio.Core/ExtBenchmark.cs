@@ -74,10 +74,14 @@ public static class ExtBenchmark
     /// <param name="dataset">A dataset with ground truth.</param>
     /// <param name="method">Given an image's file name and its noisy pixels (original units), returns the output in any
     /// units (the match removes scale and offset).</param>
-    public static List<ExtScore> Evaluate(string root, ExtDataset dataset, Func<string, GrayImage, GrayImage> method)
+    public static List<ExtScore> Evaluate(string root, ExtDataset dataset, Func<string, GrayImage, GrayImage> method) =>
+        Evaluate(ExtDatasets.PlanPairs(root, dataset, ExtSplit.Test), method);
+
+    /// <summary>The same protocol on any planned pairs, e.g. <see cref="ExtDatasets.ValidationPlan"/>.</summary>
+    public static List<ExtScore> Evaluate(IReadOnlyList<FmdDataset.PlannedPair> plan, Func<string, GrayImage, GrayImage> method)
     {
         var scores = new List<ExtScore>();
-        foreach (var p in ExtDatasets.PlanPairs(root, dataset, ExtSplit.Test))
+        foreach (var p in plan)
         {
             var noisy = ImageLoader.Load(p.NoisyPath);
             var reference = NormalizeReference(ImageLoader.Load(p.CleanPath));

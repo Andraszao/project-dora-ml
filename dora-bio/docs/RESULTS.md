@@ -492,6 +492,63 @@ same step budget as DORA's matching recipe, on the same 4-core CPU.
   one seed per method; the Q13 seed spread was about 0.3 dB. Both tools ran their CPU defaults with an equal step
   budget, not the longer GPU training their authors used, so either could score higher with more training.
 
+## Quality pass Q12: closing the self-supervised gap
+
+Brick 33, the first pass of the road to state of the art, pre-registered in
+[`PATHWAY.md`](../PATHWAY.md#q12-pre-registration-closing-the-self-supervised-gap-brick-33) (commit `1a16b2f`) before any
+of its code existed. Reproduce: `tools/experiments/q12_n2v.sh`. **Question:** can DORA's Noise2Void close Q18's gap
+(26.28 against CAREamics' 27.00 dB) and brick 32's contrast compression (MreB slope 0.75) with a bigger network, other
+masking or a longer budget? **Selection** happened on validation images: the fifth of each training split a seed-2026
+run holds out, scored with CARE's protocol. The pre-registered rule picked from the scores below automatically
+(`tools/experiments/q12_n2v.sh`), and the test splits were scored once, at the end.
+
+<!-- q12-selection -->
+```text
+step 1: network (mean validation PSNR over 3 sets, MreB validation slope)
+dilated 26.777 0.74
+unet16 27.177 0.92
+unet32 27.070 0.91
+chosen network: unet16
+step 2: masking
+unet16 27.177 0.92
+unet16_m02 26.453 0.87
+chosen masking: 2%
+step 3: budget (1 of 3 winning runs ended at the 30-epoch cap)
+budget step skipped (fewer than two runs at the cap)
+final recipe: unet16
+final arguments: --arch unet --features 16 --depth 2 --epochs 30
+```
+<!-- /q12-selection -->
+
+| Test (PSNR dB; MreB slope / ratio error / spots real) | MreB | Nucleoid | CARE 2D | Mean | MreB fidelity |
+|---|---|---|---|---|---|
+| Today's default: dilated, 26k parameters (Q18) | 25.83 | 33.71 | 19.30 | 26.28 | 0.75 / 8.9% / 34% |
+| **Q12's recipe: U-Net 16 → 64, 118k parameters, 2% masking, 30 × 50 steps** | **26.65** | **34.14** | 19.30 | **26.697** | **0.93 / 6.6%** / 41% |
+| CAREamics Noise2Void (Q18) | 27.01 | 34.70 | 19.29 | 27.00 | 0.86 / 7.4% / 56% |
+| **FMD guard** (test_mix raw; needs ≥ 31.48) | | | | | U-Net **31.21** (the default: 31.68) |
+
+- **Not adopted, and the FMD guard decides it.** On FMD's raw frames the chosen U-Net stops early (best epoch 4 of 10)
+  and scores 31.21 dB, 0.47 below the default. That is the same run as P4's U-Net Noise2Void, the problem Q2 already
+  recorded. The bar itself is missed by 0.003 dB (26.697 against 26.70), which is inside run-to-run noise but still a
+  miss. The "improved anyway" branch would have applied (+0.42 dB, slope up), but it too requires the guard. **By the
+  rule, nothing ships:** `train --mode n2v` keeps the dilated network. <!-- q12-verdict: not-adopted -->
+- **What the U-Net fixes, on the public sets.**
+  - **The gap:** it closes about 60% of it (+0.42 of the 0.72 dB).
+  - **Fidelity:** the slope goes from 0.75 to 0.93 (CAREamics: 0.86), and the ratio error from 8.9% to 6.6%, now lower
+    than the raw frame's 7.1% and CAREamics' 7.4%.
+  - **Spots:** 41% of its spots are real, up from 34% but short of CAREamics' 56%.
+  - So intensities measured on it are trustworthy where the default's weren't.
+- **What didn't help.**
+  - **The 0.47M U-Net**, CAREamics' size, was slightly worse on validation (27.07 against 27.18). It stopped early
+    (best epoch 9) on two of the three sets.
+  - **CAREamics' 0.2% masking** was 0.7 dB worse in DORA's setup (26.45 against 27.18).
+  - **The budget step** was skipped: only one of the three winning runs reached the 30-epoch cap.
+- **What blocks the U-Net is its early stop under Noise2Void.** It stopped at epoch 9 on nucleoid, and at epoch 4 on
+  FMD, where it then loses to the small network. Noise2Void validates on masked pixels against noisy values, a loss
+  whose floor is the noise itself. Small real gains hide under it, so early stopping fires long before the denoising
+  stops improving (P4, Q2, Q5). That is the next pass's target: how a U-Net trained by Noise2Void should decide when to
+  stop.
+
 ## Fidelity: what scientists measure (brick 32)
 
 PSNR rewards being close on average. A biologist measures specific things: the brightness of a region relative to
@@ -571,7 +628,7 @@ the high-SNR reference (`Fidelity.cs`; reproduce: `tools/experiments/fidelity.sh
 - **Weights trained on FMD are not published** (CC BY-SA terms for derived models are a separate decision). The
   bundled model stays the synthetic one.
 
-## Reproducibility checks (gates 13, 15, 21, 25, 27, 29, 31 and 32)
+## Reproducibility checks (gates 13, 15, 21, 25, 27, 29, 31, 32 and 33)
 
 The blocks marked `fmd-noise` above and the blocks below are verbatim program output. `bricks.sh` gate 13 re-runs
 the first two whenever the data is present and requires an exact match. The block below is
@@ -1428,3 +1485,67 @@ method       0.95     22.3%        1.5%      46.0%
 over 7297 foreground tiles and 2584 reference spots
 ```
 <!-- /fidelity-zerocost-care2d-careamics-care -->
+
+Quality pass Q12 (gate 33 checks the verdict and the selection log against the pre-registered rule, and re-runs these
+when `data/ext`, `data/fmd` and `runs/q12/` are present). Test splits: `ext-eval --dataset <set> --weights
+runs/q12/unet16_<set>.bin`; MreB fidelity: `fidelity --dataset deepbacs-mreb --weights runs/q12/unet16_deepbacs-mreb.bin`;
+FMD guard: `fmd-eval --weights runs/q12/fmd_guard.bin --root data/fmd --levels raw`.
+
+<!-- q12-test-mreb -->
+```text
+deepbacs-mreb test, 5 images: PSNR (dB) / SSIM vs the high-SNR reference, CARE's normalization
+method: Noise2Void on deepbacs-mreb training split, noisy images only: Q12 candidate unet16 (--arch unet --features 16 --depth 2); best epoch 22; val loss 0.007226
+image        noisy           bilateral       method         
+m31.tif       21.19 / 0.328   21.30 / 0.346   26.22 / 0.754
+m32.tif       20.48 / 0.282   20.72 / 0.319   25.41 / 0.744
+m33.tif       22.40 / 0.423   22.41 / 0.424   27.39 / 0.767
+m34.tif       21.81 / 0.359   21.84 / 0.365   26.68 / 0.758
+m35.tif       22.48 / 0.449   22.48 / 0.449   27.54 / 0.753
+mean          21.67 / 0.368   21.75 / 0.381   26.65 / 0.755
+```
+<!-- /q12-test-mreb -->
+
+<!-- q12-test-nucleoid -->
+```text
+deepbacs-nucleoid test, 2 images: PSNR (dB) / SSIM vs the high-SNR reference, CARE's normalization
+method: Noise2Void on deepbacs-nucleoid training split, noisy images only: Q12 candidate unet16 (--arch unet --features 16 --depth 2); best epoch 9; val loss 0.001382
+image        noisy           bilateral       method         
+m29.tif       26.76 / 0.762   26.95 / 0.782   33.55 / 0.962
+m30.tif       28.01 / 0.854   28.11 / 0.865   34.73 / 0.974
+mean          27.39 / 0.808   27.53 / 0.823   34.14 / 0.968
+```
+<!-- /q12-test-nucleoid -->
+
+<!-- q12-test-care2d -->
+```text
+zerocost-care2d test, 2 images: PSNR (dB) / SSIM vs the high-SNR reference, CARE's normalization
+method: Noise2Void on zerocost-care2d training split, noisy images only: Q12 candidate unet16 (--arch unet --features 16 --depth 2); best epoch 30; val loss 0.00032
+image        noisy           bilateral       method         
+23.tif        18.76 / 0.457   18.78 / 0.465   18.77 / 0.464
+24.tif        19.80 / 0.465   19.83 / 0.473   19.83 / 0.472
+mean          19.28 / 0.461   19.30 / 0.469   19.30 / 0.468
+```
+<!-- /q12-test-care2d -->
+
+<!-- q12-fidelity-mreb -->
+```text
+deepbacs-mreb test, 5 images: fidelity vs the high-SNR reference (1.00 / 0% / 100% / 100% is perfect)
+method: Noise2Void on deepbacs-mreb training split, noisy images only: Q12 candidate unet16 (--arch unet --features 16 --depth 2); best epoch 22; val loss 0.007226
+            slope ratio err spots found spots real
+noisy        1.00      7.1%       55.2%       7.1%
+bilateral    1.01      7.3%       54.6%       8.1%
+method       0.93      6.6%       43.8%      41.2%
+over 711 foreground tiles and 2534 reference spots
+```
+<!-- /q12-fidelity-mreb -->
+
+<!-- q12-fmd-guard -->
+```text
+test_mix level raw: mean PSNR (dB) / SSIM vs ground truth, 8-bit scale
+modality     n  noisy           bilateral       DORA           
+Confocal    20   29.13 / 0.701   31.74 / 0.872   32.99 / 0.859
+TwoPhoton   16   26.32 / 0.473   31.07 / 0.816   31.40 / 0.767
+WideField   12   25.23 / 0.374   26.53 / 0.466   27.98 / 0.571
+all         48   27.22 / 0.543   30.22 / 0.752   31.21 / 0.756
+```
+<!-- /q12-fmd-guard -->

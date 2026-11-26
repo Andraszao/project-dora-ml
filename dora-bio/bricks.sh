@@ -24,7 +24,7 @@ export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_SKIP_FIRST_TIME_EXPE
 
 NAMES=(scaffold nn data io inference training cli godot-build godot-smoke ci-core ci-godot fmd-fetch fmd-loader fmd-eval
        n2v-diagnostic structured-mask vst calibration pool-upsample unet unet-tiling arch-eval
-       bench blocked-conv perf-budget q1-recipe tiff-stack-write q10-routing cli-batch q13-conditioning ext-data q18-ext-bench quant-fidelity)
+       bench blocked-conv perf-budget q1-recipe tiff-stack-write q10-routing cli-batch q13-conditioning ext-data q18-ext-bench quant-fidelity q12-n2v-recipe)
 CHECKS=(
   "solution builds (warnings are errors, missing XML docs included); every test class belongs to exactly one brick"
   "ConvLayer/DenoisingNet/Adam/Simd: finite-difference gradient checks, optimizer behavior"
@@ -59,6 +59,7 @@ CHECKS=(
   "external datasets: fetch_ext.sh pins every archive (record, size, sha256); pairing by name; with data: ext-check consistent"
   "quality pass Q18: CARE's scoring protocol; the recorded verdict follows the pre-registered rule; with data + runs/q18 the blocks reproduce"
   "fidelity (proportionality, ratio error, spots found/real) exact on synthetic ground truth; with data + weights the recorded blocks reproduce"
+  "quality pass Q12: validation plan = the trainer's split; the selection log and the verdict follow the pre-registered rule; with data + runs/q12 the blocks reproduce"
 )
 LAST=$((${#NAMES[@]} - 1))
 LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dora-bricks.XXXXXX")"
@@ -470,6 +471,58 @@ gate_32() {   # quant-fidelity
   [[ $skipped -eq 0 ]] || { echo "unit tests passed; $skipped of 18 fidelity blocks not re-run (their data or weights are missing)"; return 77; }
 }
 
+gate_33() {   # q12-n2v-recipe (quality pass Q12, pre-registered in PATHWAY.md, commit 1a16b2f, before any of its code)
+  test_gate 33-q12-n2v-recipe || return 1
+  local b
+  for b in q12-selection q12-test-mreb q12-test-nucleoid q12-test-care2d q12-fidelity-mreb q12-fmd-guard q18-dora-n2v-mreb \
+           q18-dora-n2v-nucleoid q18-dora-n2v-care2d fidelity-deepbacs-mreb-dora-n2v; do
+    [[ -n "$(recorded_block "$b")" ]] || { echo ">> docs/RESULTS.md needs the $b block"; return 1; }
+  done
+  # The selection log must follow the rule from its own numbers: per step, the highest mean validation PSNR among
+  # candidates with MreB slope >= 0.85 (else among all), ties within 0.05 dB to the earlier-listed (cheaper) one.
+  local check
+  check="$(recorded_block q12-selection | awk '
+    function decide(   i, best, pass) { best = 0
+      for (pass = 1; pass <= 2 && best == 0; pass++) for (i = 1; i <= n; i++)
+        if ((pass == 2 || s[i] >= 0.85) && (best == 0 || p[i] > p[best] + 0.05)) best = i
+      return name[best] }
+    /^step/ { n = 0; next }
+    /^chosen network:/ { if ($3 != decide()) bad = bad " step1:" $3 "!=" decide(); next }
+    /^chosen masking:/ { w = decide(); if (($3 == "2%") != (w !~ /_m02$/)) bad = bad " step2"; next }
+    NF == 3 && $2 ~ /^[0-9.]+$/ { n++; name[n] = $1; p[n] = $2; s[n] = $3 }
+    END { print bad == "" ? "ok" : bad }')"
+  [[ "$check" == ok ]] || { echo ">> the recorded selection doesn't follow the pre-registered rule:$check"; return 1; }
+  # Rule: test mean >= 26.70 and MreB slope >= 0.90 and FMD guard >= 31.48: adopted. Else test mean >= today's default + 0.3,
+  # slope not lower than the default's, guard holds: improved. Else not-adopted.
+  local expected recorded
+  expected="$( { for b in mreb nucleoid care2d; do recorded_block "q12-test-$b" | awk '$1 == "mean" { print "new", $8 }'
+                   recorded_block "q18-dora-n2v-$b" | awk '$1 == "mean" { print "old", $8 }'; done
+                 recorded_block q12-fidelity-mreb | awk '$1 == "method" { print "slope", $2 }'
+                 recorded_block fidelity-deepbacs-mreb-dora-n2v | awk '$1 == "method" { print "oldslope", $2 }'
+                 recorded_block q12-fmd-guard | awk '$1 == "all" { print "guard", $9 }'; } | awk '
+    $1 == "new" { nm += $2 / 3 } $1 == "old" { om += $2 / 3 } $1 == "slope" { sl = $2 } $1 == "oldslope" { osl = $2 } $1 == "guard" { g = $2 }
+    END {
+      guard = g >= 31.48 - 1e-9
+      v = (nm >= 26.70 - 1e-9 && sl >= 0.90 - 1e-9 && guard) ? "adopted" : ((nm >= om + 0.3 - 1e-9 && sl >= osl - 1e-9 && guard) ? "improved" : "not-adopted")
+      printf "%s test mean %.3f (default %.3f), MreB slope %.2f, FMD guard %.2f\n", v, nm, om, sl, g
+    }')"
+  recorded="$(sed -n 's/.*<!-- q12-verdict: \([a-z-]*\) -->.*/\1/p' docs/RESULTS.md)"
+  [[ "${expected%% *}" == "$recorded" ]] || { echo ">> Q12's rule gives '${expected%% *}' ($expected), but RESULTS.md records '$recorded'"; return 1; }
+  echo ">> Q12: $expected; recorded verdict agrees"
+  local d
+  for d in deepbacs-mreb deepbacs-nucleoid zerocost-care2d; do
+    [[ -f "$EXT/$d/.complete" && -f "runs/q12/unet16_$d.bin" ]] || { echo "verdict checked; reproduction skipped (needs data/ext and runs/q12)"; return 77; }
+  done
+  [[ -f "$FMD/test_mix/.complete" && -f runs/q12/fmd_guard.bin ]] || { echo "verdict checked; reproduction skipped (needs data/fmd and runs/q12)"; return 77; }
+  dotnet build tools/DoraBio.Cli -c Release >/dev/null || return 1
+  local -A short=([deepbacs-mreb]=mreb [deepbacs-nucleoid]=nucleoid [zerocost-care2d]=care2d)
+  for d in deepbacs-mreb deepbacs-nucleoid zerocost-care2d; do
+    reproduces "q12-test-${short[$d]}" ext-eval --dataset "$d" --root "$EXT" --weights "runs/q12/unet16_$d.bin" || return 1
+  done
+  reproduces q12-fidelity-mreb fidelity --dataset deepbacs-mreb --root "$EXT" --weights runs/q12/unet16_deepbacs-mreb.bin || return 1
+  reproduces q12-fmd-guard fmd-eval --weights runs/q12/fmd_guard.bin --root "$FMD" --levels raw || return 1
+}
+
 gate_21() {   # arch-eval
   test_gate 21-arch-eval || return 1
   # The rule was set before measuring (PATHWAY.md, P4): the U-Net becomes the default only if, at the same training
@@ -556,6 +609,8 @@ MUTATIONS=(
   '31|src/DoraBio.Core/ExtBenchmark.cs|double a = var > 0 ? cov / var : 0, b = mr - a * mx;|double a = 1, b = mr - a * mx;'
   '31|docs/RESULTS.md|<!-- q18-verdict: not-competitive -->|<!-- q18-verdict: competitive -->'
   '32|src/DoraBio.Core/Fidelity.cs|double logGain = mo - mr;|double logGain = 0;'
+  '33|src/DoraBio.Core/Data/ExtDatasets.cs|public static List<FmdDataset.PlannedPair> ValidationPlan(string root, ExtDataset dataset, int seed, double fraction = 0.2)|public static List<FmdDataset.PlannedPair> ValidationPlan(string root, ExtDataset dataset, int seed, double fraction = 0.25)'
+  '33|docs/RESULTS.md|<!-- q12-verdict: not-adopted -->|<!-- q12-verdict: adopted -->'
 )
 
 self_test() {

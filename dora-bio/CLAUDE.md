@@ -57,7 +57,9 @@ P1 (bricks 9–10, CI), P2 (bricks 11–13, real FMD data), P3 (bricks 14–17, 
 U-Net) and P5 (bricks 22–24, performance) are done. **The current phase is P6 (stacks, time-lapse and batch)**:
 bricks 25–32 are done (30–32 opened the field-validation track, FV: DORA matches CARE supervised, trails
 CAREamics' Noise2Void by about 1 dB and distorts intensities more). From brick 33 on, work follows the **road to state
-of the art** in `PATHWAY.md` (stages 1–5); next is quality pass Q12 (brick 33). Owner decisions there: GPU training is
+of the art** in `PATHWAY.md` (stages 1–5). Brick 33 (Q12) found the U-Net the better Noise2Void network on the
+public sets (and faithful: slope 0.93) but not adopted, because it stops too early on FMD; next are 34 `ext-data-2` and
+35 (Q2: when a Noise2Void U-Net should stop). Owner decisions there: GPU training is
 an optional offline step (inference stays pure C# on the CPU), and the shipped model is trained only on synthetic and
 CC BY / CC0 data, with FMD kept for evaluation.
 Pick up the next unfinished brick of the current phase, follow the phase protocol there, and update its status table when a phase closes. Read `docs/RESULTS.md` before
@@ -103,6 +105,7 @@ before anything is built on top.** `./bricks.sh` runs the gates in order and sto
 | 30 | ext-data (field validation) | `tools/fetch_ext.sh`, `tools/extract_zip.py`, `Data/ExtDatasets.cs`, CLI `ext-check` | `Brick=30-ext-data` (pairs match by name, never by position); every archive pinned (record, size, SHA-256); with data: every `.complete` matches its pin and `ext-check` finds the published counts, partners of equal size, and files that decode |
 | 31 | q18-ext-bench (quality pass, field validation) | `ExtBenchmark.cs` (CARE's scoring protocol), `ExtDatasets.LoadTraining`, CLI `train --ext`, `ext-eval`, `tools/experiments/q18_ext.sh`, `ext_careamics.py`, `requirements-careamics.txt` | `Brick=31-q18-ext-bench`: the least-squares match removes scale and offset exactly, scores don't depend on brightness, each image of a pair normalized by its own percentiles; Q18's recorded verdict follows its pre-registered rule; with data + runs/q18 the twelve blocks reproduce |
 | 32 | quant-fidelity (field validation) | `Fidelity.cs`, CLI `fidelity`, `tools/experiments/fidelity.sh` | `Brick=32-quant-fidelity`: on synthetic ground truth a perfect output scores perfectly at any brightness, a square root and a square move the slope down and up, invented and erased spots are counted exactly; with data + weights the 18 recorded blocks reproduce |
+| 33 | q12-n2v-recipe (quality pass, SOTA stage 1) | `ExtDatasets.ValidationPlan`, CLI `ext-eval`/`fidelity --split validation`, `train --mask-ratio`, `tools/experiments/q12_n2v.sh` | `Brick=33-q12-n2v-recipe`: the validation plan is exactly the trainer's split; the recorded selection log and Q12's verdict follow the pre-registered rule; with data + runs/q12 the blocks reproduce |
 
 Gates 11–15 and 21 need the dataset (the reproductions in gates 15 and 21 also need the weights from `tools/experiments/`) (`tools/fetch_fmd.sh`, about 9 GB into the gitignored `data/fmd/`). Without it, their
 data-dependent part reports SKIPPED (exit code 77) while the pins, unit tests and RESULTS.md checks still run. CI has
