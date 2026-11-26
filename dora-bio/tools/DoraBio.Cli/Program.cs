@@ -51,6 +51,11 @@ public static class Program
                    Timings: denoise a frame and one training step, for both architectures (see PerformanceBench).
           diagnose --in IMAGE
                    Does the image's noise look independent between pixels, as Noise2Void assumes? (no ground truth needed)
+          stack-check [--root data/ext] [--dataset NAME]
+                   Check every downloaded stack dataset (3D, time-lapse, multichannel, raw SIM) against its published
+                   counts and declared axes, and that each clean partner matches its noisy file. Exit 1 on any disagreement.
+          stack-info --in FILE.tif|FILE.mrc [--axes TZCYX]
+                   What a stack holds: format (TIFF, BigTIFF, MRC), axes, shape and plane size, from its metadata.
           ext-check [--root data/ext]
                    Verify the public paired datasets from tools/fetch_ext.sh: counts, pairing, decoding, brightness.
           fidelity (--dataset NAME [--root data/ext] | --fmd data/fmd [--level raw]) (--weights W.bin | --predictions DIR [--label TEXT])
@@ -105,6 +110,8 @@ public static class Program
                 "info" => Info(options),
                 "fmd-check" => FmdCheck(options),
                 "ext-check" => ExtCheck(options),
+                "stack-check" => StackCheck(options),
+                "stack-info" => StackInfo(options),
                 "ext-eval" => ExtEval(options),
                 "fidelity" => FidelityCommand(options),
                 "fmd-eval" => FmdEval(options),
@@ -811,6 +818,89 @@ public static class Program
         if (problems > 0) { Console.WriteLine($"✗ {problems} problem(s)"); return 1; }
         Console.WriteLine(missing == 0 ? $"✓ all {ExtDatasets.All.Count} datasets present and consistent"
                                        : $"✓ the {ExtDatasets.All.Count - missing} present datasets are consistent; {missing} not downloaded");
+        return 0;
+    }
+
+    /// <summary>
+    /// <c>stack-check</c>: for every stack dataset that is downloaded, opens every file's header and checks it against
+    /// the published counts and declared axes (<see cref="ExtStacks"/>), checks each clean partner has the same layout,
+    /// and decodes the first and last plane of the first file. Exit 1 on any disagreement; datasets not downloaded are
+    /// listed, not failed.
+    /// </summary>
+    private static int StackCheck(Options o)
+    {
+        string root = o.String("root", "data/ext");
+        string? only = o.StringOrNull("dataset");
+        var datasets = only is null ? ExtStacks.All : [ExtStacks.Get(only)];
+        int problems = 0, missing = 0;
+        Console.WriteLine($"stack datasets in {root}");
+        Console.WriteLine($"{"name",-26} {"files",11} {"planes",15}  {"axes",-5} {"plane size",-12} {"format",-8} first plane (min / mean / max)");
+        foreach (var d in datasets)
+        {
+            if (!ExtStacks.IsPresent(root, d))
+            {
+                Console.WriteLine($"{d.Name,-26} not downloaded (tools/fetch_ext.sh {d.Name})");
+                missing++;
+                continue;
+            }
+            try
+            {
+                var summaries = ExtStacks.Inspect(root, d);
+                var first = ExtStacks.Plan(root, d)[0];
+                for (int g = 0; g < d.Groups.Count; g++)
+                {
+                    var (group, sum) = (d.Groups[g], summaries[g]);
+                    string stats = "";
+                    if (g == 0)
+                    {
+                        using var stack = ImageStack.Open(first.Noisy, group.Axes);
+                        var plane = stack.ReadPlane(0);
+                        stack.ReadPlane(stack.PlaneCount - 1);
+                        if (first.Clean is not null)
+                        {
+                            using var clean = ImageStack.Open(first.Clean, group.Axes);
+                            clean.ReadPlane(0);
+                            clean.ReadPlane(clean.PlaneCount - 1);
+                        }
+                        stats = $"{plane.Pixels.Min():0.##} / {plane.Pixels.Average(v => (double)v):0.##} / {plane.Pixels.Max():0.##}";
+                    }
+                    string planes = group.Planes is long p ? $"{sum.Planes}/{p}" : $"{sum.Planes}";
+                    string label = d.Groups.Count == 1 ? d.Name : $"{d.Name}[{g}]";
+                    Console.WriteLine($"{label,-26} {$"{sum.Files}/{group.Files}",11} {planes,15}  {group.Axes,-5} {string.Join(",", sum.PlaneSizes),-12} " +
+                                      $"{string.Join(",", sum.Formats),-8} {stats}");
+                    if (sum.Files != group.Files) { Console.WriteLine($"  ✗ {label}: {sum.Files} files, expected {group.Files}"); problems++; }
+                    if (group.Planes is long expected && sum.Planes != expected)
+                    {
+                        Console.WriteLine($"  ✗ {label}: {sum.Planes} planes, expected {expected}");
+                        problems++;
+                    }
+                }
+            }
+            catch (Exception e) when (e is InvalidDataException or NotSupportedException or IOException)
+            {
+                Console.WriteLine($"  ✗ {d.Name}: {e.Message}");
+                problems++;
+            }
+        }
+        if (problems > 0) { Console.WriteLine($"✗ {problems} problem(s)"); return 1; }
+        int present = datasets.Count - missing;
+        Console.WriteLine(missing == 0 ? $"✓ all {datasets.Count} stack datasets present and consistent"
+                                       : $"✓ the {present} present stack dataset(s) are consistent; {missing} not downloaded");
+        return 0;
+    }
+
+    /// <summary>
+    /// <c>stack-info</c>: what a TIFF or MRC stack holds, from its header and metadata: format, axes, shape, plane size
+    /// and where the shape came from, plus the first plane's range. <c>--axes</c> checks a declaration against the file.
+    /// </summary>
+    private static int StackInfo(Options o)
+    {
+        string path = o.Required("in");
+        using var stack = ImageStack.Open(path, o.StringOrNull("axes"));
+        var plane = stack.ReadPlane(0);
+        Console.WriteLine($"{Path.GetFileName(path)}: {stack.Format}, {stack.Layout.FullAxes}, {stack.Layout} " +
+                          $"({stack.PlaneCount} planes of {stack.Width}×{stack.Height}; shape from {stack.Layout.Source})");
+        Console.WriteLine($"first plane: min {plane.Pixels.Min():0.###}, mean {plane.Pixels.Average(v => (double)v):0.###}, max {plane.Pixels.Max():0.###}");
         return 0;
     }
 

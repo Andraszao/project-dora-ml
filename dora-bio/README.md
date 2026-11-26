@@ -17,9 +17,9 @@ All numbers come from this repo, run on a 4-core cloud VM with no GPU.
 
 | Check | Result |
 |---|---|
-| Core unit tests (`dotnet test`) | 219 passing in ~5 s, including finite-difference gradient checks for both architectures (mutation-tested) |
-| Brick gates (`./bricks.sh`) | all 34 green (gates 11–15, 21, 25, 27, 29 and 30–33 with the FMD data and experiment weights present); documentation of every public member is enforced by the build |
-| Gates can fail (`./bricks.sh --self-test`) | one planted bug per gate 0–7 and 11–33 (two for gates 0, 28, 29, 31 and 33), all 36 caught (after a clean control copy passes) |
+| Core unit tests (`dotnet test`) | 247 passing in ~5 s, including finite-difference gradient checks for both architectures (mutation-tested) |
+| Brick gates (`./bricks.sh`) | all 35 green (gates 11–15, 21, 25, 27, 29 and 30–34 with the FMD data, benchmark downloads and experiment weights present); documentation of every public member is enforced by the build |
+| Gates can fail (`./bricks.sh --self-test`) | one planted bug per gate 0–7 and 11–34 (two for gates 0, 28, 29, 31 and 33, three for 34), all 39 caught (after a clean control copy passes) |
 | CI (GitHub Actions) | all gates incl. headless Godot, on PRs into `main`, pushes to `main` and manual runs (docs-only changes skipped): [run #1](https://github.com/Andraszao/project-dora-ml/actions/runs/45617118232) green in 150 s of runner time, 0 billable minutes (public repo) |
 | Codecs vs. independent encoders | TIFF/PNG fixtures written by Pillow, ImageMagick and libtiff decode exactly |
 | Tiled vs. whole-image inference | identical (≤1e-5) for ragged tiles, tiles smaller than the receptive field, etc. |
@@ -39,6 +39,7 @@ All numbers come from this repo, run on a 4-core cloud VM with no GPU.
 | Self-supervised recipe (quality pass Q12; [details](docs/RESULTS.md#quality-pass-q12-closing-the-self-supervised-gap)) | chosen on validation images: a 118k-parameter U-Net trained by Noise2Void closes 60% of the gap to CAREamics on the public sets (26.70 vs 26.28 dB; CAREamics 27.00) and keeps intensity ratios (MreB slope 0.93 vs 0.75). Not the default yet: on FMD it stops training too early and loses 0.47 dB (`--arch unet --mode n2v` to try it) |
 | **Fidelity: what scientists measure** (`dora-bio fidelity`; [details](docs/RESULTS.md#fidelity-what-scientists-measure-brick-32)) | whether intensity ratios between regions survive denoising (slope 1.00) and whether spots are invented or erased. DORA's supervised U-Net keeps ratios on FMD (slope 1.02, 3.9% error) and 72% of its spots are real (raw frames: 14%); DORA's Noise2Void compresses contrast (slope 0.75 on MreB, against CAREamics' 0.86) |
 | Public paired datasets (`tools/fetch_ext.sh`, `dora-bio ext-check`) | DeepBacs (*E. coli* MreB, nucleoid; *B. subtilis*) and the ZeroCostDL4Mic CARE 2D example, pinned by SHA-256; DORA's reader opens all 194 TIFFs, including Micro-Manager OME-TIFF stacks |
+| Benchmark data (`tools/ext_manifest.json`, `dora-bio stack-check`) | 17 datasets in one manifest (2024/2025 AI4Life challenge sets, BioSR+, DeepCAD-RT, plus the above; 58 GB), each with its Zenodo size and MD5, a SHA-256 pinned from the first verified download, its licence and whether it may train a shipped model; [`ATTRIBUTIONS.md`](ATTRIBUTIONS.md) is generated from it. Stacks are read plane by plane by axis (time, z, channel, field of view): ImageJ and tifffile metadata, **BigTIFF** and **MRC**, checked against files written by tifffile and mrcfile. The downloaded sets match their published counts (see PATHWAY.md, brick 34) |
 | Stacks and folders (`dora-bio denoise --in STACK.tif` or a folder) | streamed one frame at a time: every page comes out bit for bit as the same frame denoised alone, and peak memory stays flat in the stack's length (512² frames: 182 MB for 3 pages, 265 MB for 160, at 0.22 s per page) |
 | Performance guard (gate 24) | budgets in `tools/ci/perf_budget.json`, plus a check that the blocked kernels stay ≥ 1.5× (denoise) and ≥ 1.25× (training step) faster than the reference kernels, timed interleaved in the same run so it holds on any machine |
 

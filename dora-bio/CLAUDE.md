@@ -22,8 +22,9 @@ src/DoraBio.Core/              ALL ML/IO code. net8.0. No Godot, no NuGet depend
   Data/      GrayImage, Normalization, Anscombe (variance stabilization), Dihedral, V1Augment, BlindSpot (+MaskFootprint),
              PatchSampler, ImagePair/DatasetSplit,
              DatasetLoader, FmdDataset (real FMD layouts + test-FOV exclusion), ExtDatasets (the public paired sets in data/ext),
-             SyntheticFluorescence
-  IO/        TiffCodec, TiffStack (page-by-page reader and writer), PngDecoder, ImageLoader, WeightsFile, Crc32
+             ExtStacks (the benchmark stack datasets: patterns, partners, published counts), SyntheticFluorescence
+  IO/        TiffCodec (classic TIFF + BigTIFF), TiffStack (page-by-page reader and writer), ImageStack (+StackLayout: planes
+             by axis from ImageJ/tifffile metadata), MrcReader, PngDecoder, ImageLoader, WeightsFile, Crc32
   Training/  Trainer (+BatchStepper), ValidationSet, ProgressiveTargets, TrainingJob, JourneyLog,
              OnlineAdapter, TrainerConfig
   Metrics.cs, TiledInference.cs, BilateralBaseline.cs, FmdBenchmark.cs (held-out FMD scores, noise correlation),
@@ -32,12 +33,17 @@ src/DoraBio.Core/              ALL ML/IO code. net8.0. No Godot, no NuGet depend
   NoiseCalibration.cs (variance = gain · intensity + intercept, from the noisy image alone),
   NoiseConditioning.cs (the per-frame condition a noise-conditioned network gets: ln(σ̂ / 0.05) of the whole frame),
   ExtBenchmark.cs (CARE's scoring protocol), Fidelity.cs (proportionality, ratio error, spots found and real)
-tests/DoraBio.Core.Tests/      xunit. Fixtures/ written by Pillow/ImageMagick (make_fixtures.py)
-tools/DoraBio.Cli/             `dora-bio` CLI: synth | train | denoise | eval | info | bench | diagnose | fmd-check | fmd-eval |
+tests/DoraBio.Core.Tests/      xunit. Fixtures/ written by Pillow/ImageMagick (make_fixtures.py) and tifffile/mrcfile (make_stack_fixtures.py)
+tools/DoraBio.Cli/             `dora-bio` CLI: synth | train | denoise | eval | info | bench | diagnose | ext-check | ext-eval | fidelity |
+                               stack-check | stack-info | fmd-check | fmd-eval |
                                fmd-noise | fmd-diagnose | fmd-route
 tools/fetch_fmd.sh             downloads + verifies the real FMD dataset into data/fmd/ (gitignored)
-tools/fetch_ext.sh             downloads + verifies the public paired datasets of the field-validation track into data/ext/
-                               (DeepBacs, ZeroCostDL4Mic CARE; CC BY 4.0, gitignored); tools/extract_zip.py checks every entry
+tools/ext_manifest.json        EVERY external dataset: Zenodo record, files, sizes, MD5s, SHA-256 pins, licence, use (train /
+                               eval-only), credit. The single source for fetching, gates 30/34 and ATTRIBUTIONS.md
+tools/ext_data.py              the manifest's checks (`check`, `verify-local`), fetcher (`fetch [--full]`), `attributions`
+tools/fetch_ext.sh             wrapper: `tools/fetch_ext.sh` = core tier (~0.9 GB), `--full` = everything (~58 GB), or names;
+                               into data/ext/ (gitignored); tools/extract_zip.py checks every zip entry
+ATTRIBUTIONS.md                GENERATED from the manifest (`python3 -I tools/ext_data.py attributions`); gate 34 checks it
 tools/experiments/p2_fmd.sh    every P2 training run and evaluation behind docs/RESULTS.md
 docs/RESULTS.md                measured results on real microscope data (FMD), with reproducible blocks
 godot/                         Godot 4.5 .NET project (open THIS folder in Godot)
@@ -58,7 +64,8 @@ U-Net) and P5 (bricks 22–24, performance) are done. **The current phase is P6 
 bricks 25–32 are done (30–32 opened the field-validation track, FV: DORA matches CARE supervised, trails
 CAREamics' Noise2Void by about 1 dB and distorts intensities more). From brick 33 on, work follows the **road to state
 of the art** in `PATHWAY.md` (stages 1–5). Brick 33 (Q12) found the U-Net the better Noise2Void network on the
-public sets (and faithful: slope 0.93) but not adopted, because it stops too early on FMD; next are 34 `ext-data-2` and
+public sets (and faithful: slope 0.93) but not adopted, because it stops too early on FMD. Brick 34 (`ext-data-2`) pinned
+the benchmark data (manifest + `ATTRIBUTIONS.md`) and added BigTIFF, MRC and per-axis stack reading; next is
 35 (Q2: when a Noise2Void U-Net should stop). Owner decisions there: GPU training is
 an optional offline step (inference stays pure C# on the CPU), and the shipped model is trained only on synthetic and
 CC BY / CC0 data, with FMD kept for evaluation.
@@ -106,6 +113,7 @@ before anything is built on top.** `./bricks.sh` runs the gates in order and sto
 | 31 | q18-ext-bench (quality pass, field validation) | `ExtBenchmark.cs` (CARE's scoring protocol), `ExtDatasets.LoadTraining`, CLI `train --ext`, `ext-eval`, `tools/experiments/q18_ext.sh`, `ext_careamics.py`, `requirements-careamics.txt` | `Brick=31-q18-ext-bench`: the least-squares match removes scale and offset exactly, scores don't depend on brightness, each image of a pair normalized by its own percentiles; Q18's recorded verdict follows its pre-registered rule; with data + runs/q18 the twelve blocks reproduce |
 | 32 | quant-fidelity (field validation) | `Fidelity.cs`, CLI `fidelity`, `tools/experiments/fidelity.sh` | `Brick=32-quant-fidelity`: on synthetic ground truth a perfect output scores perfectly at any brightness, a square root and a square move the slope down and up, invented and erased spots are counted exactly; with data + weights the 18 recorded blocks reproduce |
 | 33 | q12-n2v-recipe (quality pass, SOTA stage 1) | `ExtDatasets.ValidationPlan`, CLI `ext-eval`/`fidelity --split validation`, `train --mask-ratio`, `tools/experiments/q12_n2v.sh` | `Brick=33-q12-n2v-recipe`: the validation plan is exactly the trainer's split; the recorded selection log and Q12's verdict follow the pre-registered rule; with data + runs/q12 the blocks reproduce |
+| 34 | ext-data-2 (SOTA stage 1) | `tools/ext_manifest.json`, `tools/ext_data.py`, `ATTRIBUTIONS.md`, BigTIFF in `IO/TiffCodec.cs`, `IO/MrcReader.cs`, `IO/ImageStack.cs` (`StackLayout`), `Data/ExtStacks.cs`, CLI `stack-check`, `stack-info` | `ext_data.py check` (schema, pins, licence policy) and `attributions --check`; `Brick=34-ext-data-2`: ImageJ/tifffile/BigTIFF/MRC fixtures from independent writers read plane by plane at the right position; contradictory metadata is an error; pairs by pattern + substitution; registries = manifest; with data: every download matches its pins and `stack-check` finds the published counts |
 
 Gates 11–15 and 21 need the dataset (the reproductions in gates 15 and 21 also need the weights from `tools/experiments/`) (`tools/fetch_fmd.sh`, about 9 GB into the gitignored `data/fmd/`). Without it, their
 data-dependent part reports SKIPPED (exit code 77) while the pins, unit tests and RESULTS.md checks still run. CI has
@@ -148,7 +156,9 @@ cd dora-bio
 ./bricks.sh --only 3                                      # iterate on one brick
 ./bricks.sh --self-test                                   # plant one bug per gate; each must turn red (~1 min)
 tools/fetch_fmd.sh                                        # FMD dataset, ~9 GB, into data/fmd/ (needs drive.usercontent.google.com)
-tools/fetch_ext.sh                                        # public paired sets (DeepBacs, CARE 2D), ~740 MB, into data/ext/ (needs zenodo.org)
+tools/fetch_ext.sh                                        # core tier (DeepBacs, CARE 2D, W2S), ~0.9 GB, into data/ext/ (needs zenodo.org)
+tools/fetch_ext.sh mdc25-tribolium                        # one benchmark set by name; --full = all of them (~58 GB)
+dotnet tools/DoraBio.Cli/bin/Release/net8.0/dora-bio.dll stack-info --in STACK.tif   # axes, shape, format of any stack
 dotnet tools/DoraBio.Cli/bin/Release/net8.0/dora-bio.dll fmd-eval --weights W.bin --root data/fmd   # held-out test_mix
 tools/experiments/p2_fmd.sh                               # retrain + evaluate every P2 model (~45 min CPU)
 tools/experiments/p3_struct.sh                            # P3: plain vs structured blind spots (~50 min CPU)
@@ -202,6 +212,10 @@ cd godot && dotnet build && godot --headless --path . --import \
     gate 12 proves test_mix is FOV 19 and absent from the training plan. Report results on test_mix only.
 12. **Don't commit FMD or external data, or weights trained on them, without a license decision.** The data is CC BY-SA 4.0;
     data/ and runs/ are gitignored. Credit Zhang et al., CVPR 2019 wherever FMD numbers appear.
+    **A model DORA ships trains only on synthetic data and manifest datasets marked `train`** (CC BY 4.0 / CC0; owner
+    decision 2026-11-26). FMD is `eval-only`. A new dataset goes into `tools/ext_manifest.json` first (Zenodo MD5 and
+    size; the SHA-256 is pinned from the first verified download), then `ATTRIBUTIONS.md` is regenerated; check a
+    record's per-file terms, not just its licence field (Aydin's CC BY 4.0 record holds CC BY-SA and unlicensed files).
 13. **Label synthetic things as synthetic.** The bundled sample and weights come from `SyntheticFluorescence`.
     Don't describe them as real microscope data, and don't claim real-data accuracy that hasn't been measured.
 14. **Stacks stream; nothing holds a past frame.** `BatchDenoising` reads a page, denoises it, writes it, and lets it
@@ -235,8 +249,13 @@ cd godot && dotnet build && godot --headless --path . --import \
   the bundled model) still loads. v1 JSON `.dat` files are rejected with a clear message.
 - **Images out:** TIFF, uint8/uint16/float32, uncompressed or Deflate, single pages or multi-page stacks
   (`TiffCodec.EncodeStack`, or `TiffStackWriter` page by page: the file is a valid TIFF after every page).
-- **Images in:** TIFF (8/16/32-bit int/float; none/Deflate/PackBits; predictor 2; LE/BE; strips; multi-page)
-  and PNG (8/16-bit gray/RGB(A), all filters). Not supported, each with a clear error: LZW, tiled TIFF,
-  BigTIFF, palettes, interlaced PNG, **HDF5**.
+- **Images in:** TIFF and BigTIFF (8/16/32-bit int/float; none/Deflate/PackBits; predictor 2; LE/BE; strips;
+  multi-page) and PNG (8/16-bit gray/RGB(A), all filters). Not supported, each with a clear error: LZW, zstd, tiled
+  TIFF, palettes, interlaced PNG, **HDF5**.
+- **Stacks** (`ImageStack`): TIFF/BigTIFF stacks, with the shape from ImageJ's description (pages in CZT order:
+  channels fastest, then slices, then frames) or tifffile's JSON (`{"shape": …, "axes": …}`), else one plane per page;
+  and MRC (modes 0/1/2/6/12, either byte order). Axes: T time, Z depth, C channel, S separate fields of view, P raw SIM
+  patterns, I unlabelled. A dataset declares its axes (`ExtStacks`), because files mislabel them (ImageJ calls W2S's
+  fields of view "slices", and MDC25 stores 16-slice patches as "channels"); a declaration must fit the file's shape.
 - **Datasets** (`DatasetLoader`): `noisy/`+`clean/`; FMD (`FmdDataset`: the dataset root, one category, or
   `test_mix`, checked against the real download by `dora-bio fmd-check`); or a flat folder (Noise2Void only).

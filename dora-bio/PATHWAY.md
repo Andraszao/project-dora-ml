@@ -21,7 +21,7 @@ settled first, and so every phase builds only on phases that are already green.
 | **P9** | Format coverage | "my file won't open" (LZW, OME-TIFF, HDF5) | planned |
 | **P10** | Release | only runs from the editor or CLI | planned |
 | **FV** | Field validation (alongside P6–P10) | nobody outside this repo has used DORA or compared it with their current tool | 🚧 in progress: 30 `ext-data`, 31 `ext-bench` (Q18: supervised at parity with CARE, Noise2Void 0.7 dB behind), 32 `quant-fidelity` done; the pilot waits for Q12 |
-| **SOTA** | [Road to state of the art](#road-to-state-of-the-art-stages-15-agreed-2026-11-26) (stages 1–5, bricks 33–44+) | DORA trails the standard self-supervised tool and has no broad scoreboard | 🚧 in progress: 33 (Q12: not adopted, blocked only by the U-Net's early stop on FMD) done; next 34 `ext-data-2`, then 35 (Q2) |
+| **SOTA** | [Road to state of the art](#road-to-state-of-the-art-stages-15-agreed-2026-11-26) (stages 1–5, bricks 33–44+) | DORA trails the standard self-supervised tool and has no broad scoreboard | 🚧 in progress: 33 (Q12: not adopted, blocked only by the U-Net's early stop on FMD) and 34 `ext-data-2` (benchmark data pinned, stack readers) done; next 35 (Q2) |
 
 ## Phase protocol (applies to every phase)
 
@@ -264,17 +264,22 @@ the build/quality cadence, and each quality pass is pre-registered as usual.
 
 **Benchmark data (checked on Zenodo, 2026-11-26; all CC BY 4.0).** The 2024 AI4Life challenge subsets: W2S (10925783,
 0.19 GB), SUPPORT voltage imaging (10925939, 2.1 GB) and JUMP Cell Painting (10912386, 2.4 GB); the organisers describe
-it as an *unsupervised* challenge (to confirm from its page in brick 34). The 2025 AI4Life *supervised* challenge
+it as an *unsupervised* challenge (confirmed in brick 34: models train on single noisy images; four leaderboards,
+structured noise from Hagen et al. and unstructured noise from W2S and JUMP, plus SUPPORT; its references stay with
+the organisers, so the challenge sets come noisy-only). The 2025 AI4Life *supervised* challenge
 training sets: Tribolium (15615943, 4.5 GB) and Planaria (15615592, 16.3 GB). BioSR+ (7115540, 9.3 GB, per-structure
 archives). DeepCAD-RT two-photon time-lapses: mouse brain neutrophils (6296569, 12.7 GB, motile), zebrafish brain
 regions (6293696) and optic tectum neurons (6339707). Aydin examples (18686251, 4 GB). Not usable for training: the
 DeepCAD-RT *demo* data (GPL-licensed), and the Convallaria / mouse actin / mouse nuclei trio until its licence is found.
+Dropped in brick 34: the Aydin examples. The record says CC BY 4.0, but its own file list gives other terms for many
+files (CC BY-SA 4.0 for the OpenCell volumes, "PI-confirmed redistribution" for others), and its TIFFs are
+zstd-compressed, which DORA doesn't decode.
 
 | # | Kind | Brick | Gate or bar |
 |---|---|---|---|
 | **Stage 1** | | **Close the self-supervised gap (CPU only)** | |
 | 33 | quality | **Q12:** a Noise2Void U-Net at CAREamics' size (about 0.5M parameters) against today's 26k dilated network, 0.2% against 2% masking, a longer budget; chosen on held-out training images | within 0.3 dB of CAREamics Noise2Void on the Q18 sets **and** MreB slope ≥ 0.9 |
-| 34 | build | `ext-data-2`: the benchmark data above in `tools/fetch_ext.sh` (the large archives behind `--full`), loaders for 3D and time-lapse stacks, and the attribution manifest | pins, counts and licences recorded; gates stay fast without `--full` |
+| 34 ✅ | build | `ext-data-2`: the benchmark data above in `tools/fetch_ext.sh` (the large archives behind `--full`), loaders for 3D and time-lapse stacks, and the attribution manifest | pins, counts and licences recorded; gates stay fast without `--full`. **Done:** `tools/ext_manifest.json` holds all 17 datasets (22 files, 58 GB; Zenodo MD5 + size for each, SHA-256 pinned for every file downloaded); `ATTRIBUTIONS.md` is generated from it and gate-checked; the licence rule (only CC BY / CC0 may train a shipped model) is checked by script and test. Reading the real files changed the plan's picture: the 2025 sets are **training patches** (Tribolium: 15,500 pairs of 16 × 64²; Planaria: 17,900 such pairs plus 45 full volumes), not whole volumes; BioSR+ is **raw SIM** (9 pattern frames per file, MRC) at 8–15 signal levels; two of the three DeepCAD-RT records are **BigTIFF**; ImageJ labels W2S's fields of view "slices" and MDC25's z-slices "channels". So DORA now reads BigTIFF and MRC, and a dataset declares its axes (checked against the file's own shape). Checked on the downloads (`stack-check`, 25 s): W2S 360 planes (S=120 × C=3); Tribolium 15,500 pairs, 248,000 planes, each partner the same shape; BioSR+ CCPs 384 pairs × 9 patterns (512 × 256); zebrafish optic tectum 6,955 frames of 492² read from a 3.4 GB BigTIFF that carries no shape metadata, so its declared TYX is what labels it. The other nine sets are pinned by Zenodo MD5 and size, with their counts taken from the published listings, and get checked when downloaded |
 | 35 | quality | **Q2: when a Noise2Void U-Net should stop** (added after Q12: its early stop on FMD is the one thing between the U-Net and the new default) | pre-registered at the pass; must pass Q12's bar and FMD guard |
 | 35b | quality | **Self-supervised scoreboard:** DORA's best self-supervised recipe against the 2024 challenge leaderboard (W2S, SUPPORT, JUMP) and against CAREamics Noise2Void and N2V2 run here on the 2025 sets | pre-registered at the pass; scored the way each benchmark specifies |
 | **Stage 2** | | **Better blind spots and frame pairs** | |

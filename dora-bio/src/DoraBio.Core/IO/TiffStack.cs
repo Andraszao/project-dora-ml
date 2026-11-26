@@ -8,19 +8,19 @@ namespace DoraBio.Core.IO;
 /// frame by frame without ever holding the whole file in memory. Opening it walks the chain of page directories (IFDs)
 /// and keeps only their offsets; <see cref="ReadPage"/> then reads just that page's tags and strips. Pages decode
 /// exactly as <see cref="TiffCodec.Decode"/> decodes them from the whole file, with the same supported subset.
+/// BigTIFF works the same way, so time-lapses over 4 GB stream too.
 /// </summary>
 public sealed class TiffStackReader : IDisposable
 {
     private readonly Stream _stream;
-    private readonly bool _leaveOpen, _littleEndian;
-    private readonly List<uint> _pages;
+    private readonly bool _leaveOpen, _littleEndian, _big;
+    private readonly List<long> _pages;
 
     /// <summary>Opens a TIFF on a stream.</summary>
     /// <param name="stream">A readable, seekable stream holding the whole TIFF (offsets in a TIFF are absolute).</param>
     /// <param name="leaveOpen">Leave the stream open when the reader is disposed.</param>
     /// <exception cref="ArgumentException">The stream can't read or seek.</exception>
     /// <exception cref="InvalidDataException">Not a TIFF, or its page directories are corrupt.</exception>
-    /// <exception cref="NotSupportedException">BigTIFF.</exception>
     public TiffStackReader(Stream stream, bool leaveOpen = false)
     {
         if (!stream.CanRead || !stream.CanSeek) throw new ArgumentException("A TIFF stream must be readable and seekable.", nameof(stream));
@@ -28,7 +28,7 @@ public sealed class TiffStackReader : IDisposable
         _leaveOpen = leaveOpen;
         try
         {
-            _pages = TiffCodec.PageDirectories(stream, out _littleEndian);
+            _pages = TiffCodec.PageDirectories(stream, out _littleEndian, out _big);
         }
         catch when (!leaveOpen)
         {
@@ -44,6 +44,24 @@ public sealed class TiffStackReader : IDisposable
     /// <summary>Number of pages (1 for an ordinary single-image TIFF).</summary>
     public int PageCount => _pages.Count;
 
+    /// <summary>True if the file is a BigTIFF (64-bit offsets, written for files over 4 GB).</summary>
+    public bool IsBigTiff => _big;
+
+    /// <summary>
+    /// The first page's ImageDescription text, or null. ImageJ and tifffile write a stack's shape there
+    /// (<see cref="StackLayout"/> reads it).
+    /// </summary>
+    public string? Description => _pages.Count == 0 ? null : TiffCodec.Description(_stream, _littleEndian, _big, _pages[0]);
+
+    /// <summary>A page's width and height, from its tags (nothing is decoded).</summary>
+    /// <exception cref="ArgumentOutOfRangeException">No such page.</exception>
+    public (int Width, int Height) PageSize(int page)
+    {
+        if ((uint)page >= (uint)_pages.Count)
+            throw new ArgumentOutOfRangeException(nameof(page), $"TIFF has only {_pages.Count} page(s).");
+        return TiffCodec.PageSize(_stream, _littleEndian, _big, _pages[page]);
+    }
+
     /// <summary>Decodes one page into raw sample values (no normalization).</summary>
     /// <param name="page">Zero-based page index.</param>
     /// <exception cref="ArgumentOutOfRangeException">No such page.</exception>
@@ -53,7 +71,7 @@ public sealed class TiffStackReader : IDisposable
     {
         if ((uint)page >= (uint)_pages.Count)
             throw new ArgumentOutOfRangeException(nameof(page), $"TIFF has only {_pages.Count} page(s).");
-        return TiffCodec.DecodePage(_stream, _littleEndian, _pages[page]);
+        return TiffCodec.DecodePage(_stream, _littleEndian, _big, _pages[page]);
     }
 
     /// <summary>Closes the stream unless it was opened with <c>leaveOpen</c>.</summary>

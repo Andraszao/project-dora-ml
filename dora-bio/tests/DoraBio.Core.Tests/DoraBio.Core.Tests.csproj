@@ -21,5 +21,7 @@
 
   <ItemGroup>
     <None Include="Fixtures/**" CopyToOutputDirectory="PreserveNewest" />
+    <!-- Brick 34: the dataset manifest, so the registries can be checked against it. -->
+    <None Include="../../tools/ext_manifest.json" Link="ext_manifest.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

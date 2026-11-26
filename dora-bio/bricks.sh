@@ -24,7 +24,7 @@ export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_SKIP_FIRST_TIME_EXPE
 
 NAMES=(scaffold nn data io inference training cli godot-build godot-smoke ci-core ci-godot fmd-fetch fmd-loader fmd-eval
        n2v-diagnostic structured-mask vst calibration pool-upsample unet unet-tiling arch-eval
-       bench blocked-conv perf-budget q1-recipe tiff-stack-write q10-routing cli-batch q13-conditioning ext-data q18-ext-bench quant-fidelity q12-n2v-recipe)
+       bench blocked-conv perf-budget q1-recipe tiff-stack-write q10-routing cli-batch q13-conditioning ext-data q18-ext-bench quant-fidelity q12-n2v-recipe ext-data-2)
 CHECKS=(
   "solution builds (warnings are errors, missing XML docs included); every test class belongs to exactly one brick"
   "ConvLayer/DenoisingNet/Adam/Simd: finite-difference gradient checks, optimizer behavior"
@@ -60,6 +60,7 @@ CHECKS=(
   "quality pass Q18: CARE's scoring protocol; the recorded verdict follows the pre-registered rule; with data + runs/q18 the blocks reproduce"
   "fidelity (proportionality, ratio error, spots found/real) exact on synthetic ground truth; with data + weights the recorded blocks reproduce"
   "quality pass Q12: validation plan = the trainer's split; the selection log and the verdict follow the pre-registered rule; with data + runs/q12 the blocks reproduce"
+  "dataset manifest pinned, licence policy holds, ATTRIBUTIONS.md generated from it; TIFF/BigTIFF/MRC stacks read per axis (independent fixtures); downloaded stack datasets match their published counts"
 )
 LAST=$((${#NAMES[@]} - 1))
 LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dora-bricks.XXXXXX")"
@@ -389,23 +390,23 @@ gate_29() {   # q13-conditioning (quality pass Q13, pre-registered in PATHWAY.md
   done
 }
 
-gate_30() {   # ext-data (field validation: the public paired datasets from tools/fetch_ext.sh)
+gate_30() {   # ext-data (field validation: the public paired datasets of tools/ext_manifest.json)
   bash -n tools/fetch_ext.sh || return 1
-  local entries pinned
-  entries="$(grep -cE '^  "[a-z0-9-]+\|' tools/fetch_ext.sh)"
-  pinned="$(grep -cE '^  "[a-z0-9-]+\|[0-9]+\|[^|]+\.zip\|[0-9]+\|[0-9a-f]{64}"$' tools/fetch_ext.sh)"
-  [[ "$entries" -eq 4 && "$pinned" -eq 4 ]] || { echo ">> $pinned of $entries archives fully pinned (need 4 with record, file, size and sha256)"; return 1; }
+  local names=(deepbacs-mreb deepbacs-nucleoid deepbacs-bsubtilis zerocost-care2d) out present
+  python3 -I tools/ext_data.py check >/dev/null || { python3 -I tools/ext_data.py check; return 1; }
+  python3 -I -c '
+import json, re, sys
+m = {d["name"]: d for d in json.load(open("tools/ext_manifest.json"))["datasets"]}
+bad = [n for n in sys.argv[1:] if n not in m or not m[n]["files"]
+       or not all(re.fullmatch("[0-9a-f]{64}", f["sha256"] or "") for f in m[n]["files"])]
+sys.exit(f">> not fully pinned (record, file, size, MD5 and SHA-256): {bad}" if bad else 0)' "${names[@]}" || return 1
   test_gate 30-ext-data || return 1
-  local name sha missing=0
-  while IFS='|' read -r name _ _ _ sha; do
-    sha="${sha%\"}"
-    if [[ ! -f "$EXT/$name/.complete" ]]; then missing=$((missing + 1)); continue; fi
-    [[ "$(cat "$EXT/$name/.complete")" == "$sha" ]] || { echo ">> $name was extracted from an archive that doesn't match its pin"; return 1; }
-  done < <(grep -E '^  "[a-z0-9-]+\|' tools/fetch_ext.sh | sed 's/^  "//')
-  [[ $missing -lt 4 ]] || { echo "pins and unit tests OK; data check skipped (run tools/fetch_ext.sh)"; return 77; }
+  out="$(python3 -I tools/ext_data.py verify-local "${names[@]}")" || { echo "$out"; return 1; }
+  present="$(sed -n 's/^present \([0-9]*\) missing.*/\1/p' <<<"$out")"
+  [[ "$present" -gt 0 ]] || { echo "pins and unit tests OK; data check skipped (run tools/fetch_ext.sh)"; return 77; }
   dotnet build tools/DoraBio.Cli -c Release >/dev/null || return 1
   dotnet "$CLI_DLL" ext-check --root "$EXT" || return 1
-  [[ $missing -eq 0 ]] || { echo "present datasets verified; $missing not downloaded"; return 77; }
+  [[ "$present" -eq ${#names[@]} ]] || { echo "present datasets verified; $((${#names[@]} - present)) not downloaded"; return 77; }
 }
 
 gate_31() {   # q18-ext-bench (quality pass Q18, pre-registered in PATHWAY.md, commit be5228b, before any of its code)
@@ -523,6 +524,21 @@ gate_33() {   # q12-n2v-recipe (quality pass Q12, pre-registered in PATHWAY.md, 
   reproduces q12-fmd-guard fmd-eval --weights runs/q12/fmd_guard.bin --root "$FMD" --levels raw || return 1
 }
 
+gate_34() {   # ext-data-2 (benchmark data: manifest, licences, attributions, stack readers)
+  bash -n tools/fetch_ext.sh || return 1
+  python3 -I tools/ext_data.py check || return 1
+  python3 -I tools/ext_data.py attributions --check || return 1
+  test_gate 34-ext-data-2 || return 1
+  local out present
+  out="$(python3 -I tools/ext_data.py verify-local)" || { echo "$out"; return 1; }
+  dotnet build tools/DoraBio.Cli -c Release >/dev/null || return 1
+  out="$(dotnet "$CLI_DLL" stack-check --root "$EXT")"; local code=$?
+  echo "$out"
+  [[ $code -eq 0 ]] || return 1
+  present="$(grep -c '^[a-z0-9-]*\(\[[0-9]\]\)\? *[0-9]*/[0-9]* ' <<<"$out")"
+  [[ "$present" -gt 0 ]] || { echo "manifest, attributions and readers OK; stack data check skipped (run tools/fetch_ext.sh)"; return 77; }
+}
+
 gate_21() {   # arch-eval
   test_gate 21-arch-eval || return 1
   # The rule was set before measuring (PATHWAY.md, P4): the U-Net becomes the default only if, at the same training
@@ -611,6 +627,9 @@ MUTATIONS=(
   '32|src/DoraBio.Core/Fidelity.cs|double logGain = mo - mr;|double logGain = 0;'
   '33|src/DoraBio.Core/Data/ExtDatasets.cs|public static List<FmdDataset.PlannedPair> ValidationPlan(string root, ExtDataset dataset, int seed, double fraction = 0.2)|public static List<FmdDataset.PlannedPair> ValidationPlan(string root, ExtDataset dataset, int seed, double fraction = 0.25)'
   '33|docs/RESULTS.md|<!-- q12-verdict: not-adopted -->|<!-- q12-verdict: adopted -->'
+  '34|src/DoraBio.Core/IO/ImageStack.cs|return Compact("TZC", [frames, slices, channels], StackMetadata.ImageJ);|return Compact("CZT", [channels, slices, frames], StackMetadata.ImageJ);'
+  '34|src/DoraBio.Core/IO/TiffCodec.cs|long field = entryAt + 4 + ValueSize;|long field = entryAt + 8;'
+  '34|tools/ext_manifest.json|"licence": "CC-BY-SA-4.0", "use": "eval-only"|"licence": "CC-BY-SA-4.0", "use": "train"'
 )
 
 self_test() {

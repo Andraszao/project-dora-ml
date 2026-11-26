@@ -1,0 +1,165 @@
+{
+  "about": "Every external dataset DORA may download, with pins, licence and credit. Read by tools/ext_data.py (fetch, check, ATTRIBUTIONS.md) and by the gate-30/34 tests. tier core = the default fetch; full = only with --full or by name. use train = the licence allows training a model DORA ships (CC-BY-4.0 or CC0-1.0); eval-only = benchmark only. Sizes and MD5s are Zenodo's; SHA-256s are pinned from downloads whose MD5 matched (null = not downloaded yet, so the first fetch prints it for pinning).",
+  "datasets": [
+    {
+      "name": "deepbacs-mreb", "tier": "core", "licence": "CC-BY-4.0", "use": "train",
+      "doi": "10.5281/zenodo.6460867", "creators": "Christoph Spahn, Mike Heilemann",
+      "title": "DeepBacs: Escherichia coli MreB denoising dataset",
+      "citation": "Spahn et al., \"DeepBacs for multi-task bacterial image analysis using open-source deep learning approaches\", Communications Biology 5, 688 (2022)",
+      "content": "E. coli MreB-sfGFP, live cells; 2D noisy/clean pairs, 16-bit 512x512; 30 train, 5 test",
+      "files": [{"file": "DeepBacs_Data_Denoising_E.coli_MreB.zip", "size": 118515594, "md5": "d1525d7379f84f5ee4a434b9870445e9",
+                 "sha256": "c47f797c250edfc41e17f513379842a4e4e08931c829c01b144bf4b1120e1ab9", "unpack": "zip"}]
+    },
+    {
+      "name": "deepbacs-nucleoid", "tier": "core", "licence": "CC-BY-4.0", "use": "train",
+      "doi": "10.5281/zenodo.5551112", "creators": "Christoph Spahn, Mike Heilemann",
+      "title": "DeepBacs: Escherichia coli nucleoid denoising dataset",
+      "citation": "Spahn et al., \"DeepBacs for multi-task bacterial image analysis using open-source deep learning approaches\", Communications Biology 5, 688 (2022)",
+      "content": "E. coli H-NS-mScarlet-I, fixed cells; 2D noisy/clean pairs, 8-bit 512x512; 28 train, 2 test",
+      "files": [{"file": "DeepBacs_Data_Denoising_E.coli_H-NS-mScarlet-I_dataset.zip", "size": 8066921, "md5": "a42e14562362a0679ef5b3349612e0b1",
+                 "sha256": "267ae8eba9c62dd740e4a5b14d3334f8e29697e60b8657ddeb1dff2b69b4bc2b", "unpack": "zip"}]
+    },
+    {
+      "name": "deepbacs-bsubtilis", "tier": "core", "licence": "CC-BY-4.0", "use": "train",
+      "doi": "10.5281/zenodo.5551135", "creators": "Séamus Holden, Mia Conduit",
+      "title": "DeepBacs: Bacillus subtilis denoising dataset",
+      "citation": "Spahn et al., \"DeepBacs for multi-task bacterial image analysis using open-source deep learning approaches\", Communications Biology 5, 688 (2022)",
+      "content": "B. subtilis FtsZ-GFP frames; noisy only, 16-bit 1024x1024; 3 images",
+      "files": [{"file": "DeepBacs_Data_Denoising_B.subtilis_FtsZ-GFP_dataset.zip", "size": 435654091, "md5": "aeb239e8ca8961aab5b9753b406cc2e2",
+                 "sha256": "5e88c64491df80165f353cf0da59bfe2d22784800a90829ac2172b881052c9c3", "unpack": "zip"}]
+    },
+    {
+      "name": "zerocost-care2d", "tier": "core", "licence": "CC-BY-4.0", "use": "train",
+      "doi": "10.5281/zenodo.3713330", "creators": "Guillaume Jacquemet",
+      "title": "ZeroCostDL4Mic: CARE (2D) example training and test dataset",
+      "citation": "von Chamier et al., \"Democratising deep learning for microscopy with ZeroCostDL4Mic\", Nature Communications 12, 2276 (2021)",
+      "content": "2D noisy/clean pairs, float32 1024x1024; 22 train, 2 test; pixel-correlated noise",
+      "files": [{"file": "CARE (2D).zip", "size": 178823351, "md5": "76ad35678514d223747137f478eff6c4",
+                 "sha256": "0c16e3388e636a480172b798ffc512f96c6787e3c3f3814339c2fddaa23a3e08", "unpack": "zip"}]
+    },
+    {
+      "name": "mdc24-w2s", "tier": "core", "licence": "CC-BY-4.0", "use": "train",
+      "doi": "10.5281/zenodo.10925783", "creators": "Ruofan Zhou, Majed El Helou, Daniel Sage, Thierry Laroche, Arne Seitz, Sabine Süsstrunk",
+      "title": "AI4Life-MDC24 challenge data: W2S subset",
+      "citation": "Zhou et al., \"W2S: Microscopy Data with Joint Denoising and Super-Resolution for Widefield to SIM Mapping\", ECCV 2020 Workshops, LNCS 12535 (2020); AI4Life Microscopy Denoising Challenge 2024 (unsupervised)",
+      "content": "widefield, 120 fields of view x 3 channels, noisy only (the challenge holds the references); one ImageJ hyperstack, int16 512x512",
+      "files": [{"file": "noisy.tiff", "size": 188807950, "md5": "c58b528a3f9cbbd8b23b030ba8f4cb83", "sha256": "b5cb1dbcb86ce72b8d6e0268498712974b9f38d2fc9e18e8a66673a34aa84215", "unpack": "file"}]
+    },
+    {
+      "name": "mdc24-support", "tier": "full", "licence": "CC-BY-4.0", "use": "train",
+      "doi": "10.5281/zenodo.10925939", "creators": "Minho Eom, Seungjae Han, Pojeong Park, et al.",
+      "title": "AI4Life-MDC24 challenge data: SUPPORT subset (Penicillium)",
+      "citation": "Eom et al., \"Statistically unbiased prediction enables accurate denoising of voltage imaging data\", Nature Methods 20, 1581-1592 (2023); AI4Life Microscopy Denoising Challenge 2024 (unsupervised)",
+      "content": "one volume of 1001 z-slices (0.1 um), noisy only; ImageJ stack, uint16 1024x1024, big-endian",
+      "files": [{"file": "noisy.tiff", "size": 2099761686, "md5": "3aca29dd991baeb7830664eb70917784", "sha256": null, "unpack": "file"}]
+    },
+    {
+      "name": "mdc24-jump", "tier": "full", "licence": "CC-BY-4.0", "use": "train",
+      "doi": "10.5281/zenodo.10912386", "creators": "Srinivas Niranj Chandrasekaran",
+      "title": "AI4Life-MDC24 challenge data: JUMP Cell Painting subset",
+      "citation": "Chandrasekaran et al., JUMP Cell Painting dataset cpg0016-jump, Cell Painting Gallery on the Registry of Open Data on AWS; AI4Life Microscopy Denoising Challenge 2024 (unsupervised)",
+      "content": "517 fields of view x 4 channels with added Gaussian noise, noisy only; ImageJ hyperstack, float32 540x540",
+      "files": [{"file": "noisy.tiff", "size": 2412483494, "md5": "8d99076940b3bbdeb869ac3fa29fc1b5", "sha256": null, "unpack": "file"}]
+    },
+    {
+      "name": "mdc25-tribolium", "tier": "full", "licence": "CC-BY-4.0", "use": "train",
+      "doi": "10.5281/zenodo.15615943", "creators": "Martin Weigert, Uwe Schmidt, Tobias Boothe, et al.",
+      "title": "AI4Life-MDC25 challenge data: Tribolium (supervised training set)",
+      "citation": "Weigert et al., \"Content-aware image restoration: pushing the limits of fluorescence microscopy\", Nature Methods 15, 1090-1097 (2018); AI4Life Microscopy Supervised Denoising Challenge 2025",
+      "content": "15,500 paired 3D training patches (16 z-slices of 64x64, float32), noisy/ and gt/ by file name",
+      "files": [{"file": "Archive.zip", "size": 4541068598, "md5": "8f223630f9a3d67f57ab0516c928042f", "sha256": "0053328441ed48db2d601ba8efe6001d9793957fac247b65da2ca25d40d45b87", "unpack": "zip"}]
+    },
+    {
+      "name": "mdc25-planaria", "tier": "full", "licence": "CC-BY-4.0", "use": "train",
+      "doi": "10.5281/zenodo.15615592", "creators": "Martin Weigert, Uwe Schmidt, Tobias Boothe, et al.",
+      "title": "AI4Life-MDC25 challenge data: Planaria (supervised training set)",
+      "citation": "Weigert et al., \"Content-aware image restoration: pushing the limits of fluorescence microscopy\", Nature Methods 15, 1090-1097 (2018); AI4Life Microscopy Supervised Denoising Challenge 2025",
+      "content": "17,900 paired 3D patches (16x64x64) and 45 paired volumes (up to 1024x1024 in-plane); noisy/ and gt/ by file name",
+      "files": [{"file": "Archive.zip", "size": 16313314280, "md5": "943cf6fcd0cdcc274d95e671945aa37b", "sha256": null, "unpack": "zip"}]
+    },
+    {
+      "name": "biosr-ccps", "tier": "full", "licence": "CC-BY-4.0", "use": "train",
+      "doi": "10.5281/zenodo.7115540", "creators": "Chang Qiao",
+      "title": "BioSR+: clathrin-coated pits",
+      "citation": "Qiao, \"BioSR+: Dataset Extension of biological images for super-resolution microscopy\", Zenodo (2022)",
+      "content": "raw SIM frames at 8 signal levels per cell, each with a high-SNR partner; MRC stacks (uint16)",
+      "files": [{"file": "CCPs.zip", "size": 914070853, "md5": "dea037d4903738c3caca64c3c3298a40", "sha256": "d8ca7766a44315d4ed72e7bee5379cbc88be13a42a2ce14c6f78c976cd2ceedf", "unpack": "zip"}]
+    },
+    {
+      "name": "biosr-er", "tier": "full", "licence": "CC-BY-4.0", "use": "train",
+      "doi": "10.5281/zenodo.7115540", "creators": "Chang Qiao",
+      "title": "BioSR+: endoplasmic reticulum",
+      "citation": "Qiao, \"BioSR+: Dataset Extension of biological images for super-resolution microscopy\", Zenodo (2022)",
+      "content": "raw SIM frames at several signal levels per cell, each with a high-SNR partner; MRC stacks (uint16)",
+      "files": [{"file": "ER.zip", "size": 2364971983, "md5": "5afd1c090105f65cdcc2f08f5ac3dfdf", "sha256": null, "unpack": "zip"}]
+    },
+    {
+      "name": "biosr-microtubules", "tier": "full", "licence": "CC-BY-4.0", "use": "train",
+      "doi": "10.5281/zenodo.7115540", "creators": "Chang Qiao",
+      "title": "BioSR+: microtubules",
+      "citation": "Qiao, \"BioSR+: Dataset Extension of biological images for super-resolution microscopy\", Zenodo (2022)",
+      "content": "raw SIM frames at several signal levels per cell, each with a high-SNR partner; MRC stacks (uint16)",
+      "files": [{"file": "Microtubules.zip", "size": 2086204514, "md5": "f4fbbc079834dc37f8735cdce1818c2b", "sha256": null, "unpack": "zip"}]
+    },
+    {
+      "name": "biosr-f-actin", "tier": "full", "licence": "CC-BY-4.0", "use": "train",
+      "doi": "10.5281/zenodo.7115540", "creators": "Chang Qiao",
+      "title": "BioSR+: F-actin",
+      "citation": "Qiao, \"BioSR+: Dataset Extension of biological images for super-resolution microscopy\", Zenodo (2022)",
+      "content": "raw SIM frames at several signal levels per cell, each with a high-SNR partner; MRC stacks (uint16)",
+      "files": [{"file": "F-actin.zip", "size": 2133311831, "md5": "fe17a4713b82d1311d76ac4728525255", "sha256": null, "unpack": "zip"}]
+    },
+    {
+      "name": "biosr-myosin-iia", "tier": "full", "licence": "CC-BY-4.0", "use": "train",
+      "doi": "10.5281/zenodo.7115540", "creators": "Chang Qiao",
+      "title": "BioSR+: Myosin-IIA",
+      "citation": "Qiao, \"BioSR+: Dataset Extension of biological images for super-resolution microscopy\", Zenodo (2022)",
+      "content": "raw SIM frames at several signal levels per cell, each with a high-SNR partner; MRC stacks (uint16)",
+      "files": [{"file": "Myosin-IIA.zip", "size": 1829457717, "md5": "40f8db00ec0ebeca77fb6db2878fd5ed", "sha256": null, "unpack": "zip"}]
+    },
+    {
+      "name": "deepcad-zebrafish-regions", "tier": "full", "licence": "CC-BY-4.0", "use": "train",
+      "doi": "10.5281/zenodo.6293696", "creators": "Xinyang Li",
+      "title": "DeepCAD-RT dataset: zebrafish multiple brain regions",
+      "citation": "Li et al., \"Real-time denoising enables high-sensitivity fluorescence time-lapse imaging beyond the shot-noise limit\", Nature Biotechnology 41, 282-292 (2023)",
+      "content": "two-photon calcium imaging (GCaMP6s), 9,800 frames of 485x400, paired low/high SNR; BigTIFF, uint16",
+      "files": [{"file": "01_ZebrafishMul_GCaMP6s_485x400x9800_lowSNR.tif", "size": 3859298816, "md5": "e2fb3811db3e0f36b86b9080fd84d7bd", "sha256": null, "unpack": "file"},
+                {"file": "01_ZebrafishMul_GCaMP6s_485x400x9800_highSNR.tif", "size": 3859298816, "md5": "06bb336e85d4890ed86528015c1ce958", "sha256": null, "unpack": "file"}]
+    },
+    {
+      "name": "deepcad-neutrophils", "tier": "full", "licence": "CC-BY-4.0", "use": "train",
+      "doi": "10.5281/zenodo.6296569", "creators": "Xinyang Li",
+      "title": "DeepCAD-RT dataset: mouse brain neutrophils",
+      "citation": "Li et al., \"Real-time denoising enables high-sensitivity fluorescence time-lapse imaging beyond the shot-noise limit\", Nature Biotechnology 41, 282-292 (2023)",
+      "content": "two-photon time-lapses of motile neutrophils, 6,440 and 5,706 frames of 512x512, paired low/high SNR; ImageJ stacks, uint16, big-endian",
+      "files": [{"file": "01_neutrophil_0.349umPerPixel_512x512x6440_lowSNR.tif", "size": 3378037024, "md5": "edec267c02cd988fd84676e05acf0b8c", "sha256": null, "unpack": "file"},
+                {"file": "01_neutrophil_0.349umPerPixel_512x512x6440_highSNR.tif", "size": 3378049908, "md5": "d9510a2cc5ed9498f436ff97a79e91dd", "sha256": null, "unpack": "file"},
+                {"file": "02_neutrophil_0.465umPerPixel_512x512x5706_lowSNR.tif", "size": 2993024664, "md5": "68a6a4282f82a0fbedd94d5c04133b77", "sha256": null, "unpack": "file"},
+                {"file": "02_neutrophil_0.465umPerPixel_512x512x5706_highSNR.tif", "size": 2993036080, "md5": "3f33cb2ed33fb40221bb1eb5691f7520", "sha256": null, "unpack": "file"}]
+    },
+    {
+      "name": "deepcad-zebrafish-ot", "tier": "full", "licence": "CC-BY-4.0", "use": "train",
+      "doi": "10.5281/zenodo.6339707", "creators": "Xinyang Li",
+      "title": "DeepCAD-RT dataset: zebrafish optic tectum neurons",
+      "citation": "Li et al., \"Real-time denoising enables high-sensitivity fluorescence time-lapse imaging beyond the shot-noise limit\", Nature Biotechnology 41, 282-292 (2023)",
+      "content": "two-photon calcium imaging (GCaMP6s), 6,955 frames of 492x492, paired low/high SNR; BigTIFF, uint16",
+      "files": [{"file": "01_ZebrafishOT_GCaMP6s_492x492x6955_lowSNR.tif", "size": 3395403196, "md5": "e5138f8ffbd935033dfe6b1d2723d339", "sha256": "008b7e58bc8900ecb357e2c23963e89b4f4f4de4f0b159bdaf94fac16c115587", "unpack": "file"},
+                {"file": "01_ZebrafishOT_GCaMP6s_492x492x6955_highSNR.tif", "size": 3395403196, "md5": "315a3e165b786f1dab0aa48cbec8dece", "sha256": "af4d0aa311d3a6fd2d184662d3da675e42759f0df183106199a8ff24db842e8e", "unpack": "file"}]
+    },
+    {
+      "name": "fmd", "tier": "separate", "licence": "CC-BY-SA-4.0", "use": "eval-only", "fetched_by": "tools/fetch_fmd.sh",
+      "doi": null, "creators": "Yide Zhang, Yinhao Zhu, Evan Nichols, Qingfei Wang, Siyuan Zhang, Cody Smith, Scott Howard",
+      "title": "Fluorescence Microscopy Denoising (FMD) dataset",
+      "citation": "Zhang et al., \"A Poisson-Gaussian Denoising Dataset with Real Fluorescence Microscopy Images\", CVPR 2019 (arXiv:1812.10366)",
+      "content": "confocal, two-photon and widefield, 12 categories plus the test_mix benchmark; 5 noise levels with averaged references",
+      "files": []
+    }
+  ],
+  "excluded": [
+    {"name": "aydin-examples", "doi": "10.5281/zenodo.18686251",
+     "reason": "the record is CC BY 4.0, but its file list gives per-file terms (CC BY-SA 4.0 for the OpenCell volumes, 'PI-confirmed redistribution' for several others), and its TIFFs are zstd-compressed, which DORA's reader doesn't decode"},
+    {"name": "deepcad-rt-demo", "doi": null, "reason": "the DeepCAD-RT demo data is GPL-licensed"},
+    {"name": "hagen-structured-noise", "doi": null,
+     "reason": "Convallaria, mouse actin and mouse nuclei (the 2024 challenge's structured-noise sets): no licence found yet"}
+  ]
+}
