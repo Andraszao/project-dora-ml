@@ -16,6 +16,9 @@ public sealed record TrainingJobOptions
 
     /// <summary>Journey log file. Null skips logging.</summary>
     public string? JournalPath { get; init; }
+
+    /// <summary>Also write the final epoch's weights here (whatever <see cref="WeightsPath"/> keeps). Null skips it.</summary>
+    public string? LastWeightsPath { get; init; }
 }
 
 /// <summary>
@@ -52,14 +55,21 @@ public static class TrainingJob
             var result = new Trainer(net, config).Train(dataset, report =>
             {
                 if (journal is not null) journal.RecordEpoch(session!, report);
-                if (report.IsBest && options.WeightsPath is not null)
-                    WeightsFile.Save(options.WeightsPath, net, Provenance(config, options, report, final: false));
+                if (report.IsBest && !config.KeepLastEpoch && options.WeightsPath is not null)
+                    WeightsFile.Save(options.WeightsPath, net, Provenance(config, options, report, "checkpoint at"));
                 onEpoch?.Invoke(report);
             }, cancellation);
 
-            // The trainer has restored the best weights into the network; save those.
-            if (options.WeightsPath is not null && result.Best is { } best)
-                WeightsFile.Save(options.WeightsPath, net, Provenance(config, options, best, final: true));
+            // The trainer has restored the weights it keeps into the network (the best epoch's, or the last's); save those.
+            var kept = config.KeepLastEpoch ? result.Last : result.Best;
+            if (options.WeightsPath is not null && kept is not null)
+                WeightsFile.Save(options.WeightsPath, net, Provenance(config, options, kept, config.KeepLastEpoch ? "last" : "best"));
+            if (options.LastWeightsPath is not null && result is { LastParameters: { } lastParameters, Last: { } lastReport })
+            {
+                var copy = DenoisingNet.Create(net.Config, seed: 0);
+                Array.Copy(lastParameters, copy.Parameters, lastParameters.Length);
+                WeightsFile.Save(options.LastWeightsPath, copy, Provenance(config, options, lastReport, "last"));
+            }
             journal?.Complete(session!, result);
             return result;
         }
@@ -74,10 +84,10 @@ public static class TrainingJob
     /// The text stored in the weights file, e.g. "Noise2Void on …; best epoch 25; val loss 0.0104; val PSNR 28.67 dB
     /// (+8.11 dB over noisy)". Formatted with the invariant culture, so the file reads the same on every machine.
     /// </summary>
-    private static string Provenance(TrainerConfig config, TrainingJobOptions options, EpochReport report, bool final)
+    private static string Provenance(TrainerConfig config, TrainingJobOptions options, EpochReport report, string which)
     {
         var text = FormattableString.Invariant(
-            $"{config.Mode} on {options.DatasetDescription}; {(final ? "best" : "checkpoint at")} epoch {report.Epoch}; val loss {report.ValLoss:G4}");
+            $"{config.Mode} on {options.DatasetDescription}; {which} epoch {report.Epoch}; val loss {report.ValLoss:G4}");
         if (report.ValPsnr is { } psnr)
             text += string.Create(CultureInfo.InvariantCulture, $"; val PSNR {psnr:0.00} dB (+{report.ValPsnrGain ?? 0:0.00} dB over noisy)");
         return text;

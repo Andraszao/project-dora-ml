@@ -2,6 +2,22 @@ using DoraBio.Core.Data;
 
 namespace DoraBio.Core.Training;
 
+/// <summary>What chooses the best epoch, drives plateau decay and decides early stopping (quality pass Q2).</summary>
+public enum ValidationSignal
+{
+    /// <summary>
+    /// Validation PSNR when every validation patch has a clean partner, else the validation loss. The behaviour up to
+    /// Q2: in Noise2Void mode it lets ground truth, when the dataset happens to have it, choose the weights.
+    /// </summary>
+    Auto,
+
+    /// <summary>
+    /// Always the validation loss: the masked Noise2Void loss against noisy pixels, or the MSE against clean in
+    /// supervised mode. A self-supervised run then never uses ground truth to choose its weights.
+    /// </summary>
+    Loss,
+}
+
 /// <summary>
 /// Every training knob in one immutable record. Defaults are tuned for 256–512 px fluorescence frames on a
 /// laptop-class CPU. Override with <c>with { … }</c>. It's serialized into the journey log, so each session
@@ -46,8 +62,17 @@ public sealed record TrainerConfig
     /// <summary>Epochs without a new best score before each decay.</summary>
     public int PlateauPatience { get; init; } = 2;
 
-    /// <summary>Epochs without a new best score before training stops.</summary>
+    /// <summary>Epochs without a new best score before training stops. <see cref="int.MaxValue"/> never stops early.</summary>
     public int EarlyStopPatience { get; init; } = 6;
+
+    /// <summary>The signal behind best-epoch selection, plateau decay and early stopping.</summary>
+    public ValidationSignal Selection { get; init; } = ValidationSignal.Auto;
+
+    /// <summary>
+    /// Keep the final epoch's weights instead of restoring the best epoch's. The best epoch is still tracked and
+    /// reported; it just isn't restored. Needs no held-out signal to pick the weights (Q2's candidate C).
+    /// </summary>
+    public bool KeepLastEpoch { get; init; }
 
     /// <summary>Global gradient-norm cap per step (null = no clipping). Guards against rare explosive batches.</summary>
     public float? GradientClipNorm { get; init; } = 1.0f;
@@ -138,10 +163,14 @@ public sealed record EpochReport(
     IReadOnlyList<string> Events,
     TimeSpan Elapsed);
 
-/// <summary>Outcome of <see cref="Trainer.Train"/>. The network now holds the weights from <see cref="BestEpoch"/>.</summary>
+/// <summary>
+/// Outcome of <see cref="Trainer.Train"/>. The network now holds the weights from <see cref="BestEpoch"/>, or the last
+/// epoch's with <see cref="TrainerConfig.KeepLastEpoch"/>.
+/// </summary>
 /// <param name="History">Every epoch's report, in order.</param>
 /// <param name="BestEpoch">Epoch whose weights were restored (0 if no epoch finished).</param>
-/// <param name="BestScore">That epoch's score: validation PSNR if clean data exists, else the negated validation loss.</param>
+/// <param name="BestScore">That epoch's score: validation PSNR if clean data exists and <see cref="TrainerConfig.Selection"/> is
+/// Auto, else the negated validation loss.</param>
 /// <param name="NoisyBaselinePsnr">PSNR of the unprocessed noisy validation patches, the "do nothing" reference.</param>
 /// <param name="StopReason">"mastered", "early_stop", "max_epochs" or "cancelled".</param>
 /// <param name="Mastered">Whether the final progressive target was held.</param>
@@ -155,4 +184,10 @@ public sealed record TrainingResult(
 {
     /// <summary>The report of <see cref="BestEpoch"/>, or null if no epoch finished.</summary>
     public EpochReport? Best => History.FirstOrDefault(e => e.Epoch == BestEpoch);
+
+    /// <summary>The report of the final epoch, or null if no epoch finished.</summary>
+    public EpochReport? Last => History.Count == 0 ? null : History[^1];
+
+    /// <summary>The parameters after the final epoch, before any restore (null if no epoch finished).</summary>
+    public float[]? LastParameters { get; init; }
 }

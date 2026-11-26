@@ -27,6 +27,9 @@ public static class Program
                    [--condition none|noise]  (noise: tell the network each frame's noise level, FiLM; quality pass Q13)
                    [--init WEIGHTS.bin]   (fine-tune existing weights instead of starting fresh)
                    [--mask-ratio 0.02]    (Noise2Void: fraction of pixels hidden per patch)
+                   [--select auto|loss] [--patience 6] [--keep best|last] [--save-last FILE.bin]
+                    (what picks the epoch: auto = validation PSNR when clean images exist, else the loss; loss = always the
+                     validation loss, so Noise2Void never uses ground truth; patience 0 = never stop early; quality pass Q2)
                    [--describe TEXT]      (what the data is; stored in the weights' provenance)
                    [--augment dihedral|v1] (v1 = v1's ±15° rotation + 0.85-1.15 scale, nearest neighbour; for comparison)
                    [--struct off|auto|always] [--footprint diamond-2]  (Noise2Void: structured blind spots for
@@ -67,7 +70,7 @@ public static class Program
                    CARE's protocol: reference normalized by its 0.1-99.9 percentiles, outputs matched by least squares.
           fmd-check --root data/fmd
                    Verify a downloaded FMD dataset: structure, test_mix, and no train/test leakage.
-          fmd-eval  --weights WEIGHTS.bin --root data/fmd [--levels raw,avg2,...] [--per-image]
+          fmd-eval  --weights WEIGHTS.bin --root data/fmd [--levels raw,avg2,...] [--per-image] [--precise]
                    [--validation-seed S]  (score the FOVs a training run with --seed S held out, one frame each, not test_mix)
                    [--sigma-scale K]  (noise-conditioned models: tell them K × each image's measured noise σ)
                    [--weights-correlated W2.bin]  (images whose noise check says correlated go to W2 instead)
@@ -206,6 +209,25 @@ public static class Program
             LearningRate = (float)o.Double("lr", 1e-3),
             Seed = o.Int("seed", 1234),
         };
+        bool n2vMode = mode == TrainingMode.Noise2Void;
+        int patience = o.Int("patience", n2vMode ? DefaultN2v.Patience : 6);
+        if (patience < 0) throw new ArgumentException("--patience must be 0 (never stop early) or more.");
+        config = config with
+        {
+            EarlyStopPatience = patience == 0 ? int.MaxValue : patience,
+            Selection = o.String("select", n2vMode ? DefaultN2v.Select : "auto") switch
+            {
+                "auto" => ValidationSignal.Auto,
+                "loss" => ValidationSignal.Loss,
+                var v => throw new ArgumentException($"Unknown --select '{v}' (use auto or loss)."),
+            },
+            KeepLastEpoch = o.String("keep", n2vMode ? DefaultN2v.Keep : "best") switch
+            {
+                "best" => false,
+                "last" => true,
+                var k => throw new ArgumentException($"Unknown --keep '{k}' (use best or last)."),
+            },
+        };
 
         DenoisingNet net;
         if (o.Has("init"))
@@ -217,7 +239,7 @@ public static class Program
         else
         {
             var defaults = NetConfig.Default;
-            string arch = o.String("arch", defaults.Architecture == NetArchitecture.UNet ? "unet" : "dilated");
+            string arch = o.String("arch", n2vMode ? DefaultN2v.Arch : defaults.Architecture == NetArchitecture.UNet ? "unet" : "dilated");
             var architecture = arch switch
             {
                 "dilated" => new NetConfig(o.Int("features", 24), [1, 2, 4, 8, 4, 2, 1]),
@@ -284,15 +306,21 @@ public static class Program
 
         var clock = Stopwatch.StartNew();
         var result = TrainingJob.Run(net, dataset, config,
-            new TrainingJobOptions { DatasetDescription = description, WeightsPath = o.Required("out"), JournalPath = o.StringOrNull("journey") },
+            new TrainingJobOptions
+            {
+                DatasetDescription = description, WeightsPath = o.Required("out"), JournalPath = o.StringOrNull("journey"),
+                LastWeightsPath = o.StringOrNull("save-last"),
+            },
             report => Console.WriteLine(FormatEpoch(report)));
 
         Console.WriteLine($"✅ stopped: {result.StopReason} after {result.History.Count} epochs in {clock.Elapsed:mm\\:ss}");
-        if (result.Best is { } best)
+        if ((config.KeepLastEpoch ? result.Last : result.Best) is { } kept)
         {
-            string psnr = best.ValPsnr is { } p ? $", val PSNR {p:0.00} dB vs noisy {result.NoisyBaselinePsnr:0.00} dB" : "";
-            Console.WriteLine($"💾 best epoch {best.Epoch} (val loss {best.ValLoss:G4}{psnr}) saved to {o.Required("out")}");
+            string psnr = kept.ValPsnr is { } p ? $", val PSNR {p:0.00} dB vs noisy {result.NoisyBaselinePsnr:0.00} dB" : "";
+            Console.WriteLine($"💾 {(config.KeepLastEpoch ? "last" : "best")} epoch {kept.Epoch} (val loss {kept.ValLoss:G4}{psnr}) saved to {o.Required("out")}");
         }
+        if (o.StringOrNull("save-last") is { } lastPath && result.Last is { } last)
+            Console.WriteLine($"💾 last epoch {last.Epoch} (val loss {last.ValLoss:G4}) saved to {lastPath}");
         return 0;
     }
 
@@ -471,6 +499,11 @@ public static class Program
             if (o.Has("per-image"))
                 foreach (var s in scores)
                     Console.WriteLine($"  {s.Name,-40} {s.NoisyPsnr,6:0.00} {s.BilateralPsnr,6:0.00} {s.DoraPsnr,6:0.00}");
+            if (o.Has("precise"))   // for a bar that sits within rounding of the 2-decimal table (Q2's FMD guard)
+            {
+                var all = FmdBenchmark.Summarize(scores)[^1].Mean;
+                Console.WriteLine($"all, unrounded: noisy {all.NoisyPsnr:0.0000} dB, bilateral {all.BilateralPsnr:0.0000} dB, DORA {all.DoraPsnr:0.0000} dB");
+            }
         }
         return 0;
     }
@@ -762,6 +795,12 @@ public static class Program
     private const string DefaultCondition = "none";
 
     /// <summary>
+    /// <c>train --mode n2v</c>'s defaults: network, what picks the epoch, early-stop patience and which weights are kept.
+    /// Quality pass Q2 decides them (gate 35 checks that they follow the recorded verdict).
+    /// </summary>
+    private static readonly (string Arch, string Select, int Patience, string Keep) DefaultN2v = ("dilated", "auto", 6, "best");
+
+    /// <summary>
     /// <c>ext-check</c>: for every external dataset that <c>tools/fetch_ext.sh</c> has downloaded, checks that the train
     /// and test splits hold the published numbers of images, that every noisy image has a clean partner of the same size,
     /// and that every file decodes. Also reports each set's brightness ratio, clean over noisy: the high-SNR images were
@@ -910,6 +949,11 @@ public static class Program
         if (o.Has("default-condition"))
         {
             Console.WriteLine(DefaultCondition);
+            return 0;
+        }
+        if (o.Has("default-n2v"))
+        {
+            Console.WriteLine($"{DefaultN2v.Arch} select={DefaultN2v.Select} patience={DefaultN2v.Patience} keep={DefaultN2v.Keep}");
             return 0;
         }
         if (o.Has("default-arch"))

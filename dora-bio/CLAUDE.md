@@ -66,7 +66,9 @@ CAREamics' Noise2Void by about 1 dB and distorts intensities more). From brick 3
 of the art** in `PATHWAY.md` (stages 1–5). Brick 33 (Q12) found the U-Net the better Noise2Void network on the
 public sets (and faithful: slope 0.93) but not adopted, because it stops too early on FMD. Brick 34 (`ext-data-2`) pinned
 the benchmark data (manifest + `ATTRIBUTIONS.md`) and added BigTIFF, MRC and per-axis stack reading; next is
-35 (Q2: when a Noise2Void U-Net should stop). Owner decisions there: GPU training is
+35 (Q2). Q2 was measured and not adopted (the U-Net missed the FMD guard by 0.0006 dB), and it found that longer Noise2Void
+training learns pixel-correlated noise, which the masked loss can't see; next are S1/S2 (systems track) and Q19 (the U-Net
+with routing). Owner decisions there: GPU training is
 an optional offline step (inference stays pure C# on the CPU), and the shipped model is trained only on synthetic and
 CC BY / CC0 data, with FMD kept for evaluation.
 Pick up the next unfinished brick of the current phase, follow the phase protocol there, and update its status table when a phase closes. Read `docs/RESULTS.md` before
@@ -114,6 +116,7 @@ before anything is built on top.** `./bricks.sh` runs the gates in order and sto
 | 32 | quant-fidelity (field validation) | `Fidelity.cs`, CLI `fidelity`, `tools/experiments/fidelity.sh` | `Brick=32-quant-fidelity`: on synthetic ground truth a perfect output scores perfectly at any brightness, a square root and a square move the slope down and up, invented and erased spots are counted exactly; with data + weights the 18 recorded blocks reproduce |
 | 33 | q12-n2v-recipe (quality pass, SOTA stage 1) | `ExtDatasets.ValidationPlan`, CLI `ext-eval`/`fidelity --split validation`, `train --mask-ratio`, `tools/experiments/q12_n2v.sh` | `Brick=33-q12-n2v-recipe`: the validation plan is exactly the trainer's split; the recorded selection log and Q12's verdict follow the pre-registered rule; with data + runs/q12 the blocks reproduce |
 | 34 | ext-data-2 (SOTA stage 1) | `tools/ext_manifest.json`, `tools/ext_data.py`, `ATTRIBUTIONS.md`, BigTIFF in `IO/TiffCodec.cs`, `IO/MrcReader.cs`, `IO/ImageStack.cs` (`StackLayout`), `Data/ExtStacks.cs`, CLI `stack-check`, `stack-info` | `ext_data.py check` (schema, pins, licence policy) and `attributions --check`; `Brick=34-ext-data-2`: ImageJ/tifffile/BigTIFF/MRC fixtures from independent writers read plane by plane at the right position; contradictory metadata is an error; pairs by pattern + substitution; registries = manifest; with data: every download matches its pins and `stack-check` finds the published counts |
+| 35 | q2-n2v-stop (quality pass, SOTA stage 1) | `TrainerConfig.Selection` (`ValidationSignal`), `KeepLastEpoch`, `TrainingResult.LastParameters`, `TrainingJobOptions.LastWeightsPath`, CLI `train --select/--patience/--keep/--save-last`, `info --default-n2v`, `fmd-eval --precise`, `tools/experiments/q2_stop.sh` | `Brick=35-q2-n2v-stop`: the loss signal picks the lowest-loss epoch where PSNR would pick another; patience 0 runs the whole budget; best or last weights kept and the last always reported; the recorded choice, verdict (on unrounded FMD scores) and `train --mode n2v` defaults follow the pre-registered rule; with data + runs/q2 the blocks reproduce |
 
 Gates 11–15 and 21 need the dataset (the reproductions in gates 15 and 21 also need the weights from `tools/experiments/`) (`tools/fetch_fmd.sh`, about 9 GB into the gitignored `data/fmd/`). Without it, their
 data-dependent part reports SKIPPED (exit code 77) while the pins, unit tests and RESULTS.md checks still run. CI has

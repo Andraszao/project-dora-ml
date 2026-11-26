@@ -24,7 +24,7 @@ export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_SKIP_FIRST_TIME_EXPE
 
 NAMES=(scaffold nn data io inference training cli godot-build godot-smoke ci-core ci-godot fmd-fetch fmd-loader fmd-eval
        n2v-diagnostic structured-mask vst calibration pool-upsample unet unet-tiling arch-eval
-       bench blocked-conv perf-budget q1-recipe tiff-stack-write q10-routing cli-batch q13-conditioning ext-data q18-ext-bench quant-fidelity q12-n2v-recipe ext-data-2)
+       bench blocked-conv perf-budget q1-recipe tiff-stack-write q10-routing cli-batch q13-conditioning ext-data q18-ext-bench quant-fidelity q12-n2v-recipe ext-data-2 q2-n2v-stop)
 CHECKS=(
   "solution builds (warnings are errors, missing XML docs included); every test class belongs to exactly one brick"
   "ConvLayer/DenoisingNet/Adam/Simd: finite-difference gradient checks, optimizer behavior"
@@ -61,6 +61,7 @@ CHECKS=(
   "fidelity (proportionality, ratio error, spots found/real) exact on synthetic ground truth; with data + weights the recorded blocks reproduce"
   "quality pass Q12: validation plan = the trainer's split; the selection log and the verdict follow the pre-registered rule; with data + runs/q12 the blocks reproduce"
   "dataset manifest pinned, licence policy holds, ATTRIBUTIONS.md generated from it; TIFF/BigTIFF/MRC stacks read per axis (independent fixtures); downloaded stack datasets match their published counts"
+  "quality pass Q2: the selection signal decides the epoch (loss never uses ground truth), keep-last and save-last; the recorded choice, verdict and shipped Noise2Void defaults follow the pre-registered rule; with data + runs/q2 the blocks reproduce"
 )
 LAST=$((${#NAMES[@]} - 1))
 LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dora-bricks.XXXXXX")"
@@ -539,6 +540,71 @@ gate_34() {   # ext-data-2 (benchmark data: manifest, licences, attributions, st
   [[ "$present" -gt 0 ]] || { echo "manifest, attributions and readers OK; stack data check skipped (run tools/fetch_ext.sh)"; return 77; }
 }
 
+gate_35() {   # q2-n2v-stop (quality pass Q2, pre-registered in PATHWAY.md, commit 74153da, before any of its code)
+  test_gate 35-q2-n2v-stop || return 1
+  local sel winner chosen expected recorded defaults want
+  sel="$(recorded_block q2-selection)"
+  [[ -n "$sel" ]] || { echo ">> docs/RESULTS.md needs the q2-selection block"; return 1; }
+  # Choice: the highest mean validation PSNR over the four sets; within 0.05 dB of it, C before B before A.
+  winner="$(awk '$1 ~ /^[ABC]$/ && NF == 6 { mean[$1] = $2; if (!seen++ || $2 > best) best = $2 }
+    END { n = split("C B A", o, " "); for (i = 1; i <= n; i++) if ((o[i] in mean) && mean[o[i]] >= best - 0.05 - 1e-9) { print o[i]; exit } }' <<<"$sel")"
+  chosen="$(sed -n 's/^chosen: //p' <<<"$sel")"
+  [[ -n "$winner" && "$winner" == "$chosen" ]] || { echo ">> Q2's validation scores choose '$winner', but the log says '$chosen'"; return 1; }
+  if [[ "$winner" == A ]]; then
+    expected="not-adopted"
+  else
+    local b net
+    for net in unet dilated; do for b in mreb nucleoid care2d fmd; do
+      [[ -n "$(recorded_block "q2-test-$net-$b")" ]] || { echo ">> docs/RESULTS.md needs the q2-test-$net-$b block"; return 1; }
+    done; done
+    [[ -n "$(recorded_block q2-fidelity-unet-mreb)" ]] || { echo ">> docs/RESULTS.md needs the q2-fidelity-unet-mreb block"; return 1; }
+    # Rule (from the test blocks themselves): competitive, improved, the rule alone, or not adopted.
+    expected="$( { for net in unet dilated; do
+                     for b in mreb nucleoid care2d; do recorded_block "q2-test-$net-$b" | awk -v n="$net" '$1 == "mean" { print n, "set", $8 }'; done
+                     recorded_block "q2-test-$net-fmd" | awk -v n="$net" '$1 == "all," { print n, "fmd", $10 }'; done   # unrounded
+                   recorded_block q2-fidelity-unet-mreb | awk '$1 == "method" { print "unet slope", $2 }'; } | awk '
+      $2 == "set" { m[$1] += $3 / 3 } $2 == "fmd" { f[$1] = $3 } $2 == "slope" { s = $3 }
+      END {
+        v = "not-adopted"
+        if (m["unet"] >= 26.70 - 1e-9 && s >= 0.90 - 1e-9 && f["unet"] >= 31.48 - 1e-9) v = "adopted"
+        else if (m["unet"] >= 26.58 - 1e-9 && s >= 0.75 - 1e-9 && f["unet"] >= 31.48 - 1e-9) v = "improved"
+        else if (m["dilated"] >= 26.18 - 1e-9 && f["dilated"] >= 31.58 - 1e-9) v = "rule-only"
+        printf "%s U-Net: public %.3f, MreB slope %.2f, FMD %.4f; dilated: public %.3f, FMD %.4f\n", v, m["unet"], s, f["unet"], m["dilated"], f["dilated"]
+      }')"
+  fi
+  [[ "$(sed -n 's/^verdict: \([a-z-]*\).*/\1/p' <<<"$sel")" == "${expected%% *}" ]] \
+    || { echo ">> Q2's rule gives '${expected%% *}', but the selection log's verdict line disagrees"; return 1; }
+  recorded="$(sed -n 's/.*<!-- q2-verdict: \([a-z-]*\) -->.*/\1/p' docs/RESULTS.md)"
+  [[ "${expected%% *}" == "$recorded" ]] || { echo ">> Q2's rule gives '${expected%% *}' ($expected), but RESULTS.md records '$recorded'"; return 1; }
+  echo ">> Q2: winner $winner; $expected; recorded verdict agrees"
+  # The shipped `train --mode n2v` defaults must follow the verdict.
+  local keep=best; [[ "$winner" == C ]] && keep=last
+  case "${expected%% *}" in
+    adopted|improved) want="unet select=loss patience=0 keep=$keep" ;;
+    rule-only) want="dilated select=loss patience=0 keep=$keep" ;;
+    *) want="dilated select=auto patience=6 keep=best" ;;
+  esac
+  dotnet build tools/DoraBio.Cli -c Release >/dev/null || return 1
+  defaults="$(dotnet "$CLI_DLL" info --default-n2v)"
+  [[ "$defaults" == "$want" ]] || { echo ">> train --mode n2v defaults are '$defaults', but the verdict needs '$want'"; return 1; }
+  [[ "$winner" != A ]] || { echo ">> nothing was tested (A won on validation); verdict and defaults checked"; return 0; }
+  local d
+  for d in deepbacs-mreb deepbacs-nucleoid zerocost-care2d; do
+    [[ -f "$EXT/$d/.complete" && -f "runs/q2/unet_${winner}_$d.bin" && -f "runs/q2/dilated_${winner}_$d.bin" ]] \
+      || { echo "verdict checked; reproduction skipped (needs data/ext and runs/q2)"; return 77; }
+  done
+  [[ -f "$FMD/test_mix/.complete" && -f "runs/q2/unet_${winner}_fmd.bin" && -f "runs/q2/dilated_${winner}_fmd.bin" ]] \
+    || { echo "verdict checked; reproduction skipped (needs data/fmd and runs/q2)"; return 77; }
+  local -A short=([deepbacs-mreb]=mreb [deepbacs-nucleoid]=nucleoid [zerocost-care2d]=care2d)
+  for net in unet dilated; do
+    for d in deepbacs-mreb deepbacs-nucleoid zerocost-care2d; do
+      reproduces "q2-test-$net-${short[$d]}" ext-eval --dataset "$d" --root "$EXT" --weights "runs/q2/${net}_${winner}_$d.bin" || return 1
+    done
+    reproduces "q2-test-$net-fmd" fmd-eval --weights "runs/q2/${net}_${winner}_fmd.bin" --root "$FMD" --levels raw --precise || return 1
+  done
+  reproduces q2-fidelity-unet-mreb fidelity --dataset deepbacs-mreb --root "$EXT" --weights "runs/q2/unet_${winner}_deepbacs-mreb.bin" || return 1
+}
+
 gate_21() {   # arch-eval
   test_gate 21-arch-eval || return 1
   # The rule was set before measuring (PATHWAY.md, P4): the U-Net becomes the default only if, at the same training
@@ -630,6 +696,8 @@ MUTATIONS=(
   '34|src/DoraBio.Core/IO/ImageStack.cs|return Compact("TZC", [frames, slices, channels], StackMetadata.ImageJ);|return Compact("CZT", [channels, slices, frames], StackMetadata.ImageJ);'
   '34|src/DoraBio.Core/IO/TiffCodec.cs|long field = entryAt + 4 + ValueSize;|long field = entryAt + 8;'
   '34|tools/ext_manifest.json|"licence": "CC-BY-SA-4.0", "use": "eval-only"|"licence": "CC-BY-SA-4.0", "use": "train"'
+  '35|src/DoraBio.Core/Training/Trainer.cs|double primary = cfg.Selection == ValidationSignal.Loss ? -score.Loss : score.Psnr ?? -score.Loss;|double primary = score.Psnr ?? -score.Loss;'
+  '35|src/DoraBio.Core/Training/Trainer.cs|if (bestEpoch > 0 && !cfg.KeepLastEpoch)|if (bestEpoch > 0)'
 )
 
 self_test() {

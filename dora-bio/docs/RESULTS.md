@@ -548,6 +548,60 @@ final arguments: --arch unet --features 16 --depth 2 --epochs 30
   whose floor is the noise itself. Small real gains hide under it, so early stopping fires long before the denoising
   stops improving (P4, Q2, Q5). That is the next pass's target: how a U-Net trained by Noise2Void should decide when to
   stop.
+  *Corrected by Q2 (below): on FMD the epoch was chosen by validation PSNR against clean images, not by the masked loss,
+  and stopping early protected widefield; training longer on the loss gains on independent noise and loses on
+  correlated noise.*
+
+## Quality pass Q2: when a Noise2Void U-Net should stop
+
+Brick 35, pre-registered in
+[`PATHWAY.md`](../PATHWAY.md#q2-pre-registration-when-a-noise2void-u-net-should-stop-brick-35) (commit `74153da`) before
+any of its code existed. Reproduce: `tools/experiments/q2_stop.sh` (after Q12's script). **Question:** Q12's U-Net lost
+on FMD because, on FMD, training chose its epoch by validation PSNR against clean images, which jittered on 48 patches
+and peaked at epoch 4. Does choosing by the masked Noise2Void loss over the full budget (B), or simply keeping the last
+epoch (C), fix that without using ground truth?
+
+| Validation PSNR (U-Net; choice) | MreB | Nucleoid | CARE 2D | FMD | Mean of 4 |
+|---|---|---|---|---|---|
+| A: today's rule (Q12's runs) | 26.79 | 34.73 | 20.01 | **31.66** | 28.297 |
+| B: masked loss, all 30 epochs, best epoch | 26.79 | 34.91 | 20.01 | 31.51 | **28.305** |
+| **C: B's run, last epoch** (chosen: within 0.05 dB, so the pre-registered tie-break) | **26.95** | **34.91** | 20.01 | 31.29 | 28.290 |
+
+| Test (PSNR dB) | MreB | Nucleoid | CARE 2D | Public mean | MreB slope / ratio err / spots real | FMD raw (unrounded) | Confocal | Two-photon | Widefield |
+|---|---|---|---|---|---|---|---|---|---|
+| Today's default: dilated, rule A | 25.83 | 33.71 | 19.30 | 26.28 | 0.75 / 8.9% / 34% | 31.68 (31.6795) | 33.77 | 31.85 | 27.97 |
+| Q12's U-Net, rule A | 26.65 | 34.14 | 19.30 | 26.697 | 0.93 / 6.6% / 41% | 31.21 | 32.99 | 31.40 | **27.98** |
+| **U-Net, rule C** | **26.80** | **34.42** | 19.30 | **26.840** | **0.96 / 6.5% / 44%** | 31.48 (**31.4794**) | **33.83** | **32.42** | 26.29 |
+| Dilated, rule C | 26.03 | 34.15 | 19.30 | 26.493 | 0.79 / 8.3% / 32% | 31.31 (31.3073) | 33.38 | 31.39 | 27.74 |
+| CAREamics Noise2Void (Q18) | 27.01 | 34.70 | 19.29 | 27.00 | 0.86 / 7.4% / 56% | | | | |
+
+- **Not adopted, by 0.0006 dB.** The U-Net under rule C clears the public bar (26.84 against 26.70) and the slope bar
+  (0.96 against 0.90), but scores 31.4794 dB on FMD's raw test_mix, under the 31.48 guard (the default's unrounded
+  31.6795 − 0.2 is 31.4795). The 2-decimal table shows 31.48, so the first run of the script declared "adopted";
+  `fmd-eval --precise` was added after that, and the rule was applied to the unrounded value, as Q12 compared its
+  26.697 to 26.70. The rule-only branch fails too: the dilated network under rule C gains 0.21 dB on the public sets
+  but loses 0.37 dB on FMD. **Nothing ships:** `train --mode n2v` keeps the dilated network, rule A and patience 6.
+  <!-- q2-verdict: not-adopted -->
+- **Q12's diagnosis was wrong, and this is the finding of the pass.** Training longer on the masked loss helps where
+  the noise is independent from pixel to pixel and hurts where it isn't:
+  - **Independent noise:** confocal +0.84 dB and two-photon +1.02 for the U-Net, and +0.14 on the public sets.
+    MreB's slope rises to 0.96 (CAREamics: 0.86), the most faithful self-supervised result DORA has. The U-Net is now
+    0.16 dB behind CAREamics' Noise2Void.
+  - **Widefield, whose noise is correlated (0.58, P2):** the U-Net drops from 27.98 to 26.29 dB, below the bilateral
+    filter (26.53). The dilated network drops too (27.97 to 27.74).
+  - On FMD the masked loss kept falling to the end (0.00475 at epoch 4, 0.00407 at 30) while validation PSNR fell
+    from 25.56 to 24.42. With correlated noise the blind spot doesn't hide the noise: a pixel's neighbours predict it,
+    so a longer run learns to reproduce it, and the loss counts that as progress. So epoch 4 wasn't a symptom of a
+    noisy stopping signal; it was ground truth stopping the network before it learned widefield's noise.
+- **What fixes widefield is routing, not stopping.** DORA already has the tool: the noise check flags correlated
+  images (P3), and routing them to a structured-blind-spot network took plain Noise2Void from 31.68 to 32.97 dB. The
+  next pass (Q19) pre-registers the U-Net under rule C with that routing.
+- **Disclosed after the verdict.** While checking the near-tie, B's FMD test score was also computed: 31.60. Its public
+  scores follow from the runs (MreB is Q12's epoch-22 weights, 26.65; nucleoid and CARE 2D are C's, since their best
+  epoch was the last), mean 26.79 and slope 0.93. So B would have passed all three. It lost the pre-registered
+  tie-break to C by 0.015 dB on validation, and that is final; the number changes nothing here. It does show a
+  weakness of the rule: averaging four sets let C's 0.37 dB validation loss on FMD hide behind small public-set gains.
+  Q19's rule adds a per-set floor on validation.
 
 ## Fidelity: what scientists measure (brick 32)
 
@@ -628,7 +682,7 @@ the high-SNR reference (`Fidelity.cs`; reproduce: `tools/experiments/fidelity.sh
 - **Weights trained on FMD are not published** (CC BY-SA terms for derived models are a separate decision). The
   bundled model stays the synthetic one.
 
-## Reproducibility checks (gates 13, 15, 21, 25, 27, 29, 31, 32 and 33)
+## Reproducibility checks (gates 13, 15, 21, 25, 27, 29, 31, 32, 33 and 35)
 
 The blocks marked `fmd-noise` above and the blocks below are verbatim program output. `bricks.sh` gate 13 re-runs
 the first two whenever the data is present and requires an exact match. The block below is
@@ -1549,3 +1603,130 @@ WideField   12   25.23 / 0.374   26.53 / 0.466   27.98 / 0.571
 all         48   27.22 / 0.543   30.22 / 0.752   31.21 / 0.756
 ```
 <!-- /q12-fmd-guard -->
+
+Quality pass Q2 (gate 35 recomputes the choice and the verdict from these blocks, checks `train --mode n2v`'s defaults
+against the verdict, and re-runs the test blocks when `data/ext`, `data/fmd` and `runs/q2/` are present). Selection log:
+`runs/q2/selection.txt`. Test splits: `ext-eval --dataset <set> --weights runs/q2/<net>_C_<set>.bin`; MreB fidelity:
+`fidelity --dataset deepbacs-mreb --weights runs/q2/unet_C_deepbacs-mreb.bin`; FMD: `fmd-eval --weights
+runs/q2/<net>_C_fmd.bin --root data/fmd --levels raw --precise`.
+
+<!-- q2-selection -->
+```text
+validation (U-Net): mean of 4, then MreB, nucleoid, CARE 2D, FMD
+A 28.297 26.79 34.73 20.01 31.66
+B 28.305 26.79 34.91 20.01 31.51
+C 28.290 26.95 34.91 20.01 31.29
+chosen: C
+test unet: public mean 26.840 (MreB 26.80, nucleoid 34.42, CARE 2D 19.30), MreB slope 0.96, FMD raw 31.4794
+test dilated: public mean 26.493 (MreB 26.03, nucleoid 34.15, CARE 2D 19.30), MreB slope 0.79, FMD raw 31.3073
+verdict: not-adopted
+```
+<!-- /q2-selection -->
+
+<!-- q2-test-unet-mreb -->
+```text
+deepbacs-mreb test, 5 images: PSNR (dB) / SSIM vs the high-SNR reference, CARE's normalization
+method: Noise2Void on deepbacs-mreb training split, noisy images only: Q2 unet, masked-loss selection, full budget; last epoch 30; val loss 0.007303
+image        noisy           bilateral       method         
+m31.tif       21.19 / 0.328   21.30 / 0.346   26.36 / 0.762
+m32.tif       20.48 / 0.282   20.72 / 0.319   25.57 / 0.752
+m33.tif       22.40 / 0.423   22.41 / 0.424   27.53 / 0.775
+m34.tif       21.81 / 0.359   21.84 / 0.365   26.84 / 0.766
+m35.tif       22.48 / 0.449   22.48 / 0.449   27.68 / 0.761
+mean          21.67 / 0.368   21.75 / 0.381   26.80 / 0.763
+```
+<!-- /q2-test-unet-mreb -->
+
+<!-- q2-test-unet-nucleoid -->
+```text
+deepbacs-nucleoid test, 2 images: PSNR (dB) / SSIM vs the high-SNR reference, CARE's normalization
+method: Noise2Void on deepbacs-nucleoid training split, noisy images only: Q2 unet, masked-loss selection, full budget; last epoch 30; val loss 0.001354
+image        noisy           bilateral       method         
+m29.tif       26.76 / 0.762   26.95 / 0.782   33.82 / 0.968
+m30.tif       28.01 / 0.854   28.11 / 0.865   35.02 / 0.979
+mean          27.39 / 0.808   27.53 / 0.823   34.42 / 0.973
+```
+<!-- /q2-test-unet-nucleoid -->
+
+<!-- q2-test-unet-care2d -->
+```text
+zerocost-care2d test, 2 images: PSNR (dB) / SSIM vs the high-SNR reference, CARE's normalization
+method: Noise2Void on zerocost-care2d training split, noisy images only: Q2 unet, masked-loss selection, full budget; last epoch 30; val loss 0.00032
+image        noisy           bilateral       method         
+23.tif        18.76 / 0.457   18.78 / 0.465   18.77 / 0.464
+24.tif        19.80 / 0.465   19.83 / 0.473   19.83 / 0.472
+mean          19.28 / 0.461   19.30 / 0.469   19.30 / 0.468
+```
+<!-- /q2-test-unet-care2d -->
+
+<!-- q2-test-unet-fmd -->
+```text
+test_mix level raw: mean PSNR (dB) / SSIM vs ground truth, 8-bit scale
+modality     n  noisy           bilateral       DORA           
+Confocal    20   29.13 / 0.701   31.74 / 0.872   33.83 / 0.896
+TwoPhoton   16   26.32 / 0.473   31.07 / 0.816   32.42 / 0.844
+WideField   12   25.23 / 0.374   26.53 / 0.466   26.29 / 0.447
+all         48   27.22 / 0.543   30.22 / 0.752   31.48 / 0.767
+all, unrounded: noisy 27.2168 dB, bilateral 30.2157 dB, DORA 31.4794 dB
+```
+<!-- /q2-test-unet-fmd -->
+
+<!-- q2-test-dilated-mreb -->
+```text
+deepbacs-mreb test, 5 images: PSNR (dB) / SSIM vs the high-SNR reference, CARE's normalization
+method: Noise2Void on deepbacs-mreb training split, noisy images only: Q2 dilated, masked-loss selection, full budget; last epoch 30; val loss 0.007652
+image        noisy           bilateral       method         
+m31.tif       21.19 / 0.328   21.30 / 0.346   25.61 / 0.685
+m32.tif       20.48 / 0.282   20.72 / 0.319   24.82 / 0.661
+m33.tif       22.40 / 0.423   22.41 / 0.424   26.80 / 0.731
+m34.tif       21.81 / 0.359   21.84 / 0.365   26.12 / 0.702
+m35.tif       22.48 / 0.449   22.48 / 0.449   26.79 / 0.720
+mean          21.67 / 0.368   21.75 / 0.381   26.03 / 0.700
+```
+<!-- /q2-test-dilated-mreb -->
+
+<!-- q2-test-dilated-nucleoid -->
+```text
+deepbacs-nucleoid test, 2 images: PSNR (dB) / SSIM vs the high-SNR reference, CARE's normalization
+method: Noise2Void on deepbacs-nucleoid training split, noisy images only: Q2 dilated, masked-loss selection, full budget; last epoch 30; val loss 0.001466
+image        noisy           bilateral       method         
+m29.tif       26.76 / 0.762   26.95 / 0.782   33.61 / 0.965
+m30.tif       28.01 / 0.854   28.11 / 0.865   34.68 / 0.974
+mean          27.39 / 0.808   27.53 / 0.823   34.15 / 0.969
+```
+<!-- /q2-test-dilated-nucleoid -->
+
+<!-- q2-test-dilated-care2d -->
+```text
+zerocost-care2d test, 2 images: PSNR (dB) / SSIM vs the high-SNR reference, CARE's normalization
+method: Noise2Void on zerocost-care2d training split, noisy images only: Q2 dilated, masked-loss selection, full budget; last epoch 30; val loss 0.0003397
+image        noisy           bilateral       method         
+23.tif        18.76 / 0.457   18.78 / 0.465   18.77 / 0.463
+24.tif        19.80 / 0.465   19.83 / 0.473   19.83 / 0.471
+mean          19.28 / 0.461   19.30 / 0.469   19.30 / 0.467
+```
+<!-- /q2-test-dilated-care2d -->
+
+<!-- q2-test-dilated-fmd -->
+```text
+test_mix level raw: mean PSNR (dB) / SSIM vs ground truth, 8-bit scale
+modality     n  noisy           bilateral       DORA           
+Confocal    20   29.13 / 0.701   31.74 / 0.872   33.38 / 0.878
+TwoPhoton   16   26.32 / 0.473   31.07 / 0.816   31.39 / 0.780
+WideField   12   25.23 / 0.374   26.53 / 0.466   27.74 / 0.557
+all         48   27.22 / 0.543   30.22 / 0.752   31.31 / 0.765
+all, unrounded: noisy 27.2168 dB, bilateral 30.2157 dB, DORA 31.3073 dB
+```
+<!-- /q2-test-dilated-fmd -->
+
+<!-- q2-fidelity-unet-mreb -->
+```text
+deepbacs-mreb test, 5 images: fidelity vs the high-SNR reference (1.00 / 0% / 100% / 100% is perfect)
+method: Noise2Void on deepbacs-mreb training split, noisy images only: Q2 unet, masked-loss selection, full budget; last epoch 30; val loss 0.007303
+            slope ratio err spots found spots real
+noisy        1.00      7.1%       55.2%       7.1%
+bilateral    1.01      7.3%       54.6%       8.1%
+method       0.96      6.5%       43.4%      43.9%
+over 711 foreground tiles and 2534 reference spots
+```
+<!-- /q2-fidelity-unet-mreb -->

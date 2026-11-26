@@ -28,7 +28,10 @@ public sealed class Trainer
         _config = config;
     }
 
-    /// <summary>Runs training to completion, cancellation, mastery or early stop. The network ends up holding its best weights.</summary>
+    /// <summary>
+    /// Runs training to completion, cancellation, mastery or early stop. The network ends up holding its best weights
+    /// (or its last, with <see cref="TrainerConfig.KeepLastEpoch"/>).
+    /// </summary>
     /// <param name="dataset">Normalized image pairs. Split into train and validation by FOV inside this call.</param>
     /// <param name="onEpoch">Called on the training thread after every epoch (log it, persist it, or marshal it to a UI).</param>
     /// <param name="cancellation">Checked between steps; the current step finishes, then the best weights are restored.</param>
@@ -69,7 +72,7 @@ public sealed class Trainer
             // 2. Score on the fixed validation patches. With ground truth, PSNR is the score. Without it,
             //    the blind-spot loss is the only signal (negated so that higher is better in both cases).
             var score = validation.Evaluate(_net);
-            double primary = score.Psnr ?? -score.Loss;
+            double primary = cfg.Selection == ValidationSignal.Loss ? -score.Loss : score.Psnr ?? -score.Loss;
             var events = new List<string>();
 
             // 3. Keep the best weights. On a plateau, decay the learning rate every PlateauPatience stale epochs.
@@ -113,9 +116,14 @@ public sealed class Trainer
             if (epochsSinceBest >= cfg.EarlyStopPatience) { stopReason = "early_stop"; break; }
         }
 
-        // Hand back the best weights seen, not whatever the last epoch happened to leave (v1 saved the last).
-        if (bestEpoch > 0) Array.Copy(bestParameters, _net.Parameters, bestParameters.Length);
-        return new TrainingResult(history, bestEpoch, bestScore, validation.NoisyPsnr, stopReason, targets?.IsMastered ?? false);
+        // Hand back the best weights seen, not whatever the last epoch happened to leave (v1 saved the last),
+        // unless the config asks for the last epoch's.
+        float[]? last = history.Count > 0 ? (float[])_net.Parameters.Clone() : null;
+        if (bestEpoch > 0 && !cfg.KeepLastEpoch) Array.Copy(bestParameters, _net.Parameters, bestParameters.Length);
+        return new TrainingResult(history, bestEpoch, bestScore, validation.NoisyPsnr, stopReason, targets?.IsMastered ?? false)
+        {
+            LastParameters = last,
+        };
     }
 }
 
