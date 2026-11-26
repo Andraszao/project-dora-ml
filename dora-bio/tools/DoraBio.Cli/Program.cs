@@ -52,6 +52,9 @@ public static class Program
                    Does the image's noise look independent between pixels, as Noise2Void assumes? (no ground truth needed)
           ext-check [--root data/ext]
                    Verify the public paired datasets from tools/fetch_ext.sh: counts, pairing, decoding, brightness.
+          fidelity (--dataset NAME [--root data/ext] | --fmd data/fmd [--level raw]) (--weights W.bin | --predictions DIR [--label TEXT])
+                   What scientists measure, vs the high-SNR reference: are regional intensities still proportional
+                   (slope 1.00) and how far off (ratio error), and are spots kept (found) and not invented (real)?
           ext-eval --dataset NAME (--weights WEIGHTS.bin | --predictions DIR [--label TEXT]) [--root data/ext]
                    Score a model, or another tool's outputs (DIR/<test file name>), on an external set's test images with
                    CARE's protocol: reference normalized by its 0.1-99.9 percentiles, outputs matched by least squares.
@@ -101,6 +104,7 @@ public static class Program
                 "fmd-check" => FmdCheck(options),
                 "ext-check" => ExtCheck(options),
                 "ext-eval" => ExtEval(options),
+                "fidelity" => FidelityCommand(options),
                 "fmd-eval" => FmdEval(options),
                 "fmd-noise" => FmdNoise(options),
                 "fmd-diagnose" => FmdDiagnose(options),
@@ -661,6 +665,70 @@ public static class Program
         Console.WriteLine($"{"mean",-12} {scores.Average(s => s.NoisyPsnr),6:0.00} / {scores.Average(s => s.NoisySsim):0.000}  " +
                           $"{scores.Average(s => s.BilateralPsnr),6:0.00} / {scores.Average(s => s.BilateralSsim):0.000}  " +
                           $"{scores.Average(s => s.MethodPsnr),6:0.00} / {scores.Average(s => s.MethodSsim):0.000}");
+        return 0;
+    }
+
+    /// <summary>
+    /// <c>fidelity</c>: the measurements of brick 32 (<see cref="Fidelity"/>) for the noisy input, the bilateral filter and a
+    /// model or another tool's saved outputs, pooled over an external set's test images or FMD's test_mix at one noise
+    /// level. Deterministic, so docs/RESULTS.md records it verbatim and gate 32 re-runs it.
+    /// </summary>
+    private static int FidelityCommand(Options o)
+    {
+        List<(string Name, string NoisyPath, string CleanPath)> plan;
+        string scope;
+        if (o.StringOrNull("fmd") is { } fmdRoot)
+        {
+            string level = o.String("level", "raw");
+            plan = FmdDataset.PlanTestMix(Path.Combine(fmdRoot, "test_mix"), level).Select(p => (p.Name, p.NoisyPath, p.CleanPath)).ToList();
+            scope = $"FMD test_mix level {level}";
+        }
+        else
+        {
+            var dataset = ExtDatasets.Get(o.Required("dataset"));
+            plan = ExtDatasets.PlanPairs(o.String("root", "data/ext"), dataset, ExtSplit.Test)
+                .Select(p => (Path.GetFileName(p.NoisyPath), p.NoisyPath, p.CleanPath)).ToList();
+            scope = $"{dataset.Name} test";
+        }
+
+        Func<string, GrayImage, GrayImage> method;
+        string label;
+        if (o.StringOrNull("weights") is { } weights)
+        {
+            var (net, info) = WeightsFile.Load(weights);
+            var denoiser = new FrameDenoiser(net);
+            method = (_, noisy) => denoiser.Denoise(noisy).Output;
+            label = info.Provenance;
+        }
+        else if (o.StringOrNull("predictions") is { } dir)
+        {
+            method = (name, _) => ImageLoader.Load(Path.Combine(dir, name));
+            label = o.String("label", "outputs in " + Path.GetFileName(Path.TrimEndingDirectorySeparator(dir)));
+        }
+        else throw new ArgumentException("fidelity needs --weights or --predictions.");
+
+        var rows = new List<FidelityScore>[3];
+        for (int r = 0; r < 3; r++) rows[r] = [];
+        foreach (var (name, noisyPath, cleanPath) in plan)
+        {
+            var noisy = ImageLoader.Load(noisyPath);
+            var clean = ImageLoader.Load(cleanPath);
+            var input = Normalization.Apply(noisy, Normalization.FromPercentiles(noisy.Pixels));
+            rows[0].Add(Fidelity.Measure(noisy, clean));
+            rows[1].Add(Fidelity.Measure(BilateralBaseline.FilterAuto(input), clean));
+            rows[2].Add(Fidelity.Measure(method(name, noisy), clean));
+        }
+        var pooled = rows.Select(Fidelity.Pool).ToArray();
+        Console.WriteLine($"{scope}, {plan.Count} images: fidelity vs the high-SNR reference (1.00 / 0% / 100% / 100% is perfect)");
+        Console.WriteLine($"method: {label}");
+        Console.WriteLine($"{"",-10} {"slope",6} {"ratio err",9} {"spots found",11} {"spots real",10}");
+        string[] names = ["noisy", "bilateral", "method"];
+        for (int r = 0; r < 3; r++)
+        {
+            var p = pooled[r];
+            Console.WriteLine($"{names[r],-10} {p.Slope,6:0.00} {p.RatioError * 100,8:0.0}% {p.SpotsFound * 100,10:0.0}% {p.SpotsReal * 100,9:0.0}%");
+        }
+        Console.WriteLine($"over {pooled[2].ForegroundTiles} foreground tiles and {pooled[2].ReferenceSpots} reference spots");
         return 0;
     }
 

@@ -24,7 +24,7 @@ export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_SKIP_FIRST_TIME_EXPE
 
 NAMES=(scaffold nn data io inference training cli godot-build godot-smoke ci-core ci-godot fmd-fetch fmd-loader fmd-eval
        n2v-diagnostic structured-mask vst calibration pool-upsample unet unet-tiling arch-eval
-       bench blocked-conv perf-budget q1-recipe tiff-stack-write q10-routing cli-batch q13-conditioning ext-data q18-ext-bench)
+       bench blocked-conv perf-budget q1-recipe tiff-stack-write q10-routing cli-batch q13-conditioning ext-data q18-ext-bench quant-fidelity)
 CHECKS=(
   "solution builds (warnings are errors, missing XML docs included); every test class belongs to exactly one brick"
   "ConvLayer/DenoisingNet/Adam/Simd: finite-difference gradient checks, optimizer behavior"
@@ -58,6 +58,7 @@ CHECKS=(
   "quality pass Q13: FiLM gradients, untrained = plain bit for bit, exact tiling; the recorded verdict and the default follow the pre-registered rule; with data + weights the blocks reproduce"
   "external datasets: fetch_ext.sh pins every archive (record, size, sha256); pairing by name; with data: ext-check consistent"
   "quality pass Q18: CARE's scoring protocol; the recorded verdict follows the pre-registered rule; with data + runs/q18 the blocks reproduce"
+  "fidelity (proportionality, ratio error, spots found/real) exact on synthetic ground truth; with data + weights the recorded blocks reproduce"
 )
 LAST=$((${#NAMES[@]} - 1))
 LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dora-bricks.XXXXXX")"
@@ -442,6 +443,33 @@ gate_31() {   # q18-ext-bench (quality pass Q18, pre-registered in PATHWAY.md, c
   done
 }
 
+gate_32() {   # quant-fidelity
+  test_gate 32-quant-fidelity || return 1
+  local n count=0 skipped=0
+  count="$(grep -c '^<!-- fidelity-' docs/RESULTS.md)"
+  [[ "$count" -eq 18 ]] || { echo ">> docs/RESULTS.md should hold 18 fidelity blocks, found $count"; return 1; }
+  dotnet build tools/DoraBio.Cli -c Release >/dev/null || return 1
+  local -A fmd=([bundled]=godot/models/dora_bio_weights.bin [sup-dilated]=runs/p3/sup_plain.bin [sup-unet]=runs/p4/unet_sup.bin
+                [sup-unet-levels]=runs/q1/unet_levels60.bin [n2v-dilated]=runs/p3/n2v_plain.bin [n2v-unet]=runs/p4/unet_n2v.bin)
+  for n in bundled sup-dilated sup-unet sup-unet-levels n2v-dilated n2v-unet; do
+    if [[ -f "$FMD/test_mix/.complete" && -f "${fmd[$n]}" ]]; then
+      reproduces "fidelity-fmd-$n" fidelity --fmd "$FMD" --weights "${fmd[$n]}" || return 1
+    else skipped=$((skipped + 1)); fi
+  done
+  local d
+  for d in deepbacs-mreb deepbacs-nucleoid zerocost-care2d; do
+    if [[ -f "$EXT/$d/.complete" && -f "runs/q18/dora_sup_$d.bin" && -f "runs/q18/careamics_care/$d/timing.json" ]]; then
+      reproduces "fidelity-$d-dora-n2v" fidelity --dataset "$d" --root "$EXT" --weights "runs/q18/dora_n2v_$d.bin" || return 1
+      reproduces "fidelity-$d-dora-sup" fidelity --dataset "$d" --root "$EXT" --weights "runs/q18/dora_sup_$d.bin" || return 1
+      reproduces "fidelity-$d-careamics-n2v" fidelity --dataset "$d" --root "$EXT" --predictions "runs/q18/careamics_n2v/$d" \
+        --label "CAREamics 0.3.5 Noise2Void, default 2D config, 30 x 50 steps x batch 16, CPU" || return 1
+      reproduces "fidelity-$d-careamics-care" fidelity --dataset "$d" --root "$EXT" --predictions "runs/q18/careamics_care/$d" \
+        --label "CAREamics 0.3.5 CARE, default 2D config, 60 x 50 steps x batch 16, CPU" || return 1
+    else skipped=$((skipped + 4)); fi
+  done
+  [[ $skipped -eq 0 ]] || { echo "unit tests passed; $skipped of 18 fidelity blocks not re-run (their data or weights are missing)"; return 77; }
+}
+
 gate_21() {   # arch-eval
   test_gate 21-arch-eval || return 1
   # The rule was set before measuring (PATHWAY.md, P4): the U-Net becomes the default only if, at the same training
@@ -527,6 +555,7 @@ MUTATIONS=(
   '30|src/DoraBio.Core/Data/ExtDatasets.cs|.Where(n => !clean.Contains(n)).ToList();|.Where(n => false).ToList();'
   '31|src/DoraBio.Core/ExtBenchmark.cs|double a = var > 0 ? cov / var : 0, b = mr - a * mx;|double a = 1, b = mr - a * mx;'
   '31|docs/RESULTS.md|<!-- q18-verdict: not-competitive -->|<!-- q18-verdict: competitive -->'
+  '32|src/DoraBio.Core/Fidelity.cs|double logGain = mo - mr;|double logGain = 0;'
 )
 
 self_test() {

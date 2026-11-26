@@ -492,6 +492,68 @@ same step budget as DORA's matching recipe, on the same 4-core CPU.
   one seed per method; the Q13 seed spread was about 0.3 dB. Both tools ran their CPU defaults with an equal step
   budget, not the longer GPU training their authors used, so either could score higher with more training.
 
+## Fidelity: what scientists measure (brick 32)
+
+PSNR rewards being close on average. A biologist measures specific things: the brightness of a region relative to
+another (after subtracting background), and whether a punctum is really there. `dora-bio fidelity` measures both against
+the high-SNR reference (`Fidelity.cs`; reproduce: `tools/experiments/fidelity.sh`).
+
+- **Slope** (1.00 is perfect): k in output ∝ reference^k over the foreground tiles (16 px, reference mean ≥ 0.1), with
+  both images background-subtracted and scaled by their own percentiles. Below 1, the output compresses contrast: bright
+  regions are dimmed relative to dim ones, so a measured ratio between two cells comes out too small.
+- **Ratio error** (0% is perfect): the typical error of one tile's intensity once the overall gain is taken out.
+- **Spots found / real** (100% is perfect): blobs of 2–4 px detected in both images by the same detector and threshold
+  (set on the reference), paired within 2 px. "Found" is the share of the reference's spots the output keeps; "real" is
+  the share of the output's spots that the reference has.
+
+| Slope / ratio error / spots found / spots real | |
+|---|---|
+| **FMD test_mix, raw (48 images)** | |
+| Noisy input | 0.83 / 7.5% / 65.4% / 14.3% |
+| Bundled synthetic model | Noise2Void / on / 10 / SYNTHETIC |
+| Supervised, dilated (P3) | Supervised / on / FMD / (12 |
+| Supervised, U-Net (P4) | **Supervised / on / FMD / (12** |
+| Supervised, all-level U-Net (Q1) | Supervised / on / FMD / (12 |
+| Noise2Void, dilated (P3) | Noise2Void / on / FMD / (12 |
+| Noise2Void, U-Net (P4) | Noise2Void / on / FMD / (12 |
+| **DeepBacs MreB (5 images)** | |
+| Noisy input | 1.00 / 7.1% / 55.2% / 7.1% |
+| DORA Noise2Void | Noise2Void / on / deepbacs-mreb / training |
+| CAREamics Noise2Void | CAREamics / 0.3.5 / Noise2Void, / default |
+| DORA supervised | Supervised / on / deepbacs-mreb / training |
+| CAREamics CARE | CAREamics / 0.3.5 / CARE, / default |
+| **DeepBacs nucleoid (2 images)** | |
+| Noisy input | 1.00 / 3.0% / 21.2% / 14.2% |
+| DORA Noise2Void | Noise2Void / on / deepbacs-nucleoid / training |
+| CAREamics Noise2Void | CAREamics / 0.3.5 / Noise2Void, / default |
+| DORA supervised | Supervised / on / deepbacs-nucleoid / training |
+| CAREamics CARE | CAREamics / 0.3.5 / CARE, / default |
+| **CARE 2D (2 images)** | |
+| Noisy input | 0.75 / 31.0% / 4.2% / 35.3% |
+| DORA Noise2Void | Noise2Void / on / zerocost-care2d / training |
+| CAREamics Noise2Void | CAREamics / 0.3.5 / Noise2Void, / default |
+| DORA supervised | Supervised / on / zerocost-care2d / training |
+| CAREamics CARE | CAREamics / 0.3.5 / CARE, / default |
+
+- **DORA's supervised U-Net keeps measurements honest on FMD.** On FMD's raw frames: slope 1.02, the lowest ratio error
+  (3.9%), and 72% of its spots are real (the noisy input: 14%). On MreB it compresses contrast slightly (0.94) where CARE
+  slightly exaggerates it (1.03), with a lower ratio error than CARE (6.7% against 7.4%).
+- **DORA's Noise2Void distorts intensities.** On MreB its slope is 0.75 and its ratio error (8.9%) is *worse than the
+  untouched image's* (7.1%), so a ratio measured on its output is less accurate than one measured on the raw frame.
+  CAREamics' Noise2Void distorts less (0.86, 7.4%), and twice as many of its spots are real (56% against 34%). On FMD
+  both of DORA's Noise2Void networks compress contrast (0.86–0.88) and leave most noise peaks in place (23–27% of spots
+  real). This is a second target for Q12, next to the 1 dB PSNR gap: a better self-supervised model has to keep the
+  slope near 1, not just raise the PSNR.
+- **What these numbers can't show.**
+  - The high-SNR references are not noise-free, so even a perfect denoiser would show some ratio error, and some of the
+    reference's "spots" are noise peaks, which keeps "found" well below 100% for every method.
+  - A noisy output has many peaks (on MreB about 13 per real spot), so some pair with reference spots by chance; its
+    "found" is inflated.
+  - Nucleoids are not punctate, so the spot columns say little there.
+  - On CARE 2D even the untouched image is far from its reference (slope 0.75, ratio error 31%), so the pairs differ by
+    more than noise (acquisition or registration). A supervised model learns that difference; CARE learns it with less
+    distortion (0.95) than DORA (0.67).
+
 ## What these results do and don't show
 
 - **Mostly one seed per configuration.** Q13 ran the all-level U-Net recipe with three seeds: its raw score spread
@@ -509,7 +571,7 @@ same step budget as DORA's matching recipe, on the same 4-core CPU.
 - **Weights trained on FMD are not published** (CC BY-SA terms for derived models are a separate decision). The
   bundled model stays the synthetic one.
 
-## Reproducibility checks (gates 13, 15, 21, 25, 27, 29 and 31)
+## Reproducibility checks (gates 13, 15, 21, 25, 27, 29, 31 and 32)
 
 The blocks marked `fmd-noise` above and the blocks below are verbatim program output. `bricks.sh` gate 13 re-runs
 the first two whenever the data is present and requires an exact match. The block below is
@@ -1147,3 +1209,222 @@ image        noisy           bilateral       method
 mean          19.28 / 0.461   19.30 / 0.469   20.08 / 0.520
 ```
 <!-- /q18-careamics-care-care2d -->
+
+Fidelity (gate 32 re-runs these when their data and weights are present). Each is `dora-bio fidelity` with the arguments
+in `tools/experiments/fidelity.sh`:
+
+<!-- fidelity-fmd-bundled -->
+```text
+FMD test_mix level raw, 48 images: fidelity vs the high-SNR reference (1.00 / 0% / 100% / 100% is perfect)
+method: Noise2Void on 10 SYNTHETIC 256px fluorescence-like frames (dora-bio synth --seed 1); clean images used only to score validation; best epoch 25; val loss 0.01039; val PSNR 28.67 dB (+8.11 dB over noisy)
+            slope ratio err spots found spots real
+noisy        0.83      7.5%       65.4%      14.3%
+bilateral    0.93      6.0%       64.9%      26.1%
+method       0.86      5.6%       51.0%      44.2%
+over 23096 foreground tiles and 34412 reference spots
+```
+<!-- /fidelity-fmd-bundled -->
+
+<!-- fidelity-fmd-sup-dilated -->
+```text
+FMD test_mix level raw, 48 images: fidelity vs the high-SNR reference (1.00 / 0% / 100% / 100% is perfect)
+method: Supervised on FMD (12 categories, FOV 19 excluded): supervised raw -> ground truth; best epoch 30; val loss 0.001538; val PSNR 28.13 dB (+6.10 dB over noisy)
+            slope ratio err spots found spots real
+noisy        0.83      7.5%       65.4%      14.3%
+bilateral    0.93      6.0%       64.9%      26.1%
+method       0.97      4.5%       51.2%      65.7%
+over 23096 foreground tiles and 34412 reference spots
+```
+<!-- /fidelity-fmd-sup-dilated -->
+
+<!-- fidelity-fmd-sup-unet -->
+```text
+FMD test_mix level raw, 48 images: fidelity vs the high-SNR reference (1.00 / 0% / 100% / 100% is perfect)
+method: Supervised on FMD (12 categories, FOV 19 excluded): U-Net, supervised raw -> ground truth; best epoch 28; val loss 0.001168; val PSNR 29.33 dB (+7.30 dB over noisy)
+            slope ratio err spots found spots real
+noisy        0.83      7.5%       65.4%      14.3%
+bilateral    0.93      6.0%       64.9%      26.1%
+method       1.02      3.9%       58.3%      71.5%
+over 23096 foreground tiles and 34412 reference spots
+```
+<!-- /fidelity-fmd-sup-unet -->
+
+<!-- fidelity-fmd-sup-unet-levels -->
+```text
+FMD test_mix level raw, 48 images: fidelity vs the high-SNR reference (1.00 / 0% / 100% / 100% is perfect)
+method: Supervised on FMD (12 categories, FOV 19 excluded): U-Net, supervised, all 5 noise levels, 60 epochs; best epoch 46; val loss 0.0009593; val PSNR 30.18 dB (+5.38 dB over noisy)
+            slope ratio err spots found spots real
+noisy        0.83      7.5%       65.4%      14.3%
+bilateral    0.93      6.0%       64.9%      26.1%
+method       1.00      3.9%       59.4%      63.5%
+over 23096 foreground tiles and 34412 reference spots
+```
+<!-- /fidelity-fmd-sup-unet-levels -->
+
+<!-- fidelity-fmd-n2v-dilated -->
+```text
+FMD test_mix level raw, 48 images: fidelity vs the high-SNR reference (1.00 / 0% / 100% / 100% is perfect)
+method: Noise2Void on FMD (12 categories, FOV 19 excluded): Noise2Void, raw frames, plain blind spots; best epoch 23; val loss 0.004518; val PSNR 25.39 dB (+3.36 dB over noisy)
+            slope ratio err spots found spots real
+noisy        0.83      7.5%       65.4%      14.3%
+bilateral    0.93      6.0%       64.9%      26.1%
+method       0.88      5.7%       64.8%      27.4%
+over 23096 foreground tiles and 34412 reference spots
+```
+<!-- /fidelity-fmd-n2v-dilated -->
+
+<!-- fidelity-fmd-n2v-unet -->
+```text
+FMD test_mix level raw, 48 images: fidelity vs the high-SNR reference (1.00 / 0% / 100% / 100% is perfect)
+method: Noise2Void on FMD (12 categories, FOV 19 excluded): U-Net, Noise2Void, raw frames, plain blind spots; best epoch 4; val loss 0.004745; val PSNR 25.56 dB (+3.53 dB over noisy)
+            slope ratio err spots found spots real
+noisy        0.83      7.5%       65.4%      14.3%
+bilateral    0.93      6.0%       64.9%      26.1%
+method       0.86      6.1%       64.0%      23.3%
+over 23096 foreground tiles and 34412 reference spots
+```
+<!-- /fidelity-fmd-n2v-unet -->
+
+<!-- fidelity-deepbacs-mreb-dora-n2v -->
+```text
+deepbacs-mreb test, 5 images: fidelity vs the high-SNR reference (1.00 / 0% / 100% / 100% is perfect)
+method: Noise2Void on deepbacs-mreb training split, noisy images only: DORA Noise2Void, default recipe; best epoch 28; val loss 0.007466
+            slope ratio err spots found spots real
+noisy        1.00      7.1%       55.2%       7.1%
+bilateral    1.01      7.3%       54.6%       8.1%
+method       0.75      8.9%       45.6%      34.2%
+over 711 foreground tiles and 2534 reference spots
+```
+<!-- /fidelity-deepbacs-mreb-dora-n2v -->
+
+<!-- fidelity-deepbacs-mreb-dora-sup -->
+```text
+deepbacs-mreb test, 5 images: fidelity vs the high-SNR reference (1.00 / 0% / 100% / 100% is perfect)
+method: Supervised on deepbacs-mreb training pairs: DORA supervised U-Net; best epoch 31; val loss 0.002245; val PSNR 26.49 dB (+6.43 dB over noisy)
+            slope ratio err spots found spots real
+noisy        1.00      7.1%       55.2%       7.1%
+bilateral    1.01      7.3%       54.6%       8.1%
+method       0.94      6.7%       38.5%      67.2%
+over 711 foreground tiles and 2534 reference spots
+```
+<!-- /fidelity-deepbacs-mreb-dora-sup -->
+
+<!-- fidelity-deepbacs-mreb-careamics-n2v -->
+```text
+deepbacs-mreb test, 5 images: fidelity vs the high-SNR reference (1.00 / 0% / 100% / 100% is perfect)
+method: CAREamics 0.3.5 Noise2Void, default 2D config, 30 x 50 steps x batch 16, CPU
+            slope ratio err spots found spots real
+noisy        1.00      7.1%       55.2%       7.1%
+bilateral    1.01      7.3%       54.6%       8.1%
+method       0.86      7.4%       43.8%      56.2%
+over 711 foreground tiles and 2534 reference spots
+```
+<!-- /fidelity-deepbacs-mreb-careamics-n2v -->
+
+<!-- fidelity-deepbacs-mreb-careamics-care -->
+```text
+deepbacs-mreb test, 5 images: fidelity vs the high-SNR reference (1.00 / 0% / 100% / 100% is perfect)
+method: CAREamics 0.3.5 CARE, default 2D config, 60 x 50 steps x batch 16, CPU
+            slope ratio err spots found spots real
+noisy        1.00      7.1%       55.2%       7.1%
+bilateral    1.01      7.3%       54.6%       8.1%
+method       1.03      7.4%       41.4%      66.2%
+over 711 foreground tiles and 2534 reference spots
+```
+<!-- /fidelity-deepbacs-mreb-careamics-care -->
+
+<!-- fidelity-deepbacs-nucleoid-dora-n2v -->
+```text
+deepbacs-nucleoid test, 2 images: fidelity vs the high-SNR reference (1.00 / 0% / 100% / 100% is perfect)
+method: Noise2Void on deepbacs-nucleoid training split, noisy images only: DORA Noise2Void, default recipe; best epoch 21; val loss 0.001445
+            slope ratio err spots found spots real
+noisy        1.00      3.0%       21.2%      14.2%
+bilateral    1.01      3.1%       19.6%      14.0%
+method       0.93      3.6%       34.5%      11.5%
+over 262 foreground tiles and 3738 reference spots
+```
+<!-- /fidelity-deepbacs-nucleoid-dora-n2v -->
+
+<!-- fidelity-deepbacs-nucleoid-dora-sup -->
+```text
+deepbacs-nucleoid test, 2 images: fidelity vs the high-SNR reference (1.00 / 0% / 100% / 100% is perfect)
+method: Supervised on deepbacs-nucleoid training pairs: DORA supervised U-Net; best epoch 22; val loss 0.0003181; val PSNR 34.97 dB (+7.18 dB over noisy)
+            slope ratio err spots found spots real
+noisy        1.00      3.0%       21.2%      14.2%
+bilateral    1.01      3.1%       19.6%      14.0%
+method       0.98      2.8%       21.2%      11.9%
+over 262 foreground tiles and 3738 reference spots
+```
+<!-- /fidelity-deepbacs-nucleoid-dora-sup -->
+
+<!-- fidelity-deepbacs-nucleoid-careamics-n2v -->
+```text
+deepbacs-nucleoid test, 2 images: fidelity vs the high-SNR reference (1.00 / 0% / 100% / 100% is perfect)
+method: CAREamics 0.3.5 Noise2Void, default 2D config, 30 x 50 steps x batch 16, CPU
+            slope ratio err spots found spots real
+noisy        1.00      3.0%       21.2%      14.2%
+bilateral    1.01      3.1%       19.6%      14.0%
+method       0.97      3.1%       22.2%      12.8%
+over 262 foreground tiles and 3738 reference spots
+```
+<!-- /fidelity-deepbacs-nucleoid-careamics-n2v -->
+
+<!-- fidelity-deepbacs-nucleoid-careamics-care -->
+```text
+deepbacs-nucleoid test, 2 images: fidelity vs the high-SNR reference (1.00 / 0% / 100% / 100% is perfect)
+method: CAREamics 0.3.5 CARE, default 2D config, 60 x 50 steps x batch 16, CPU
+            slope ratio err spots found spots real
+noisy        1.00      3.0%       21.2%      14.2%
+bilateral    1.01      3.1%       19.6%      14.0%
+method       0.99      3.0%       17.8%      14.9%
+over 262 foreground tiles and 3738 reference spots
+```
+<!-- /fidelity-deepbacs-nucleoid-careamics-care -->
+
+<!-- fidelity-zerocost-care2d-dora-n2v -->
+```text
+zerocost-care2d test, 2 images: fidelity vs the high-SNR reference (1.00 / 0% / 100% / 100% is perfect)
+method: Noise2Void on zerocost-care2d training split, noisy images only: DORA Noise2Void, default recipe; best epoch 28; val loss 0.0003379
+            slope ratio err spots found spots real
+noisy        0.75     31.0%        4.2%      35.3%
+bilateral    0.76     31.3%        4.3%      34.4%
+method       0.75     31.1%        4.3%      35.0%
+over 7297 foreground tiles and 2584 reference spots
+```
+<!-- /fidelity-zerocost-care2d-dora-n2v -->
+
+<!-- fidelity-zerocost-care2d-dora-sup -->
+```text
+zerocost-care2d test, 2 images: fidelity vs the high-SNR reference (1.00 / 0% / 100% / 100% is perfect)
+method: Supervised on zerocost-care2d training pairs: DORA supervised U-Net; best epoch 33; val loss 0.01024; val PSNR 19.90 dB (+1.61 dB over noisy)
+            slope ratio err spots found spots real
+noisy        0.75     31.0%        4.2%      35.3%
+bilateral    0.76     31.3%        4.3%      34.4%
+method       0.67     22.8%        6.4%      41.4%
+over 7297 foreground tiles and 2584 reference spots
+```
+<!-- /fidelity-zerocost-care2d-dora-sup -->
+
+<!-- fidelity-zerocost-care2d-careamics-n2v -->
+```text
+zerocost-care2d test, 2 images: fidelity vs the high-SNR reference (1.00 / 0% / 100% / 100% is perfect)
+method: CAREamics 0.3.5 Noise2Void, default 2D config, 30 x 50 steps x batch 16, CPU
+            slope ratio err spots found spots real
+noisy        0.75     31.0%        4.2%      35.3%
+bilateral    0.76     31.3%        4.3%      34.4%
+method       0.80     33.0%        5.5%      31.9%
+over 7297 foreground tiles and 2584 reference spots
+```
+<!-- /fidelity-zerocost-care2d-careamics-n2v -->
+
+<!-- fidelity-zerocost-care2d-careamics-care -->
+```text
+zerocost-care2d test, 2 images: fidelity vs the high-SNR reference (1.00 / 0% / 100% / 100% is perfect)
+method: CAREamics 0.3.5 CARE, default 2D config, 60 x 50 steps x batch 16, CPU
+            slope ratio err spots found spots real
+noisy        0.75     31.0%        4.2%      35.3%
+bilateral    0.76     31.3%        4.3%      34.4%
+method       0.95     22.3%        1.5%      46.0%
+over 7297 foreground tiles and 2584 reference spots
+```
+<!-- /fidelity-zerocost-care2d-careamics-care -->

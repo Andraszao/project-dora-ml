@@ -275,10 +275,10 @@ The code prints "Panel actual size" at startup, so check that line before relyin
   None of the v1 scripts, MNIST data or `.dat` weights are used. v1 weights are rejected by v2's loader.
 - **Isolation:** `dora-bio/.gdignore` stops v1's Godot project from importing it, and `dora-bio/godot/project.godot`
   is a separate Godot project. Open that folder, not the repo root, to run v2.
-- **Built brick by brick:** `cd dora-bio && ./bricks.sh` runs 32 ordered gates (scaffold → nn → data → io →
+- **Built brick by brick:** `cd dora-bio && ./bricks.sh` runs 33 ordered gates (scaffold → nn → data → io →
   inference → training → cli → godot-build → godot-smoke → ci-core → ci-godot → fmd-fetch → fmd-loader → fmd-eval →
   n2v-diagnostic → structured-mask → vst → calibration → pool-upsample → unet → unet-tiling → arch-eval → bench →
-  blocked-conv → perf-budget → q1-recipe → tiff-stack-write → q10-routing → cli-batch → q13-conditioning → ext-data → q18-ext-bench) and stops at the first failure. Gates 11–13 check the real FMD dataset when `dora-bio/tools/fetch_fmd.sh` has
+  blocked-conv → perf-budget → q1-recipe → tiff-stack-write → q10-routing → cli-batch → q13-conditioning → ext-data → q18-ext-bench → quant-fidelity) and stops at the first failure. Gates 11–13 check the real FMD dataset when `dora-bio/tools/fetch_fmd.sh` has
   downloaded it (about 9 GB, gitignored); without it, their data checks report SKIPPED.
   CI (`.github/workflows/dora-bio.yml`) runs them all, with headless Godot, on PRs into `main`, pushes to `main`
   and manual runs (not on working-branch pushes or docs-only changes). Work on one brick at a time

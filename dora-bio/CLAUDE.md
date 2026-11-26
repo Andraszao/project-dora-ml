@@ -30,7 +30,8 @@ src/DoraBio.Core/              ALL ML/IO code. net8.0. No Godot, no NuGet depend
   BatchDenoising.cs (FrameDenoiser: the one per-frame pipeline; stacks and folders streamed frame by frame),
   NoiseDiagnostics.cs (is the noise pixel-independent? from the noisy image alone),
   NoiseCalibration.cs (variance = gain · intensity + intercept, from the noisy image alone),
-  NoiseConditioning.cs (the per-frame condition a noise-conditioned network gets: ln(σ̂ / 0.05) of the whole frame)
+  NoiseConditioning.cs (the per-frame condition a noise-conditioned network gets: ln(σ̂ / 0.05) of the whole frame),
+  ExtBenchmark.cs (CARE's scoring protocol), Fidelity.cs (proportionality, ratio error, spots found and real)
 tests/DoraBio.Core.Tests/      xunit. Fixtures/ written by Pillow/ImageMagick (make_fixtures.py)
 tools/DoraBio.Cli/             `dora-bio` CLI: synth | train | denoise | eval | info | bench | diagnose | fmd-check | fmd-eval |
                                fmd-noise | fmd-diagnose | fmd-route
@@ -54,8 +55,8 @@ godot/                         Godot 4.5 .NET project (open THIS folder in Godot
 Work follows [`PATHWAY.md`](PATHWAY.md): phases **P0 → P10**, each a group of bricks with gates. P0 (bricks 0–8),
 P1 (bricks 9–10, CI), P2 (bricks 11–13, real FMD data), P3 (bricks 14–17, noise-model fidelity), P4 (bricks 18–21,
 U-Net) and P5 (bricks 22–24, performance) are done. **The current phase is P6 (stacks, time-lapse and batch)**:
-bricks 25–31 are done (30–31 opened the field-validation track, FV: DORA matches CARE supervised, trails
-CAREamics' Noise2Void by about 1 dB); next is quality pass Q12, ahead of the lab pilot.
+bricks 25–32 are done (30–32 opened the field-validation track, FV: DORA matches CARE supervised, trails
+CAREamics' Noise2Void by about 1 dB and distorts intensities more); next is quality pass Q12, ahead of the lab pilot.
 Pick up the next unfinished brick of the current phase, follow the phase protocol there, and update its status table when a phase closes. Read `docs/RESULTS.md` before
 changing training or the model: it records what actually works on real data.
 
@@ -98,6 +99,7 @@ before anything is built on top.** `./bricks.sh` runs the gates in order and sto
 | 29 | q13-conditioning (quality pass) | `Nn/DenoisingNet.Film.cs` (FiLM generator, effective parameters), `NoiseConditioning.cs`, `NetConfig.Conditioning`, weights format 3, CLI `train --condition`, `fmd-eval --validation-seed / --sigma-scale`, `tools/experiments/q13_conditioning.sh` | `Brick=29-q13-conditioning`: whole-network and tight chain-rule finite differences, untrained = plain bit for bit, exact tiling with the whole frame's condition; Q13's recorded verdict and supervised training's default `--condition` follow the pre-registered rule; with data + weights the blocks reproduce |
 | 30 | ext-data (field validation) | `tools/fetch_ext.sh`, `tools/extract_zip.py`, `Data/ExtDatasets.cs`, CLI `ext-check` | `Brick=30-ext-data` (pairs match by name, never by position); every archive pinned (record, size, SHA-256); with data: every `.complete` matches its pin and `ext-check` finds the published counts, partners of equal size, and files that decode |
 | 31 | q18-ext-bench (quality pass, field validation) | `ExtBenchmark.cs` (CARE's scoring protocol), `ExtDatasets.LoadTraining`, CLI `train --ext`, `ext-eval`, `tools/experiments/q18_ext.sh`, `ext_careamics.py`, `requirements-careamics.txt` | `Brick=31-q18-ext-bench`: the least-squares match removes scale and offset exactly, scores don't depend on brightness, each image of a pair normalized by its own percentiles; Q18's recorded verdict follows its pre-registered rule; with data + runs/q18 the twelve blocks reproduce |
+| 32 | quant-fidelity (field validation) | `Fidelity.cs`, CLI `fidelity`, `tools/experiments/fidelity.sh` | `Brick=32-quant-fidelity`: on synthetic ground truth a perfect output scores perfectly at any brightness, a square root and a square move the slope down and up, invented and erased spots are counted exactly; with data + weights the 18 recorded blocks reproduce |
 
 Gates 11–15 and 21 need the dataset (the reproductions in gates 15 and 21 also need the weights from `tools/experiments/`) (`tools/fetch_fmd.sh`, about 9 GB into the gitignored `data/fmd/`). Without it, their
 data-dependent part reports SKIPPED (exit code 77) while the pins, unit tests and RESULTS.md checks still run. CI has
