@@ -20,7 +20,7 @@ settled first, and so every phase builds only on phases that are already green.
 | **P8** | Model and session management | adaptation lost on restart; no way back to a known-good model | planned |
 | **P9** | Format coverage | "my file won't open" (LZW, OME-TIFF, HDF5) | planned |
 | **P10** | Release | only runs from the editor or CLI | planned |
-| **FV** | Field validation (alongside P6–P10) | nobody outside this repo has used DORA or compared it with their current tool | 🚧 in progress: 30 `ext-data` done; next `ext-bench` |
+| **FV** | Field validation (alongside P6–P10) | nobody outside this repo has used DORA or compared it with their current tool | 🚧 in progress: 30 `ext-data` done; next 31 `ext-bench` (quality pass Q18) |
 
 ## Phase protocol (applies to every phase)
 
@@ -233,7 +233,7 @@ preprints. They give the answer that matters: which tool they would actually use
 | Brick | Delivers | Gate |
 |---|---|---|
 | 30 `ext-data` ✅ | `tools/fetch_ext.sh`: the Zenodo records above, pinned (record id, file, size, SHA-256, licence), into the gitignored `data/ext/`; loaders for their low/high-SNR layouts | pins verified; with data: counts and pairing checked by `ext-check`. Measured on the four sets fetched so far (MreB, nucleoid, *B. subtilis*, CARE 2D): DORA's own reader opens all 194 TIFFs, including Micro-Manager OME-TIFF stacks and big-endian 16-bit; the high-SNR partners are 3.3–10.8× brighter than their low-SNR images, so outputs must be brightness-matched before scoring |
-| `ext-bench` | DORA (self-supervised on the noisy images alone, and supervised on each set's own training split) against the bilateral filter, against the CARE models those records ship, and against Noise2Void and CARE run the way a Fiji or napari user would (CAREamics, CPU, default settings) | recorded blocks reproduce; the baselines' settings and versions are recorded with their numbers |
+| 31 `ext-bench` (quality pass Q18) | DORA (self-supervised on the noisy images alone, and supervised on each set's own training split) against the bilateral filter, against the CARE models those records ship, and against Noise2Void and CARE run the way a Fiji or napari user would (CAREamics, CPU, default settings) | recorded blocks reproduce; the baselines' settings and versions are recorded with their numbers |
 | `quant-fidelity` | what scientists measure, beyond PSNR: intensity linearity (slope and offset of denoised against reference in ROIs), mean-intensity bias, and invented or erased structure (residuals at puncta and dim filaments in the high-SNR reference) | metrics exact on synthetic ground truth; recorded on FMD and the `ext-data` sets |
 | `vendor-corpus` | the OME sample files (.nd2, .czi, .lif, .oib, OME-TIFF) as a test corpus: every file either opens or fails with a message that names its format and the conversion route | a recorded table of every sample file and its outcome, and no crash on any of them. P9's reader order follows what this shows |
 | `pilot` | the outreach kit (an image.sc post, emails to core facilities and first authors, the data spec below), 3–5 consented lab datasets, a side-by-side report for each against the lab's current tool, and their answer to "which would you use?" | recorded per lab, with consent; lab data is never committed |
@@ -258,6 +258,7 @@ bar and adoption rule are written here **before** it is measured.
 |---|---|---|---|
 | Q1 | **Best supervised recipe**: U-Net + all five FMD noise levels + a longer budget | U-Net +0.98 dB supervised and still improving at the 30-epoch cap (P4); all-level training +0.5 to +3.0 dB on cleaner inputs for supervised models (P2) | ✅ brick 25, **measured, not adopted** ([results](docs/RESULTS.md#quality-pass-q1-the-best-supervised-recipe)). Pre-registered bar: raw within 0.1 dB of 34.73, avg2–avg16 +0.5 dB on average, no level −0.1. Result: raw **−0.47** (34.26), avg2–avg16 **+2.39** on average (avg16 40.15, the first model above the untouched image). Raw missed, so nothing shipped |
 | Q10 | **Noise-level routing**: pick the raw-trained or the all-level model per image from its estimated noise level | Q1: −0.47 dB at raw, +0.1 to +4.9 dB on cleaner inputs; P3's correlation routing worked | ✅ brick 27, **measured, not adopted** ([results](docs/RESULTS.md#quality-pass-q10-routing-each-image-by-its-noise-level)). The threshold chosen on validation sends every image to B: A's raw edge there is 0.34 dB, and noise σ can't pick out the images where A wins (even level-perfect routing: +0.06 dB). test_mix raw 34.28 vs the 34.63 needed. Lesson: with unknown noise levels, the all-level model alone is the better single supervised model (−0.3 to −0.5 dB on raw, +1 to +5 dB elsewhere): **a trade for the owner to weigh (see Q4)** |
+| Q18 | **DORA against CARE and Noise2Void on public data** (`ext-bench`, field validation): the same images, the same scoring (CARE's brightness-matched protocol), and the same patch budget for DORA and for CAREamics run on CPU | the viability question: nobody has compared DORA with the tools biologists already use | **next: brick 31**, pre-registered [below](#q18-pre-registration-dora-against-care-and-noise2void-on-public-data-ext-bench) |
 | Q13 | **A noise-conditioned U-Net (FiLM)**: one all-level model that is told how noisy each image is, so it can change its response per image instead of averaging over five noise levels | Q1: the all-level model loses 0.47 dB at raw; Q10: switching between two fixed models can't win it back; FFDNet-style conditioning (FiLM modulation rather than an input noise map) adapts one model smoothly | ✅ brick 29, **measured, not adopted** ([results](docs/RESULTS.md#quality-pass-q13-telling-the-network-how-noisy-each-image-is)). Seed 2026 raw 33.92 vs the 34.63 needed; over three seeds conditioning loses 0.19 dB at raw and 0.11 on cleaner levels, though the network does use its condition (a 2× wrong σ̂ costs 1.2 dB). Lessons: seed spread is about 0.3 dB, and Q1's raw cost was partly a bad seed (three-seed mean: 0.30 below the raw-trained U-Net, not 0.47) |
 | Q12 | **A wider U-Net and a longer budget for all-level training** (24 or 32 base features, more epochs; optionally pretrained on synthetic Poisson–Gaussian pairs, then fine-tuned on FMD) | same; costs about 2–4× the compute. A 60-epoch run takes only about 6 minutes on this CPU, so the budget is cheap to raise. Pretraining on synthetic noise, then fine-tuning on real data, has been tried on FMD before | **next quality pass** (plain, since Q13 didn't help). Compare three-seed means: single runs differ by up to 0.3 dB |
 | Q11 | **An all-level model that keeps raw quality**: weight raw frames more in the training mix (e.g. 4 raw frames plus 1 of each other level) | Q1/Q10: the all-level model's raw loss comes from sharing capacity across five levels | open |
@@ -312,6 +313,40 @@ trainer's usual best-validation epoch.
 - **Prior, stated now.** The gain may be small. Blind Gaussian denoisers trained on several noise levels come within
   about 0.1 dB of level-specific ones (DnCNN-B against DnCNN-S), so part of Q1's 0.47 dB may come from capacity (Q12)
   or from raw frames being only a fifth of the mix (Q11), not from the missing noise level.
+
+### Q18 pre-registration: DORA against CARE and Noise2Void on public data (`ext-bench`)
+
+Written before any of its code exists or anything is measured.
+
+- **Datasets.** The three paired sets from `ext-data`: DeepBacs *E. coli* MreB (30 training pairs, 5 test), DeepBacs
+  *E. coli* nucleoid (28, 2) and the ZeroCostDL4Mic CARE 2D example (22, 2). Only each set's own test images are
+  scored, and nothing trains on them. (*B. subtilis* has no ground truth, so it isn't scored.)
+- **Scoring: CARE's protocol**, because the high-SNR images are 3.3–10.8× brighter than the low-SNR ones. Each
+  reference image is normalized by its 0.1st and 99.9th percentiles. Each output is then matched to it by the
+  least-squares scale and offset (CSBDeep's `normalize_minmse`), and PSNR (data range 1) and SSIM are measured. Every
+  method gets this treatment, the untouched noisy input included, so no method is helped or hurt by its brightness.
+  A dataset's score is the mean over its test images; the headline is the mean over the three datasets.
+- **Methods.** The training settings are fixed now.
+  1. Noisy input and the bilateral filter.
+  2. **DORA out of the box**, with no training on the dataset: the bundled synthetic model, and the FMD-trained
+     supervised U-Net (`runs/p4/unet_sup.bin`; not shippable today, see the FMD licence decision).
+  3. **DORA Noise2Void:** the default recipe (dilated network, 30 epochs × 50 steps, batch 16, 64 px patches, seed
+     2026) on the training split's noisy images.
+  4. **DORA supervised:** U-Net 16 → 64, depth 2, 60 epochs × 50 steps, batch 16, 64 px patches, seed 2026, on the
+     training pairs. Each image of a pair is normalized by its own percentiles, CARE's convention.
+  5. **CAREamics Noise2Void and CARE** (version pinned in `tools/experiments/requirements-careamics.txt`), their
+     default 2D configurations with 64 px patches and batch 16, on CPU, trained on the same images. They get the same
+     number of training patches as DORA's matching method: 24,000 for Noise2Void and 48,000 for CARE.
+  Wall-clock training and inference times are recorded for every method on this machine; they're not part of the bar.
+- **Bar.** DORA is **competitive** if, averaged over the three datasets, DORA supervised is within 0.5 dB of CAREamics
+  CARE **and** DORA Noise2Void is within 0.5 dB of CAREamics Noise2Void.
+- **Adoption rule.**
+  - **Competitive:** the field-validation track goes on to the pilot with these numbers, and the README states them.
+  - **Not competitive:** Q12 (capacity and training budget) moves ahead of the pilot, and the README states the gap.
+  - Either way, the numbers are recorded and the README reports them.
+- **Known weaknesses, stated now.** The test splits are tiny (5, 2 and 2 images), so per-image scores are reported
+  too. One seed per method, and Q13 measured a seed spread of about 0.3 dB. The baselines are run here, on CPU, with
+  an equal patch budget, not the GPU budgets their authors used, so their own published numbers may be higher.
 
 ## Parking lot (deliberately not on the path)
 
