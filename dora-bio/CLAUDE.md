@@ -48,9 +48,9 @@ godot/                         Godot 4.5 .NET project (open THIS folder in Godot
 
 Work follows [`PATHWAY.md`](PATHWAY.md): phases **P0 → P10**, each a group of bricks with gates. P0 (bricks 0–8),
 P1 (bricks 9–10, CI), P2 (bricks 11–13, real FMD data), P3 (bricks 14–17, noise-model fidelity), P4 (bricks 18–21,
-U-Net) and P5 (bricks 22–24, performance) are done. **The current phase is P6 (stacks, time-lapse and batch)**,
-starting with brick 25 (`tiff-stack-write`). Pick up the next unfinished brick of the current phase,
-follow the phase protocol there, and update its status table when a phase closes. Read `docs/RESULTS.md` before
+U-Net) and P5 (bricks 22–24, performance) are done. **The current phase is P6 (stacks, time-lapse and batch)**:
+bricks 25–27 are done; next is brick 28 (`cli-batch`), then quality pass 29 (Q13, pre-registered in `PATHWAY.md`).
+Pick up the next unfinished brick of the current phase, follow the phase protocol there, and update its status table when a phase closes. Read `docs/RESULTS.md` before
 changing training or the model: it records what actually works on real data.
 
 ## Brick-by-brick workflow (how this project is built: follow it)

@@ -15,7 +15,7 @@ settled first, and so every phase builds only on phases that are already green.
 | **P3** | Noise-model fidelity | Noise2Void's assumptions failing on real cameras (measured in P2 on widefield) | ✅ done: bricks 14–17, [results](docs/RESULTS.md#p3-correlated-noise-and-structured-blind-spots) |
 | **P4** | Model capacity (U-Net) | the small CNN being the ceiling | ✅ done: bricks 18–21, [results](docs/RESULTS.md#p4-a-u-net-against-the-dilated-network) |
 | **P5** | Performance | slowness on large frames and stacks | ✅ done: bricks 22–24 (2.1× faster denoise, bit-identical) |
-| **P6** | Stacks, time-lapse, batch | **single 2-D frames only** | 🚧 in progress: 25 (quality, Q1), 26 `tiff-stack-write`, 27 (quality, Q10) done; next 28 `cli-batch` |
+| **P6** | Stacks, time-lapse, batch | **single 2-D frames only** | 🚧 in progress: 25 (quality, Q1), 26 `tiff-stack-write`, 27 (quality, Q10) done; next 28 `cli-batch`, then 29 (quality, Q13) |
 | **P7** | Analysis UX | can see but can't measure or export | planned |
 | **P8** | Model and session management | adaptation lost on restart; no way back to a known-good model | planned |
 | **P9** | Format coverage | "my file won't open" (LZW, OME-TIFF, HDF5) | planned |
@@ -227,8 +227,9 @@ bar and adoption rule are written here **before** it is measured.
 |---|---|---|---|
 | Q1 | **Best supervised recipe**: U-Net + all five FMD noise levels + a longer budget | U-Net +0.98 dB supervised and still improving at the 30-epoch cap (P4); all-level training +0.5 to +3.0 dB on cleaner inputs for supervised models (P2) | ✅ brick 25, **measured, not adopted** ([results](docs/RESULTS.md#quality-pass-q1-the-best-supervised-recipe)). Pre-registered bar: raw within 0.1 dB of 34.73, avg2–avg16 +0.5 dB on average, no level −0.1. Result: raw **−0.47** (34.26), avg2–avg16 **+2.39** on average (avg16 40.15, the first model above the untouched image). Raw missed, so nothing shipped |
 | Q10 | **Noise-level routing**: pick the raw-trained or the all-level model per image from its estimated noise level | Q1: −0.47 dB at raw, +0.1 to +4.9 dB on cleaner inputs; P3's correlation routing worked | ✅ brick 27, **measured, not adopted** ([results](docs/RESULTS.md#quality-pass-q10-routing-each-image-by-its-noise-level)). The threshold chosen on validation sends every image to B: A's raw edge there is 0.34 dB, and noise σ can't pick out the images where A wins (even level-perfect routing: +0.06 dB). test_mix raw 34.28 vs the 34.63 needed. Lesson: with unknown noise levels, the all-level model alone is the better single supervised model (−0.3 to −0.5 dB on raw, +1 to +5 dB elsewhere): **a trade for the owner to weigh (see Q4)** |
+| Q13 | **A noise-conditioned U-Net (FiLM)**: one all-level model that is told how noisy each image is, so it can change its response per image instead of averaging over five noise levels | Q1: the all-level model loses 0.47 dB at raw; Q10: switching between two fixed models can't win it back; FFDNet-style conditioning (FiLM modulation rather than an input noise map) adapts one model smoothly | **next: brick 29**, pre-registered [below](#q13-pre-registration) |
+| Q12 | **A wider U-Net and a longer budget for all-level training** (24 or 32 base features, more epochs; optionally pretrained on synthetic Poisson–Gaussian pairs, then fine-tuned on FMD) | same; costs about 2–4× the compute. A 60-epoch run takes only about 6 minutes on this CPU, so the budget is cheap to raise. Pretraining on synthetic noise, then fine-tuning on real data, has been tried on FMD before | open; runs with conditioning on if Q13 improves raw |
 | Q11 | **An all-level model that keeps raw quality**: weight raw frames more in the training mix (e.g. 4 raw frames plus 1 of each other level) | Q1/Q10: the all-level model's raw loss comes from sharing capacity across five levels | open |
-| Q12 | **A wider U-Net for all-level training** (24 or 32 base features) | same; costs about 2–4× the compute | open |
 | Q2 | **U-Net Noise2Void training**: its run stopped early (best epoch 4) and lost 0.47 dB | P4 | open |
 | Q3 | **"Do no harm" on clean inputs**: every model scores below the untouched image on 16-frame averages (bundled model −4.2 dB) | P2, P3, P4 level tables; Q1's all-level U-Net is the first to beat the untouched image overall (40.15 vs 39.70) | open; Q10 is its best candidate |
 | Q4 | **Per-mode default architecture and recipe** (U-Net, and possibly all noise levels, when training with ground truth) | P4 rule kept the dilated default; Q1/Q10: the all-level U-Net trades −0.3 to −0.5 dB on raw frames for +1 to +5 dB on cleaner ones; **needs the owner's decision** | waiting for a decision |
@@ -237,10 +238,60 @@ bar and adoption rule are written here **before** it is measured.
 | Q7 | **Structured blind spots on clean inputs**: the routed pair loses from avg4 up | P3 | open (overlaps Q3) |
 | Q8 | **A better synthetic generator for the bundled model** (correlated noise, more realistic structure), measured on FMD | the bundled model is synthetic-only by license; it scored 32.15 dB on real data and is the worst on clean inputs | open |
 | Q9 | **Calibration on dim 8-bit images** (curve-based variance stabilization) | P3: variance after the transform 0.41 on confocal | open, low priority |
+| Q14 | **Haar wavelet down- and upsampling in the U-Net** (as in MWCNN): keep the three detail bands that 2×2 average pooling throws away (average pooling already is the Haar low band, scaled), and invert the transform on the way up | Q12's question by other means: more detail reaches the ½ and ¼ levels without widening them. Exact tiling holds because the 2×2 blocks align with the U-Net's tile alignment of 4 | open |
+| Q15 | **Structural reparameterization**: train each 3×3 convolution with parallel 1×1 and identity branches, then fold them into one 3×3 kernel | inference is unchanged (same kernels, same speed, same function class); it only helps optimization, with reported gains around 0.1–0.2 dB for small super-resolution networks; costs about 1.5× per training step | open, low priority |
+| Q16 | **A detail-refinement stage for "Adapt to sample"** (Noise2Detail, MICCAI 2025) | a three-layer network trained on one noisy image, aimed at fast inference for smart microscopy. Caveat: refining against the noisy image leaks noise unless the first estimate is blind to each pixel | open, research |
+| Q17 | **NAFNet-style blocks** (simple gates, channel attention) inside the U-Net | simple convolutional blocks rival transformers at a fraction of the cost. Channel attention pools over the whole image, which breaks exact tiling: pool over a fixed local window instead (the TLC fix), in training and at inference, and widen the tiling margin by half the window | open, after Q12 |
+
+
+### Q13 pre-registration
+
+Written before any of Q13's code exists. Nothing below is tuned on data; the only choice made on data is the
+trainer's usual best-validation epoch.
+
+- **Candidate.** P4's U-Net (16 → 32 → 64 features, depth 2) with FiLM modulation after each of its 10 hidden
+  convolutions: z = γ(s) ⊙ conv(x) + β(s), then ReLU (the final 1-channel convolution is not modulated). The condition is
+  one number per frame, s = ln(σ̂ / 0.05), where σ̂ is Immerkær's noise σ of the whole normalized input frame (the measure
+  behind Q10's router). One small shared network maps s to every γ and β: 16 hidden ReLU units, γ = 1 + output,
+  β = output. Its output layer starts at zero, so an untrained conditioned U-Net computes exactly the plain U-Net. That
+  adds about 10.9k parameters and well under 1% of the compute.
+- **Measuring σ̂.** It is measured once per frame, before tiling, so tiled output still equals whole-image output. In
+  training it is measured on each full training frame (never per patch), so the network learns the estimator's errors
+  as well as its signal. FiLM rather than an input noise map, because in a convolutional network a constant extra input
+  channel only shifts the first layer's biases. FiLM reaches every resolution level.
+- **Recipe.** Exactly Q1's candidate: supervised, all five levels (2 frames each), batch 16, 64 px patches, 50 steps ×
+  up to 60 epochs, seed 2026, validation on held-out FOVs, best-validation epoch kept. The only change is the
+  conditioning.
+- **Mechanism check** (recorded, not part of the bar). On the 46 validation FOVs, evaluate with σ̂ doubled and halved. If
+  PSNR moves less than 0.05 dB, the network has learned to ignore s, and a gain is not from conditioning.
+- **Seeds.** Seed 2026 decides the bar, like for like with Q1 and Q10. Seeds 2027 and 2028 are also run, for both the
+  conditioned and the plain all-level recipe. This is the first spread measured across seeds (toward Q6).
+- **Bar** (test_mix, all 48, seed 2026). Raw ≥ 34.63 dB (the raw-trained U-Net's 34.73 − 0.1). The mean over avg2–avg16
+  ≥ 37.56 (Q1's all-level 37.66 − 0.1). No level more than 0.2 dB below Q1's all-level model. **And robustness:**
+  averaged over the three seeds, the conditioned recipe beats the plain all-level recipe at raw by at least 0.2 dB.
+- **Adoption rule.**
+  - **Bar met:** one model then matches the raw specialist on noisy frames and the all-level model elsewhere, which
+    removes the trade Q4 is waiting on. `train --mode supervised` defaults to the conditioned U-Net (`--condition noise`)
+    and, for FMD data, to all five levels, and Q4 closes for the supervised mode. Noise2Void and the bundled model keep
+    the dilated network (P4's rule).
+  - **Raw at least 0.2 dB above Q1's all-level model (≥ 34.46), but below 34.63:** "measured, not adopted, improvement
+    recorded", and Q12 runs with conditioning on.
+  - **Otherwise:** "measured, not adopted".
+  - In both misses, conditioning stays an opt-in (`--condition noise`), like `--vst`.
+- **Prior, stated now.** The gain may be small. Blind Gaussian denoisers trained on several noise levels come within
+  about 0.1 dB of level-specific ones (DnCNN-B against DnCNN-S), so part of Q1's 0.47 dB may come from capacity (Q12)
+  or from raw frames being only a fifth of the mix (Q11), not from the missing noise level.
 
 ## Parking lot (deliberately not on the path)
 
 - **Web export:** not possible for C# Godot projects in 4.5. Revisit only if Godot adds it.
 - **3-D (volumetric) denoising and GPU training:** large scope. Reconsider after P5 measurements.
+- **Transformer or attention hybrids** (Restormer, SwinIR, Uformer): state of the art on photos, but they need GPU
+  training, much more data and a large hand-written implementation. Reconsider only once a GPU path exists and Q12–Q17
+  have stopped paying off.
+- **A wavelet sub-band loss** (stationary wavelet transform): unweighted, it is just the pixel loss again (the
+  undecimated Haar transform is a tight frame), so it only matters as a heavier weight on high frequencies. That trades
+  PSNR, which is every bar here, for sharpness. It also doesn't carry over to Noise2Void, whose loss is defined only at
+  the masked pixels. Revisit if a sharpness metric joins the bars.
 - **v1 (repo root, MNIST):** frozen as the educational original. Its bugs are documented in the root `CLAUDE.md`, not fixed.
 - **History rewrite into per-brick commits:** possible, but it needs a force-push and an explicit request.
