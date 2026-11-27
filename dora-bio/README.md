@@ -19,7 +19,7 @@ All numbers come from this repo, run on a 4-core cloud VM with no GPU.
 |---|---|
 | Core unit tests (`dotnet test`) | 508 passing in ~6 s, including finite-difference gradient checks for both architectures (mutation-tested) |
 | Brick gates (`./bricks.sh`) | all 41 green (gates 11–15, 21, 25, 27, 29, 30–35, 37, 38 and 40 with the FMD data, benchmark downloads and experiment weights present); documentation of every public member is enforced by the build |
-| Gates can fail (`./bricks.sh --self-test`) | one planted bug per gate 0–7 and 11–40 (two for gates 0, 28, 29, 31, 33, 35 and 36, three for 34 and 39, four for 37 and 38, six for 40), all 60 caught (after a clean control copy passes) |
+| Gates can fail (`./bricks.sh --self-test`) | one planted bug per gate 0–7 and 11–40 (two for gates 0, 28, 29, 31, 32, 33, 35 and 36, three for 34 and 39, four for 37 and 38, six for 40), all 61 caught (after a clean control copy passes) |
 | CI (GitHub Actions) | all gates incl. headless Godot, on PRs into `main`, pushes to `main` and manual runs (docs-only changes skipped): [run #1](https://github.com/Andraszao/project-dora-ml/actions/runs/45617118232) green in 150 s of runner time, 0 billable minutes (public repo) |
 | Codecs vs. independent encoders | TIFF/PNG fixtures written by Pillow, ImageMagick and libtiff decode exactly |
 | Tiled vs. whole-image inference | identical (≤1e-5) for ragged tiles, tiles smaller than the receptive field, etc. |

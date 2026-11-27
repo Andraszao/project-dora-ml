@@ -1089,38 +1089,38 @@ the high-SNR reference (`Fidelity.cs`; reproduce: `tools/experiments/fidelity.sh
 | Slope / ratio error / spots found / spots real | |
 |---|---|
 | **FMD test_mix, raw (48 images)** | |
-| Noisy input | 0.83 / 7.5% / 65.4% / 14.3% |
-| Bundled synthetic model | Noise2Void / on / 10 / SYNTHETIC |
-| Supervised, dilated (P3) | Supervised / on / FMD / (12 |
-| Supervised, U-Net (P4) | **Supervised / on / FMD / (12** |
-| Supervised, all-level U-Net (Q1) | Supervised / on / FMD / (12 |
-| Noise2Void, dilated (P3) | Noise2Void / on / FMD / (12 |
-| Noise2Void, U-Net (P4) | Noise2Void / on / FMD / (12 |
+| Noisy input <!-- row: fidelity-fmd-bundled noisy --> | 0.83 / 7.5% / 65.4% / 14.3% |
+| Bundled synthetic model <!-- row: fidelity-fmd-bundled --> | 0.86 / 5.6% / 51.0% / 44.2% |
+| Supervised, dilated (P3) <!-- row: fidelity-fmd-sup-dilated --> | 0.97 / 4.5% / 51.2% / 65.7% |
+| Supervised, U-Net (P4) <!-- row: fidelity-fmd-sup-unet --> | 1.02 / 3.9% / 58.3% / 71.5% |
+| Supervised, all-level U-Net (Q1) <!-- row: fidelity-fmd-sup-unet-levels --> | 1.00 / 3.9% / 59.4% / 63.5% |
+| Noise2Void, dilated (P3) <!-- row: fidelity-fmd-n2v-dilated --> | 0.88 / 5.7% / 64.8% / 27.4% |
+| Noise2Void, U-Net (P4) <!-- row: fidelity-fmd-n2v-unet --> | 0.86 / 6.1% / 64.0% / 23.3% |
 | **DeepBacs MreB (5 images)** | |
-| Noisy input | 1.00 / 7.1% / 55.2% / 7.1% |
-| DORA Noise2Void | Noise2Void / on / deepbacs-mreb / training |
-| CAREamics Noise2Void | CAREamics / 0.3.5 / Noise2Void, / default |
-| DORA supervised | Supervised / on / deepbacs-mreb / training |
-| CAREamics CARE | CAREamics / 0.3.5 / CARE, / default |
+| Noisy input <!-- row: fidelity-deepbacs-mreb-dora-n2v noisy --> | 1.00 / 7.1% / 55.2% / 7.1% |
+| DORA Noise2Void <!-- row: fidelity-deepbacs-mreb-dora-n2v --> | 0.75 / 8.9% / 45.6% / 34.2% |
+| CAREamics Noise2Void <!-- row: fidelity-deepbacs-mreb-careamics-n2v --> | 0.86 / 7.4% / 43.8% / 56.2% |
+| DORA supervised <!-- row: fidelity-deepbacs-mreb-dora-sup --> | 0.94 / 6.7% / 38.5% / 67.2% |
+| CAREamics CARE <!-- row: fidelity-deepbacs-mreb-careamics-care --> | 1.03 / 7.4% / 41.4% / 66.2% |
 | **DeepBacs nucleoid (2 images)** | |
-| Noisy input | 1.00 / 3.0% / 21.2% / 14.2% |
-| DORA Noise2Void | Noise2Void / on / deepbacs-nucleoid / training |
-| CAREamics Noise2Void | CAREamics / 0.3.5 / Noise2Void, / default |
-| DORA supervised | Supervised / on / deepbacs-nucleoid / training |
-| CAREamics CARE | CAREamics / 0.3.5 / CARE, / default |
+| Noisy input <!-- row: fidelity-deepbacs-nucleoid-dora-n2v noisy --> | 1.00 / 3.0% / 21.2% / 14.2% |
+| DORA Noise2Void <!-- row: fidelity-deepbacs-nucleoid-dora-n2v --> | 0.93 / 3.6% / 34.5% / 11.5% |
+| CAREamics Noise2Void <!-- row: fidelity-deepbacs-nucleoid-careamics-n2v --> | 0.97 / 3.1% / 22.2% / 12.8% |
+| DORA supervised <!-- row: fidelity-deepbacs-nucleoid-dora-sup --> | 0.98 / 2.8% / 21.2% / 11.9% |
+| CAREamics CARE <!-- row: fidelity-deepbacs-nucleoid-careamics-care --> | 0.99 / 3.0% / 17.8% / 14.9% |
 | **CARE 2D (2 images)** | |
-| Noisy input | 0.75 / 31.0% / 4.2% / 35.3% |
-| DORA Noise2Void | Noise2Void / on / zerocost-care2d / training |
-| CAREamics Noise2Void | CAREamics / 0.3.5 / Noise2Void, / default |
-| DORA supervised | Supervised / on / zerocost-care2d / training |
-| CAREamics CARE | CAREamics / 0.3.5 / CARE, / default |
+| Noisy input <!-- row: fidelity-zerocost-care2d-dora-n2v noisy --> | 0.75 / 31.0% / 4.2% / 35.3% |
+| DORA Noise2Void <!-- row: fidelity-zerocost-care2d-dora-n2v --> | 0.75 / 31.1% / 4.3% / 35.0% |
+| CAREamics Noise2Void <!-- row: fidelity-zerocost-care2d-careamics-n2v --> | 0.80 / 33.0% / 5.5% / 31.9% |
+| DORA supervised <!-- row: fidelity-zerocost-care2d-dora-sup --> | 0.67 / 22.8% / 6.4% / 41.4% |
+| CAREamics CARE <!-- row: fidelity-zerocost-care2d-careamics-care --> | 0.95 / 22.3% / 1.5% / 46.0% |
 
 - **DORA's supervised U-Net keeps measurements honest on FMD.** On FMD's raw frames: slope 1.02, the lowest ratio error
   (3.9%), and 72% of its spots are real (the noisy input: 14%). On MreB it compresses contrast slightly (0.94) where CARE
   slightly exaggerates it (1.03), with a lower ratio error than CARE (6.7% against 7.4%).
 - **DORA's Noise2Void distorts intensities.** On MreB its slope is 0.75 and its ratio error (8.9%) is *worse than the
   untouched image's* (7.1%), so a ratio measured on its output is less accurate than one measured on the raw frame.
-  CAREamics' Noise2Void distorts less (0.86, 7.4%), and twice as many of its spots are real (56% against 34%). On FMD
+  CAREamics' Noise2Void distorts less (0.86, 7.4%), and far more of its spots are real (56% against 34%). On FMD
   both of DORA's Noise2Void networks compress contrast (0.86–0.88) and leave most noise peaks in place (23–27% of spots
   real). This is a second target for Q12, next to the 1 dB PSNR gap: a better self-supervised model has to keep the
   slope near 1, not just raise the PSNR.

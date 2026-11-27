@@ -458,6 +458,20 @@ gate_32() {   # quant-fidelity
   local n count=0 skipped=0
   count="$(grep -c '^<!-- fidelity-' docs/RESULTS.md)"
   [[ "$count" -eq 18 ]] || { echo ">> docs/RESULTS.md should hold 18 fidelity blocks, found $count"; return 1; }
+  # The summary table: every row names its block (<!-- row: BLOCK [noisy] -->), and its four numbers must be that block's.
+  # Until this check, nothing read the table, and its model rows held the blocks' provenance text instead of numbers.
+  local line tag kind want have rows=0
+  while IFS= read -r line; do
+    tag="$(sed -n 's/.*<!-- row: \(fidelity-[a-z0-9-]*\)\( noisy\)\{0,1\} -->.*/\1/p' <<< "$line")"
+    [[ -n "$tag" ]] || continue
+    kind=method; [[ "$line" == *" noisy -->"* ]] && kind=noisy
+    want="$(recorded_block "$tag" | awk -v k="$kind" '$1 == k { print $2 " / " $3 " / " $4 " / " $5 }')"
+    have="$(awk -F'|' '{ print $3 }' <<< "$line" | sed 's/\*//g; s/^ *//; s/ *$//')"
+    [[ -n "$want" && "$want" == "$have" ]] || { echo ">> fidelity table row '$tag' ($kind) says '$have'; its block says '$want'"; return 1; }
+    rows=$((rows + 1))
+  done < docs/RESULTS.md
+  [[ $rows -eq 22 ]] || { echo ">> the fidelity table should have 22 rows tied to blocks, found $rows"; return 1; }
+  echo ">> the fidelity table's 22 rows match their blocks"
   dotnet build tools/DoraBio.Cli -c Release >/dev/null || return 1
   local -A fmd=([bundled]=godot/models/dora_bio_weights.bin [sup-dilated]=runs/p3/sup_plain.bin [sup-unet]=runs/p4/unet_sup.bin
                 [sup-unet-levels]=runs/q1/unet_levels60.bin [n2v-dilated]=runs/p3/n2v_plain.bin [n2v-unet]=runs/p4/unet_n2v.bin)
@@ -997,6 +1011,7 @@ MUTATIONS=(
   '31|src/DoraBio.Core/ExtBenchmark.cs|double a = var > 0 ? cov / var : 0, b = mr - a * mx;|double a = 1, b = mr - a * mx;'
   '31|docs/RESULTS.md|<!-- q18-verdict: not-competitive -->|<!-- q18-verdict: competitive -->'
   '32|src/DoraBio.Core/Fidelity.cs|double logGain = mo - mr;|double logGain = 0;'
+  '32|docs/RESULTS.md|1.02 / 3.9% / 58.3% / 71.5%|1.02 / 3.9% / 58.3% / 75.1%'
   '33|src/DoraBio.Core/Data/ExtDatasets.cs|public static List<FmdDataset.PlannedPair> ValidationPlan(string root, ExtDataset dataset, int seed, double fraction = 0.2)|public static List<FmdDataset.PlannedPair> ValidationPlan(string root, ExtDataset dataset, int seed, double fraction = 0.25)'
   '33|docs/RESULTS.md|<!-- q12-verdict: not-adopted -->|<!-- q12-verdict: adopted -->'
   '34|src/DoraBio.Core/IO/ImageStack.cs|return Compact("TZC", [frames, slices, channels], StackMetadata.ImageJ);|return Compact("CZT", [channels, slices, frames], StackMetadata.ImageJ);'
