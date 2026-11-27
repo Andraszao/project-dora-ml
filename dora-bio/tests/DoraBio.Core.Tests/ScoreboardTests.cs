@@ -154,4 +154,45 @@ public class ScoreboardTests
         Assert.Throws<InvalidDataException>(() => FmdBenchmark.EvaluatePredictions(_ => new GrayImage(3, 3), plan));
         Directory.Delete(root, recursive: true);
     }
+
+    [Fact]
+    public void TheResidualMeasureSeparatesScanCorrelationFromMisalignment()
+    {
+        // A smooth reference with bright blobs; noise either averaged along rows (scan-like: 0.5 right, 0 down) or
+        // independent with the noisy image shifted one pixel against its reference (misalignment).
+        GrayImage Reference(int seed) => TestUtil.Pattern(96, 96, (x, y) =>
+            (float)(20 + 200 * Math.Exp(-((x - 30 - seed) * (x - 30 - seed) + (y - 40) * (y - 40)) / 60.0)
+                       + 150 * Math.Exp(-((x - 70) * (x - 70) + (y - 60 - seed) * (y - 60 - seed)) / 40.0)));
+        var rng = new Random(11);
+        double Gauss() => Math.Sqrt(-2 * Math.Log(1 - rng.NextDouble())) * Math.Cos(2 * Math.PI * rng.NextDouble());
+        var scan = new List<(GrayImage, GrayImage)>();
+        var shifted = new List<(GrayImage, GrayImage)>();
+        for (int k = 0; k < 6; k++)
+        {
+            var reference = Reference(k);
+            var white = Enumerable.Range(0, 97 * 96).Select(_ => Gauss()).ToArray();
+            var noisy = new GrayImage(96, 96);
+            var moved = new GrayImage(96, 96);
+            for (int y = 0; y < 96; y++)
+                for (int x = 0; x < 96; x++)
+                {
+                    float signal = reference.Pixels[y * 96 + x];
+                    double rowAverage = (white[y * 97 + x] + white[y * 97 + x + 1]) / Math.Sqrt(2);
+                    noisy.Pixels[y * 96 + x] = 3 * signal + 50 + (float)(rowAverage * Math.Sqrt(signal));   // other exposure and offset
+                    moved.Pixels[y * 96 + x] = reference.Pixels[y * 96 + Math.Min(x + 1, 95)] + (float)(white[y * 97 + x] * 0.5);
+                }
+            scan.Add((noisy, reference));
+            shifted.Add((moved, reference));
+        }
+        var s = NoiseResidual.Measure(scan).ToDictionary(r => r.Region);
+        Assert.InRange(s["background"].Right1, 0.4, 0.6);
+        Assert.InRange(s["background"].Down1, -0.1, 0.1);
+        Assert.InRange(s["background"].Right2, -0.1, 0.1);
+        Assert.InRange(s["interior"].Right1, 0.4, 0.6);
+        var m = NoiseResidual.Measure(shifted).ToDictionary(r => r.Region);
+        Assert.InRange(m["background"].Right1, -0.15, 0.15);              // flat background: a shift leaves nothing
+        Assert.True(m["edges"].Right1 > 0.3 && m["edges"].Down1 > 0.3);    // edges: structure along both axes
+        Assert.Equal(6L * 96 * 96, m["all"].Pixels);
+        Assert.Throws<ArgumentException>(() => NoiseResidual.Measure([(new GrayImage(4, 4), new GrayImage(5, 4))]));
+    }
 }

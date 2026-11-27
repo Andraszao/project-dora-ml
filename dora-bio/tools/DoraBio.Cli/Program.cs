@@ -68,6 +68,9 @@ public static class Program
           stack-export --dataset mdc25-tribolium-2d|biosr-ccps-2d [--root data/ext]
                    Write a derived 2D set from its downloaded stack set (the scoreboard's splits, brick 38); then train
                    --ext and ext-eval take it like a downloaded set.
+          noise-residual (--dataset NAME [--root data/ext] | --fmd data/fmd) [--only PREFIX]
+                   The real noise correlation of a set's test pairs, per axis and region (background, interiors, edges),
+                   from (noisy - matched reference) / sqrt(reference); next to the blind check's verdicts on the same images.
           fmd-export --root data/fmd --out DIR
                    FMD for other tools: DORA's default training frames (4 raw per FOV, never FOV 19) to DIR/train/low_SNR,
                    test_mix raw to DIR/test/low_SNR, float32 TIFF; score their outputs with fmd-eval --predictions.
@@ -131,6 +134,7 @@ public static class Program
                 "stack-info" => StackInfo(options),
                 "stack-export" => StackExport(options),
                 "fmd-export" => FmdExportCommand(options),
+                "noise-residual" => NoiseResidualCommand(options),
                 "ext-eval" => ExtEval(options),
                 "fidelity" => FidelityCommand(options),
                 "fmd-eval" => FmdEval(options),
@@ -578,6 +582,63 @@ public static class Program
             var all = FmdBenchmark.Summarize(scores)[^1].Mean;
             Console.WriteLine($"all, unrounded: noisy {all.NoisyPsnr:0.0000} dB, bilateral {all.BilateralPsnr:0.0000} dB, method {all.DoraPsnr:0.0000} dB");
         }
+        return 0;
+    }
+
+    /// <summary>
+    /// <c>noise-residual</c>: the real noise correlation of a set's test pairs per axis and region, from its references
+    /// (<see cref="NoiseResidual"/>), next to what the blind check says about the same noisy images. Added after brick 38 for
+    /// its Tribolium question; deterministic, so docs/RESULTS.md records it verbatim and gate 38 re-runs it.
+    /// </summary>
+    private static int NoiseResidualCommand(Options o)
+    {
+        List<(string Name, string NoisyPath, string CleanPath)> plan;
+        string scope;
+        if (o.StringOrNull("fmd") is { } fmdRoot)
+        {
+            plan = FmdDataset.PlanTestMix(Path.Combine(fmdRoot, "test_mix"), "raw").Select(p => (Path.GetFileName(p.NoisyPath), p.NoisyPath, p.CleanPath)).ToList();
+            scope = "FMD test_mix raw";
+        }
+        else
+        {
+            var dataset = ExtDatasets.Get(o.Required("dataset"));
+            plan = ExtDatasets.PlanPairs(o.String("root", "data/ext"), dataset, ExtSplit.Test).Select(p => (Path.GetFileName(p.NoisyPath), p.NoisyPath, p.CleanPath)).ToList();
+            scope = $"{dataset.Name} test";
+        }
+        if (o.StringOrNull("only") is { } prefix)
+        {
+            plan = plan.Where(p => p.Name.StartsWith(prefix, StringComparison.Ordinal)).ToList();
+            scope += $" ({prefix}*)";
+        }
+        if (plan.Count == 0) throw new ArgumentException("No pairs to measure.");
+        int called = 0, judged = 0;
+        var right = new List<double>();
+        var down = new List<double>();
+        IEnumerable<(GrayImage, GrayImage)> Pairs()
+        {
+            foreach (var p in plan)
+            {
+                var noisy = ImageLoader.Load(p.NoisyPath);
+                try
+                {
+                    var d = NoiseDiagnostics.Diagnose(noisy);
+                    judged++;
+                    if (d.Correlated) called++;
+                    right.Add(d.Right1);
+                    down.Add(d.Down1);
+                }
+                catch (ArgumentException) { }   // too few flat tiles to judge
+                yield return (noisy, ImageLoader.Load(p.CleanPath));
+            }
+        }
+        var rows = NoiseResidual.Measure(Pairs());
+        Console.WriteLine($"{scope}, {plan.Count} pairs: correlation of the noise residual (noisy − matched reference) / √reference with a neighbour");
+        Console.WriteLine($"{"region",-11} {"pixels",10}  {"right 1",7} {"down 1",7} {"right 2",7} {"down 2",7}");
+        foreach (var r in rows)
+            Console.WriteLine($"{r.Region,-11} {r.Pixels,10}  {r.Right1,7:0.000} {r.Down1,7:0.000} {r.Right2,7:0.000} {r.Down2,7:0.000}");
+        static double Median(List<double> v) { if (v.Count == 0) return double.NaN; v.Sort(); return v[v.Count / 2]; }
+        Console.WriteLine($"blind check (noisy image only, threshold {NoiseDiagnostics.CorrelatedThreshold:0.00}): {called} of {judged} judged images called correlated " +
+                          $"({plan.Count - judged} too small to judge); median estimate right 1 {Median(right):0.000}, down 1 {Median(down):0.000}");
         return 0;
     }
 

@@ -31,6 +31,7 @@ src/DoraBio.Core/              ALL ML/IO code. net8.0. No Godot, no NuGet depend
   Metrics.cs, TiledInference.cs, BilateralBaseline.cs, FmdBenchmark.cs (held-out FMD scores, noise correlation),
   BatchDenoising.cs (FrameDenoiser: the one per-frame pipeline; stacks and folders streamed frame by frame),
   NoiseDiagnostics.cs (is the noise pixel-independent? from the noisy image alone),
+  NoiseResidual.cs (the real noise correlation per axis and region, from high-SNR references; post-hoc, after brick 38),
   NoiseCalibration.cs (variance = gain · intensity + intercept, from the noisy image alone),
   NoiseConditioning.cs (the per-frame condition a noise-conditioned network gets: ln(σ̂ / 0.05) of the whole frame),
   ExtBenchmark.cs (CARE's scoring protocol), Fidelity.cs (proportionality, ratio error, spots found and real),
@@ -38,7 +39,7 @@ src/DoraBio.Core/              ALL ML/IO code. net8.0. No Godot, no NuGet depend
 tests/DoraBio.Core.Tests/      xunit. Fixtures/ written by Pillow/ImageMagick (make_fixtures.py) and tifffile/mrcfile (make_stack_fixtures.py)
 tools/DoraBio.Cli/             `dora-bio` CLI: synth | train | denoise | eval | info | bench | diagnose | ext-check | ext-eval | fidelity |
                                stack-check | stack-info | stack-export | fmd-check | fmd-eval | fmd-export |
-                               fmd-noise | fmd-diagnose | fmd-route
+                               fmd-noise | fmd-diagnose | fmd-route | noise-residual
 tools/fetch_fmd.sh             downloads + verifies the real FMD dataset into data/fmd/ (gitignored)
 tools/ext_manifest.json        EVERY external dataset: Zenodo record, files, sizes, MD5s, SHA-256 pins, licence, use (train /
                                eval-only), credit. The single source for fetching, gates 30/34 and ATTRIBUTIONS.md
@@ -77,7 +78,9 @@ added bit-identical 512-bit kernels (1.3–1.6× on AVX-512 CPUs). Brick 37 (Q19
 U-Net (independent noise) or P3's structured network (correlated): 33.24 dB on FMD without ground truth, every FMD floor
 met, but not adopted because CARE 2D's per-set floor missed by 0.08 dB. Q20 (owner decision, after Q19, disclosed)
 dropped that floor and adopted the design: `train --mode n2v` now routes by default (`RoutedNoise2Void`). Next is 38
-(the self-supervised scoreboard). Owner decisions there: GPU training is
+(the self-supervised scoreboard), done: DORA within 0.3 dB of CAREamics Noise2Void/N2V2 on all five scorable sets, +1.76 dB on
+FMD; by its reading brick 39 starts with Noise2Noise. A post-hoc diagnostic confirmed Tribolium's noise is correlated along one
+axis (so its routing is right). Owner decisions there: GPU training is
 an optional offline step, GPU inference is approved only as an opt-in forward path in the Godot app (S10; the CPU
 engine stays the reference and the CLI's engine), and the shipped model is trained only on synthetic and
 CC BY / CC0 data, with FMD kept for evaluation.
@@ -129,7 +132,7 @@ before anything is built on top.** `./bricks.sh` runs the gates in order and sto
 | 35 | q2-n2v-stop (quality pass, SOTA stage 1) | `TrainerConfig.Selection` (`ValidationSignal`), `KeepLastEpoch`, `TrainingResult.LastParameters`, `TrainingJobOptions.LastWeightsPath`, CLI `train --select/--patience/--keep/--save-last`, `info --default-n2v`, `fmd-eval --precise`, `tools/experiments/q2_stop.sh` | `Brick=35-q2-n2v-stop`: the loss signal picks the lowest-loss epoch where PSNR would pick another; patience 0 runs the whole budget; best or last weights kept and the last always reported; the recorded choice, verdict (on unrounded FMD scores) and `train --mode n2v` defaults follow the pre-registered rule; with data + runs/q2 the blocks reproduce |
 | 36 | roofline-wide (systems S1 + S2) | `Roofline.cs`, CLI `bench --roofline`, `Nn/ConvLayer.Wide.cs` (512-bit forward and input-gradient kernels, `DORA_WIDE_KERNELS=0` turns them off), unrolled taps in `ConvLayer.Blocked.cs`, `PerformanceBench` (interleaved `blocked-256` timings), `tools/ci/perf_budget.json` (`wide_speedups`) | `Brick=36-roofline-wide`: the 512-bit kernels, forced on (any CPU), equal the reference on 200 shapes and whole networks; `bench --roofline` reports peaks, kernels and the stack split; gate 24 checks the 512-bit speedup floor on AVX-512 machines |
 | 37 | q19-routed (quality pass, SOTA stage 1; + Q20) | `NoiseDiagnostics.ChooseThreshold`, CLI `fmd-diagnose --validation-seed/--choose-threshold`, `ext-eval`/`fidelity --weights-correlated`, `tools/experiments/q19_routed.sh`; Q20: `Training/RoutedNoise2Void.cs`, CLI `train --route auto|off --out-correlated`, `info --default-n2v-route` | `Brick=37-q19-routed`: the threshold rule; routed training splits by verdict and trains one network per kind; the recorded threshold decision (validation only) equals the shipped threshold, the correlated-network choice and Q19's verdict follow the pre-registered rule, and Q20's re-application (no CARE 2D floor) decides `train --mode n2v`'s routed default, which runs end to end from the CLI; with data + runs/q19 the blocks reproduce |
-| 38 | scoreboard (SOTA stage 1, a measurement) | `Data/ExtDerived.cs`, `ExtDataset.Source`/`ExtDatasets.Derived`/`GroupOf`, `Data/FmdExport.cs`, `FmdBenchmark.EvaluatePredictions`, CLI `stack-export`, `fmd-export`, `fmd-eval --predictions`, `ext-eval --precise`, `tools/experiments/scoreboard.sh`, `scoreboard_reading.awk`, `ext_careamics.py --n2v2` | `Brick=38-scoreboard`: derived sets follow the pre-registered splits and keep a patch or cell in one validation group, planes keep their raw values, FMD export = DORA's training plan (never FOV 19), outside outputs scored and clipped like DORA's; the recorded reading follows the pre-registered rule, RESULTS.md and PATHWAY.md name the next brick it gives; with data + runs/scoreboard every score reproduces (`scoreboard.sh --rescore`) |
+| 38 | scoreboard (SOTA stage 1, a measurement) | `Data/ExtDerived.cs`, `ExtDataset.Source`/`ExtDatasets.Derived`/`GroupOf`, `Data/FmdExport.cs`, `FmdBenchmark.EvaluatePredictions`, CLI `stack-export`, `fmd-export`, `fmd-eval --predictions`, `ext-eval --precise`, `tools/experiments/scoreboard.sh`, `scoreboard_reading.awk`, `ext_careamics.py --n2v2`; after it, `NoiseResidual.cs` and CLI `noise-residual` (the Tribolium diagnostic) | `Brick=38-scoreboard`: derived sets follow the pre-registered splits and keep a patch or cell in one validation group, planes keep their raw values, FMD export = DORA's training plan (never FOV 19), outside outputs scored and clipped like DORA's; the recorded reading follows the pre-registered rule, RESULTS.md and PATHWAY.md name the next brick it gives; the residual measure finds one-axis noise correlation and tells it from misalignment; with data + runs/scoreboard every score reproduces (`scoreboard.sh --rescore`), and with runs/tribolium_diag the diagnostic's blocks |
 
 Gates 11–15 and 21 need the dataset (the reproductions in gates 15 and 21 also need the weights from `tools/experiments/`) (`tools/fetch_fmd.sh`, about 9 GB into the gitignored `data/fmd/`). Without it, their
 data-dependent part reports SKIPPED (exit code 77) while the pins, unit tests and RESULTS.md checks still run. CI has

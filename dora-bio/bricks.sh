@@ -64,7 +64,7 @@ CHECKS=(
   "quality pass Q2: the selection signal decides the epoch (loss never uses ground truth), keep-last and save-last; the recorded choice, verdict and shipped Noise2Void defaults follow the pre-registered rule; with data + runs/q2 the blocks reproduce"
   "512-bit kernels bit-identical to the reference (forced on, any CPU); bench --roofline reports peaks, every kernel shape and the stack-run split; the 512-bit speedup floor is in gate 24's budget"
   "quality pass Q19 + Q20: the threshold rule and routed training; the recorded threshold decision (validation only), correlated-network choice and Q19 verdict follow the pre-registered rule, Q20's re-application (no CARE 2D floor) decides the routed Noise2Void default; with data + runs/q19 the blocks reproduce"
-  "scoreboard: derived 2D sets keep a patch or cell in one validation group, FMD export + outside outputs scored with FMD's protocol; the recorded reading follows the pre-registered rule and PATHWAY.md's next brick follows it; with data + runs/scoreboard every score reproduces"
+  "scoreboard: derived 2D sets keep a patch or cell in one validation group, FMD export + outside outputs scored with FMD's protocol; the recorded reading follows the pre-registered rule and PATHWAY.md's next brick follows it; noise-residual separates one-axis noise correlation from misalignment; with data + runs every score and the Tribolium diagnostic reproduce"
 )
 LAST=$((${#NAMES[@]} - 1))
 LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dora-bricks.XXXXXX")"
@@ -799,6 +799,18 @@ gate_38() {   # scoreboard (brick 38, pre-registered in PATHWAY.md, commit f91af
     echo ">> the recorded summary differs from a fresh evaluation of runs/scoreboard:"; diff <(recorded_block sb-summary) "$LOG_DIR/sb/summary.txt" | head -20; return 1
   fi
   echo ">> every score in the recorded summary reproduces from runs/scoreboard"
+  # The post-hoc Tribolium diagnostic (after brick 38): real noise correlation per axis, and the unrouted U-Net.
+  [[ -f runs/tribolium_diag/unet_unrouted.bin ]] || { echo "scoreboard reproduced; diagnostic reproduction skipped (needs runs/tribolium_diag)"; return 77; }
+  reproduces diag-residual-tribolium noise-residual --dataset mdc25-tribolium-2d --root "$EXT" || return 1
+  reproduces diag-residual-confocal noise-residual --fmd "$FMD" --only Confocal || return 1
+  reproduces diag-residual-twophoton noise-residual --fmd "$FMD" --only TwoPhoton || return 1
+  reproduces diag-residual-widefield noise-residual --fmd "$FMD" --only WideField || return 1
+  local fresh
+  fresh="$(dotnet "$CLI_DLL" ext-eval --dataset mdc25-tribolium-2d --root "$EXT" --weights runs/tribolium_diag/unet_unrouted.bin --precise | grep -E '^(mdc25|method:|mean)')"
+  if [[ "$fresh" != "$(recorded_block diag-unet-unrouted)" ]]; then
+    echo ">> RESULTS.md block 'diag-unet-unrouted' differs from a fresh run:"; diff <(recorded_block diag-unet-unrouted) <(echo "$fresh") | head; return 1
+  fi
+  echo ">> the Tribolium diagnostic reproduces"
 }
 
 # recorded_block <marker>: the contents of the ```text block between <!-- marker --> and <!-- /marker --> in RESULTS.md.
@@ -873,6 +885,7 @@ MUTATIONS=(
   '38|src/DoraBio.Core/Data/ExtDatasets.cs|int split = stem.IndexOf("__", StringComparison.Ordinal);|int split = -1;'
   '38|src/DoraBio.Core/FmdBenchmark.cs|clipped.Pixels[i] = (float)Math.Clamp(output.Pixels[i], 0, DataRange);|clipped.Pixels[i] = output.Pixels[i];'
   '38|docs/RESULTS.md|<!-- sb-next-brick: noise2noise -->|<!-- sb-next-brick: n2v2 -->'
+  '38|src/DoraBio.Core/NoiseResidual.cs|private static readonly (int Dx, int Dy)[] Offsets = [(1, 0), (0, 1), (2, 0), (0, 2)];|private static readonly (int Dx, int Dy)[] Offsets = [(0, 1), (1, 0), (2, 0), (0, 2)];'
 )
 
 self_test() {

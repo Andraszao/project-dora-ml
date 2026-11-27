@@ -291,7 +291,9 @@ The code prints "Panel actual size" at startup, so check that line before relyin
   pixels; two Noise2Void networks routed by DORA's own noise check reach 32.97 dB without any ground truth, and 33.24 dB
   with the U-Net for independent noise (Q19). Since Q20 that routed design is `train --mode n2v`'s default. Brick 38's
   scoreboard puts that default within 0.3 dB of CAREamics' Noise2Void and N2V2 on all five scorable sets at the same CPU
-  budget, 1.76 dB ahead on FMD; by its pre-registered reading Noise2Noise comes before N2V2.
+  budget, 1.76 dB ahead on FMD; by its pre-registered reading Noise2Noise comes before N2V2. A post-hoc check
+  (`dora-bio noise-residual`) showed why every Tribolium slice is routed to the structured network: its noise correlates
+  0.75 between neighbouring rows.
 - **Rules, file map and gotchas:** `dora-bio/CLAUDE.md`. **Limitations:** `dora-bio/README.md`.
   The bundled sample and weights are **synthetic**. FMD data and FMD-trained weights are never committed.
   Every external dataset (licence, pins, whether it may train a shipped model) is in `dora-bio/tools/ext_manifest.json`;

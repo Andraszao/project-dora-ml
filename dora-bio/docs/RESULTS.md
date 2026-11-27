@@ -712,6 +712,50 @@ CARE 2D is Q18's run (same script and protocol); everything else was run for thi
   which would have to be fixed in advance too. The first run's reading step failed on an awk syntax error (fixed in
   `tools/experiments/scoreboard_reading.awk`, which gate 38 also uses); no score was computed differently.
 
+## After brick 38: why the noise check flags every Tribolium slice (post-hoc diagnostic)
+
+Added after brick 38 was recorded, outside its pre-registered reading, to answer one question: does DORA's noise check
+flag all 32,000 Tribolium training slices because their noise really is correlated, or because 64 × 64 slices are too
+small to judge? Two measurements, both reproduced by gate 38:
+
+- **The real noise correlation, from the references** (`dora-bio noise-residual`): per pair, the reference is matched to
+  the noisy image by least squares and the residual (noisy − matched reference) / √reference is correlated with its
+  neighbours, separately in background, bright interiors and edges. FMD's microscope types are the known references.
+
+| Test pairs | Right 1 | Down 1 | Right 2 | Down 2 | Blind check (noisy image only) |
+|---|---|---|---|---|---|
+| FMD confocal (20) | 0.060 | 0.009 | 0.008 | 0.005 | 0 of 20 correlated |
+| FMD two-photon (16) | 0.054 | 0.002 | 0.002 | 0.001 | 0 of 16 correlated |
+| FMD widefield (12) | 0.618 | 0.604 | 0.199 | 0.171 | 12 of 12 correlated |
+| **MDC25 Tribolium (4,000)** | **0.175** | **0.749** | −0.040 | **0.300** | **4,000 of 4,000 correlated** (median estimates 0.198 right, 0.728 down) |
+
+- **Tribolium's noise is correlated, along one axis.** Neighbours one row apart correlate at 0.75 and two rows apart at
+  0.30; along a row it is 0.21 and then nothing. The same holds in background, nuclear interiors and edges (0.75–0.76
+  down everywhere), so it is not a noisy image misaligned with its reference, which would show up mainly at edges and
+  along both axes. Widefield's correlation, by contrast, is the same along both axes.
+- **The blind check measured it correctly.** Its own estimates from the noisy slices alone (0.73 down, 0.20 right)
+  agree with the reference-based values, so the routing is not a small-patch false trigger. Which physical scan axis
+  the image's vertical axis was in the original acquisition isn't recorded with the data here (the Zenodo record defers
+  to the CARE paper and the original Edmond dataset), so this table says only that the correlation runs along the
+  stored images' columns.
+- **The unrouted U-Net confirms it.** Q20's independent-noise recipe (U-Net 16/2, rule C) trained on every slice with
+  `--route off` scores **17.80 dB**, no better than the noisy input (17.78) and level with CAREamics' plain Noise2Void
+  (17.77). The routed default's structured network scores 18.38 and CAREamics N2V2 18.26.
+
+| Tribolium test (4,000 slices) | PSNR (dB) | Gain over noisy |
+|---|---|---|
+| Noisy input | 17.78 | |
+| CAREamics Noise2Void | 17.77 | −0.01 |
+| DORA U-Net, unrouted (this diagnostic) | 17.80 | +0.01 |
+| CAREamics N2V2 | 18.26 | +0.47 |
+| **DORA default, routed to the structured network** | **18.38** | **+0.60** |
+
+- **What follows.** No size guard or stack pooling is needed for this set: the router chose the right network. Because
+  the correlation is anisotropic and DORA's diamond-2 footprint hides neighbours in every direction, a footprint shaped
+  to the measured correlation (taller than it is wide) is a candidate quality pass, to be chosen on validation data.
+  Every method gains less than 1 dB here: single 64 × 64 slices of very low-exposure 3D data are hard without context,
+  which stage 3's neighbouring-slice input is meant to add.
+
 ## Systems S1 + S2 (brick 36): where the time goes, and 512-bit kernels
 
 Measured with `dora-bio bench --roofline` (and `dora-bio bench` for whole-model timings) on the 4-vCPU cloud container
@@ -2090,3 +2134,66 @@ all         48   27.22 / 0.543   30.22 / 0.752   31.44 / 0.821
 all, unrounded: noisy 27.2168 dB, bilateral 30.2157 dB, method 31.4382 dB
 ```
 <!-- /sb-fmd-n2v2 -->
+
+
+The Tribolium diagnostic: `dora-bio noise-residual --dataset mdc25-tribolium-2d`, `noise-residual --fmd data/fmd --only
+Confocal` (and `TwoPhoton`, `WideField`), and the summary lines (`mdc25…`, `method:`, `mean…`) of `dora-bio ext-eval --dataset
+mdc25-tribolium-2d --weights runs/tribolium_diag/unet_unrouted.bin --precise`. Gate 38 re-runs them when the data and
+`runs/tribolium_diag` are present.
+
+<!-- diag-residual-tribolium -->
+```text
+mdc25-tribolium-2d test, 4000 pairs: correlation of the noise residual (noisy − matched reference) / √reference with a neighbour
+region          pixels  right 1  down 1 right 2  down 2
+background     6153344    0.208   0.749  -0.059   0.298
+interior       1929675    0.169   0.757  -0.023   0.310
+edges          3280000    0.143   0.753  -0.020   0.305
+all           16384000    0.175   0.749  -0.040   0.300
+blind check (noisy image only, threshold 0.40): 4000 of 4000 judged images called correlated (0 too small to judge); median estimate right 1 0.198, down 1 0.728
+```
+<!-- /diag-residual-tribolium -->
+
+<!-- diag-residual-confocal -->
+```text
+FMD test_mix raw (Confocal*), 20 pairs: correlation of the noise residual (noisy − matched reference) / √reference with a neighbour
+region          pixels  right 1  down 1 right 2  down 2
+background     2375651    0.052   0.001   0.002   0.002
+interior        538055    0.065   0.020   0.019   0.018
+edges          1066837    0.075   0.017   0.015   0.004
+all            5242880    0.060   0.009   0.008   0.005
+blind check (noisy image only, threshold 0.40): 0 of 20 judged images called correlated (0 too small to judge); median estimate right 1 0.041, down 1 -0.002
+```
+<!-- /diag-residual-confocal -->
+
+<!-- diag-residual-twophoton -->
+```text
+FMD test_mix raw (TwoPhoton*), 16 pairs: correlation of the noise residual (noisy − matched reference) / √reference with a neighbour
+region          pixels  right 1  down 1 right 2  down 2
+background     1804923    0.053  -0.000   0.002  -0.000
+interior        609501    0.058   0.000   0.001  -0.002
+edges           844633    0.060   0.009   0.004   0.004
+all            4194304    0.054   0.002   0.002   0.001
+blind check (noisy image only, threshold 0.40): 0 of 16 judged images called correlated (0 too small to judge); median estimate right 1 0.060, down 1 0.016
+```
+<!-- /diag-residual-twophoton -->
+
+<!-- diag-residual-widefield -->
+```text
+FMD test_mix raw (WideField*), 12 pairs: correlation of the noise residual (noisy − matched reference) / √reference with a neighbour
+region          pixels  right 1  down 1 right 2  down 2
+background     1225702    0.618   0.601   0.200   0.167
+interior        416620    0.613   0.605   0.179   0.165
+edges           633343    0.608   0.597   0.198   0.171
+all            3145728    0.618   0.604   0.199   0.171
+blind check (noisy image only, threshold 0.40): 12 of 12 judged images called correlated (0 too small to judge); median estimate right 1 0.565, down 1 0.561
+```
+<!-- /diag-residual-widefield -->
+
+<!-- diag-unet-unrouted -->
+```text
+mdc25-tribolium-2d test, 4000 images: PSNR (dB) / SSIM vs the high-SNR reference, CARE's normalization
+method: Noise2Void on mdc25-tribolium-2d training split, noisy images only: post-hoc diagnostic after brick 38, Q20's independent-noise U-Net forced on every slice (--route off); last epoch 30; val loss 0.001185
+mean          17.78 / 0.333   17.82 / 0.342   17.80 / 0.332
+mean, unrounded: noisy 17.7844 dB, bilateral 17.8196 dB, method 17.7958 dB
+```
+<!-- /diag-unet-unrouted -->
