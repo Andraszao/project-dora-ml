@@ -288,7 +288,7 @@ zstd-compressed, which DORA doesn't decode.
 | 35 ✅ | quality | **Q2: when a Noise2Void U-Net should stop** (added after Q12: its early stop on FMD is the one thing between the U-Net and the new default) | [pre-registered](#q2-pre-registration-when-a-noise2void-u-net-should-stop-brick-35): Q12's bar and FMD guard, plus a rule-only branch for the dilated default. **Measured, not adopted** ([results](docs/RESULTS.md#quality-pass-q2-when-a-noise2void-u-net-should-stop)): keeping the last of 30 epochs (C) gives the U-Net 26.84 dB on the public sets and MreB slope 0.96, but 31.4794 on FMD against the 31.48 guard. Longer training gains on independent noise (confocal +0.84, two-photon +1.02) and loses on correlated widefield noise (−1.69), which the masked loss can't see |
 | 36 ✅ | build | **S1 + S2 (systems track):** `perf-roofline` measures achieved GFLOP/s *and* memory bandwidth per kernel against this CPU's peaks; then the kernels are reworked for whichever bound dominates (512-bit `Vector512` width, or channel-blocked layout / cache tiling) | bit-identical to the reference kernels; speed-up measured for inference and training. **Done** ([results](docs/RESULTS.md#systems-s1--s2-brick-36-where-the-time-goes-and-512-bit-kernels)): every kernel compute-bound (34–75 FLOP/byte, 1–5% of bandwidth), inference 97% of a stack run, so width was the target, not layout; 512-bit forward and input-gradient kernels, bit-identical: 1.3–1.6× on denoise and training steps (interleaved) |
 | 37 ✅ | quality | **Q19: the U-Net with routing** (added after Q2) | [pre-registered](#q19-pre-registration-the-u-net-with-routing-brick-37), with the owner's two guards: the routing threshold frozen on validation before FMD test is touched, and a per-modality floor next to the overall FMD bar (≥ 33.17 dB against P3's routed 32.97). **Measured, not adopted** ([results](docs/RESULTS.md#quality-pass-q19-the-u-net-with-routing)): FMD **33.24 dB** without ground truth (confocal 34.45, two-photon 32.86, widefield 31.76: every floor met), public mean 26.78, MreB slope 0.96; only CARE 2D's per-set floor missed (19.12 against 19.20), where the structured network replaces a near-identity output on two test images with mismatched references |
-| 38 | quality | **Self-supervised scoreboard:** DORA's best self-supervised recipe against the 2024 challenge leaderboard (W2S, SUPPORT, JUMP) and against CAREamics Noise2Void and N2V2 run here on the 2025 sets | pre-registered at the pass; scored the way each benchmark specifies |
+| 38 | quality | **Self-supervised scoreboard:** DORA's best self-supervised recipe against the 2024 challenge leaderboard (W2S, SUPPORT, JUMP) and against CAREamics Noise2Void and N2V2 run here on the 2025 sets | [pre-registered](#scoreboard-pre-registration-doras-self-supervised-default-against-careamics-brick-38): DORA's routed default against CAREamics N2V and N2V2 on FMD, the three public sets, MDC25 Tribolium and BioSR+ CCPs (the 2024 challenge sets need a submission; DeepCAD-RT has no aligned reference); a measurement that orders the next bricks |
 | **Stage 2** | | **Better blind spots and frame pairs** | |
 | 39 | build | **N2V2** (blur pooling and median replacement, which remove Noise2Void's checkerboard artifacts) and **Noise2Noise** from neighbouring time-lapse frames, plus a spatiotemporal blind spot | gradient checks; the checkerboard test goes away |
 | 40 | quality | N2V2 against N2V; Noise2Noise against the spatiotemporal blind spot, on **both stationary and motile** sequences (MreB, zebrafish; DeepCAD-RT neutrophils), because Noise2Noise assumes the signal holds still between frames | pre-registered; a method that smears moving puncta doesn't ship as a default |
@@ -597,6 +597,43 @@ Written before any of its code exists or anything is run.
   - FMD's test images were looked at for P3's routed pair (design 2 was devised after design 1's test results) and for
     the 0.4 threshold; this pass's baseline therefore carries that history.
   - Two networks cost twice the training of one.
+
+### Scoreboard pre-registration: DORA's self-supervised default against CAREamics (brick 38)
+
+Written before any of its code exists or anything is run. A measurement, not an adoption pass: nothing ships from it.
+The reading below decides only the order of the next bricks.
+
+- **What is compared.** DORA's default Noise2Void since Q20 (`train --mode n2v`, routed by the noise check) against
+  CAREamics 0.3.5 Noise2Void and N2V2 (its blur-pool and median-replacement variant, `use_n2v2=True`), each with its
+  default 2D configuration, plus the noisy input and the bilateral filter. Every method gets the same budget: 30 × 50
+  steps, batch 16, 64 px patches, seed 2026, CPU only.
+- **Sets: every benchmark DORA can score here.** Scored with CARE's protocol (reference normalized by its own 0.1/99.9
+  percentiles, output matched by least squares), except FMD, which keeps its own protocol (8-bit PSNR on raw test_mix).
+  - **FMD:** training on the raw training frames (4 per FOV, FOV 19 never), testing on test_mix raw.
+  - **DeepBacs MreB, DeepBacs nucleoid, CARE 2D:** Q18's splits. CARE 2D is reported without a floor (Q20).
+    CAREamics Noise2Void's numbers there are Q18's runs (same protocol), not re-run.
+  - **MDC25 Tribolium** (3D patches of 16 × 64², used as 2D slices): training on the noisy slices of patches
+    00001–02000 (32,000 slices); testing on patches 15251–15500 (4,000 slice pairs). The slices of one patch form one
+    group, so DORA's validation split never separates them.
+  - **BioSR+ clathrin-coated pits** (raw SIM frames, 9 per file, 512 × 256): training on the noisy frames of cells
+    001–040 at all 8 signal levels (2,880 images); testing on cells 041–048 (576 pairs). One cell is one group. Scores
+    are reported per signal level and overall.
+- **Not scored, and why (stated now).** The 2024 challenge sets (W2S, SUPPORT, JUMP): the organisers hold the references,
+  so scoring them needs a submission from the owner's account. DeepCAD-RT: its high-SNR movie is not a frame-aligned
+  reference (blurred matched frames correlate 0.51–0.72 with the low-SNR ones, barely more than frames 50 apart).
+  Planaria and the other four BioSR+ structures: not downloaded (disk); the script takes them when they are.
+- **Reported:** PSNR and SSIM per set (BioSR+ also per level), MreB's fidelity (slope, ratio error, spots real), and
+  wall-clock training time.
+- **The reading, fixed now.**
+  - DORA is **competitive** on a set when its PSNR is at least the better CAREamics variant's − 0.3 dB.
+  - If CAREamics N2V2 beats CAREamics Noise2Void by ≥ 0.3 dB on at least two of the five sets with references
+    (excluding CARE 2D), stage 2's N2V2 brick (39) stays next. Otherwise Noise2Noise from neighbouring frames goes first.
+  - If DORA trails the better CAREamics variant by more than 0.3 dB on at least two of those five sets, the next quality
+    pass targets the largest such gap.
+- **Known weaknesses, stated now.** One seed (spread about 0.3 dB, as large as the margins). A CPU budget far below
+  what CAREamics' authors train with, the same for everyone. Tribolium is 3D data scored in 2D (CARE's own model for it
+  was 3D). BioSR+ raw SIM frames are usually reconstructed, not denoised, so they test the denoiser rather than the
+  application.
 
 ## Parking lot (deliberately not on the path)
 
