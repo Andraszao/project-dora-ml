@@ -1029,6 +1029,95 @@ method   21.8550   0.3279   16.0425  15.8936   1.665     0.179       0.183      
 ```
 <!-- /tl-spot -->
 
+## Before brick 41: DORA on wild data (no ground truth)
+
+A reality check on uncurated public stacks, run before brick 41's spec is written, so its surprises land in it. Not a
+benchmark and not gated: there is no reference to score against, and the numbers depend on one training run each. The
+data is in the manifest as `eval-only` (`aydin-egg-chamber`, `zerocost-n2v-3d`, `bbbc039`; each file's own licence
+checked: CC BY 4.0, CC BY 4.0, CC0). The Aydin record's `fixed_pattern_noise.tif` was left out: its terms are "PI-confirmed
+redistribution", not an open licence (owner's decision pending). The canonical BBBC039 host is blocked here, so its copy in
+CellBinDB was used; it nests the original `images.zip` (77.9 MB, as published), which the fetcher now unpacks too.
+DORA's routed default was adapted on each set itself (`train --mode n2v`, 30 × 50 steps, seed 2026), then each set was
+denoised (`runs/wild/run.sh`); the residual (raw − denoised) was audited with `tools/experiments/wild_residual.py`.
+
+The predictions, written before the router or any training ran (the I/O results were already seen):
+
+<!-- wild-predictions -->
+```text
+Wild-data check before brick 41: predictions, written before the router or any training ran on these files
+(the I/O results for the three files were already seen: egg chamber refused as zstd; ZeroCostDL4Mic ImageJ ZYX 13 x 512^2;
+BBBC039 single planes 696 x 520, 12-bit in 16-bit).
+
+1. Egg chamber, once decoded outside DORA (tifffile + imagecodecs, axes kept): 164 confocal slices of 128 x 128.
+   Router: some slices flagged correlated although point-scanning noise should be close to independent (the Q21
+   small-dense-frame false positive): more than 10% of slices flagged.
+2. ZeroCostDL4Mic actin and fibronectin (spinning disk, camera noise): router calls almost every slice independent
+   (at most 10% flagged).
+3. BBBC039 (widefield nuclei, 12-bit): router calls almost every image independent (at most 10% flagged); nuclei are
+   bright, so DORA changes the images little.
+4. Folder training on the ZeroCostDL4Mic stacks trains on page 0 of each file only (the review's item 5), so its
+   image count equals the file count, not the plane count.
+5. Residual audit (raw - denoised, routed default, adapted on the data itself): the signed correlation between the
+   residual and the output is positive for the thin actin filaments (bright structure shrunk, > 0.05) and close to 0
+   for BBBC039 (|r| < 0.05). The residual's lag-1 correlation stays near 0 (|r| < 0.1) where the router says
+   independent.
+6. Peak memory stays under 2 GB and adaptation under 10 minutes per set at the default budget.
+written 2026-11-27T20:42:54Z
+```
+<!-- /wild-predictions -->
+
+<!-- wild-residual -->
+```text
+egg chamber (confocal): 164 planes; corr(residual, output) +0.010; residual lag-1 x -0.091, y -0.235; net change -0.0013 of the mean; RMS change 0.098 of the range
+actin (spinning disk): 26 planes; corr(residual, output) +0.015; residual lag-1 x -0.004, y +0.010; net change +0.0318 of the mean; RMS change 0.081 of the range
+BBBC039 (widefield): 200 planes; corr(residual, output) +0.008; residual lag-1 x -0.014, y -0.020; net change +0.0041 of the mean; RMS change 0.010 of the range
+```
+<!-- /wild-residual -->
+
+<!-- wild-timing -->
+```text
+egg_train: exit 0, 183 s, peak RSS 2428 MB
+egg_denoise: exit 0, 5 s, peak RSS 108 MB
+actin_train: exit 0, 187 s, peak RSS 3087 MB
+actin_denoise_Position_2_11-1: exit 0, 4 s, peak RSS 275 MB
+actin_denoise_Position_2_11-29: exit 0, 4 s, peak RSS 281 MB
+bbbc_train: exit 0, 177 s, peak RSS 2858 MB
+bbbc_denoise: exit 0, 76 s, peak RSS 1459 MB
+```
+<!-- /wild-timing -->
+
+**What held and what didn't.**
+
+| # | Prediction | Outcome |
+|---|---|---|
+| — | The egg chamber is refused (zstd) | **Held**, but the message names the compression code (50000), not zstd, and gives no way out |
+| 1 | Some egg-chamber slices falsely flagged (> 10%) | **Failed:** 0 of 164. Q21's small-frame false positive didn't show on real 128 × 128 confocal slices |
+| 2 | Actin: at most 10% flagged | Held: 0 of 48 (but see 4) |
+| 3 | BBBC039: at most 10% flagged, little change | Held: 0 of 200; RMS change 1.0% of the range |
+| 4 | Folder training reads page 0 of each stack only | **Held:** 48 training images from 48 files of 13 planes (624 planes); no warning |
+| 5 | Residual vs output > 0.05 on actin, about 0 on BBBC039; residual lag-1 within ±0.1 | Actin **failed** (+0.015); BBBC039 held (+0.008); lag-1 held for actin and BBBC039, **failed** for the egg chamber along y (−0.235, x −0.091) |
+| 6 | Peak memory under 2 GB, adaptation under 10 min | Time held (about 3 min each); memory **failed**: training peaked at 2.4–3.1 GB resident (denoising 0.1–1.5 GB) |
+
+**Found along the way.**
+- **The conversion tip has to name the axes.** The egg chamber carries no axis labels (tifffile reads them as `QYX`), so
+  the planned `tifffile.imwrite(..., imagej=True, metadata={'axes': source_axes})` fails; only an explicit
+  `metadata={'axes': 'ZYX'}` works. Many files will be like this.
+- **The residuals show more than their numbers.** By eye, the actin residual holds a faint outline of the long protrusion
+  and some structure in the bright ruffle; BBBC039's holds nucleus-shaped texture and faint rims at nucleus edges (part of
+  that is shot noise, stronger inside bright nuclei; part may be chromatin texture). A signed correlation can't see
+  zero-mean texture or edge loss, so the report a user gets (brick 41) should show the residual image, not only numbers.
+- **A brightness bias on actin:** the output is 3.2% darker than the input on average (BBBC039 +0.4%, the egg chamber
+  −0.1%). Unexplained; a denoiser that removes zero-mean noise shouldn't move the mean. Brick 43's do-no-harm pass
+  should measure it everywhere.
+- **The egg chamber's residual is anti-correlated between rows** (−0.235): unexplained (anisotropic scanning, or
+  resampling in the source data, are guesses).
+- **Training memory:** 2.4–3.1 GB resident even for a 10 MB volume. Part of it is probably the .NET collector using a
+  15 GB machine freely; how much is real needs a run with a capped heap (`DOTNET_GCHeapHardLimit`) before a pilot laptop
+  meets it.
+- **One unidentified intermittent test failure** during this work (1 of 11 suite runs, right after a rebuild; not
+  reproduced in 10 reruns, 4 of them under load); its output wasn't kept. Brick 41 runs the suite in a loop with saved
+  logs to find it.
+
 ## Systems S1 + S2 (brick 36): where the time goes, and 512-bit kernels
 
 Measured with `dora-bio bench --roofline` (and `dora-bio bench` for whole-model timings) on the 4-vCPU cloud container

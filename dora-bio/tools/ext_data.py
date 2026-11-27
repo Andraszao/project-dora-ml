@@ -71,6 +71,10 @@ def problems(manifest):
         seen = set()
         for f in d.get("files", []):
             label = f"{name}/{f.get('file')}"
+            for inner in f.get("inner", []):   # zips inside an unpacked zip, unpacked in turn (CellBinDB nests BBBC's)
+                parts = inner.split("/")
+                if f.get("unpack") != "zip" or not inner.endswith(".zip") or inner.startswith("/") or ".." in parts or "" in parts:
+                    out.append(f"{label}: inner archive {inner!r} must be a relative .zip path inside an unpacked zip")
             if not f.get("file") or "/" in f["file"] or f["file"] in seen or f["file"].startswith("."):
                 out.append(f"{label}: file names are plain, unique and not hidden")
             seen.add(f.get("file"))
@@ -166,6 +170,15 @@ def fetch(names, full):
                 if r.returncode != 0:
                     sys.exit(f"  ✗ {name}: {f['file']} failed the safety check; nothing kept")
                 os.remove(part)
+                for inner in f.get("inner", []):   # each through the same entry-by-entry check, next to where it was
+                    path = os.path.join(target, *inner.split("/"))
+                    if not os.path.isfile(path):
+                        sys.exit(f"  ✗ {name}: {f['file']} has no {inner}")
+                    r = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tools", "extract_zip.py"), path, os.path.dirname(path)])
+                    if r.returncode != 0:
+                        sys.exit(f"  ✗ {name}: {inner} failed the safety check; nothing kept")
+                    os.remove(path)
+                    shutil.rmtree(os.path.join(os.path.dirname(path), "__MACOSX"), ignore_errors=True)
             else:
                 os.replace(part, os.path.join(target, f["file"]))
         shutil.rmtree(os.path.join(target, "__MACOSX"), ignore_errors=True)   # macOS resource forks, not images

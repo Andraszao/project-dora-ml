@@ -20,7 +20,12 @@ public sealed record ExtStackGroup(string Noisy, string? CleanFrom, string? Clea
 /// <param name="Name">Folder name under data/ext; the same name as in tools/ext_manifest.json.</param>
 /// <param name="Description">What is imaged and how it is stored.</param>
 /// <param name="Groups">Its groups of files.</param>
-public sealed record ExtStackDataset(string Name, string Description, IReadOnlyList<ExtStackGroup> Groups)
+/// <param name="RefusedWith">
+/// For a dataset kept to record a refusal (the wild-data check before brick 41): text that DORA's error on its files
+/// must contain, e.g. the zstd compression code. <c>stack-check</c> then passes only if DORA refuses it with that error,
+/// so a refusal can't silently turn into a misread, nor a clear error into a vaguer one. Null for readable datasets.
+/// </param>
+public sealed record ExtStackDataset(string Name, string Description, IReadOnlyList<ExtStackGroup> Groups, string? RefusedWith = null)
 {
     /// <summary>True if noisy files come with clean partners.</summary>
     public bool HasGroundTruth => Groups.Any(g => g.CleanFrom is not null);
@@ -77,6 +82,16 @@ public static class ExtStacks
             [new("*_lowSNR.tif", "_lowSNR", "_highSNR", "TYX", 1, 5706)]),
         new("deepcad-zebrafish-ot", "DeepCAD-RT zebrafish optic tectum: 6,955 two-photon frames, low/high SNR (BigTIFF)",
             [new("*_lowSNR.tif", "_lowSNR", "_highSNR", "TYX", 1, 6955)]),
+        // Unpaired "wild" data for the check before brick 41: no ground truth, eval-only.
+        new("aydin-egg-chamber", "Drosophila egg chamber, point-scanning confocal: one 164 × 128 × 128 volume, zstd-compressed (DORA refuses it)",
+            [new("C2-DrosophilaEggChamber-small.tif", null, null, "ZYX", 1, 164)], RefusedWith: "compression 50000"),
+        new("zerocost-n2v-3d", "ZeroCostDL4Mic Noise2Void (3D): spinning-disk confocal stacks of 13 × 512 × 512, actin and fibronectin (no ground truth)",
+            [new("Noise2Void (3D)/Test images_ Actin dataset/*.tif", null, null, "ZYX", 48, 48 * 13),
+             new("Noise2Void (3D)/Test Images _ Fibronectin dataset/*.tif", null, null, "ZYX", 48, 48 * 13),
+             new("Noise2Void (3D)/Training Image _ Actin dataset/*.tif", null, null, "ZYX", 1, 13),
+             new("Noise2Void (3D)/Training Image _ Fibronectin dataset/*.tif", null, null, "ZYX", 1, 13)]),
+        new("bbbc039", "BBBC039: Hoechst-stained nuclei, high-throughput widefield, 200 single 520 × 696 images, 12-bit in 16-bit (no denoising ground truth)",
+            [new("bbbc039/images/*.tif", null, null, "YX", 200, 200)]),
     ];
 
     /// <summary>The stack dataset called <paramref name="name"/>.</summary>

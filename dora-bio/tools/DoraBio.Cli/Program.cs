@@ -1318,7 +1318,18 @@ public static class Program
             }
             catch (Exception e) when (e is InvalidDataException or NotSupportedException or IOException)
             {
+                if (d.RefusedWith is { } expected && e.Message.Contains(expected, StringComparison.Ordinal))
+                {
+                    Console.WriteLine($"{d.Name,-26} refused, as recorded: {e.Message}");
+                    continue;
+                }
                 Console.WriteLine($"  ✗ {d.Name}: {e.Message}");
+                problems++;
+                continue;
+            }
+            if (d.RefusedWith is { } refusal)
+            {
+                Console.WriteLine($"  ✗ {d.Name}: read without error, but it is recorded as refused ('{refusal}')");
                 problems++;
             }
         }

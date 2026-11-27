@@ -325,6 +325,10 @@ public class StackTests
                 if (Str(d, "tier") == "core") Assert.Matches("^[0-9a-f]{64}$", Str(f, "sha256"));   // the default fetch is fully pinned
             }
         }
+        // A dataset kept to record a refusal (DORA can't read it) is evaluation data only, never training data.
+        foreach (var refused in ExtStacks.All.Where(s => s.RefusedWith is not null))
+            Assert.Equal("eval-only", Str(datasets.Single(d => Str(d, "name") == refused.Name), "use"));
+        Assert.Contains(ExtStacks.All, s => s.RefusedWith is not null);
         var fmd = datasets.Single(d => Str(d, "name") == "fmd");
         Assert.Equal(("CC-BY-SA-4.0", "eval-only"), (Str(fmd, "licence"), Str(fmd, "use")));
         Assert.Equal(["deepbacs-bsubtilis", "deepbacs-mreb", "deepbacs-nucleoid", "mdc24-w2s", "zerocost-care2d"],
