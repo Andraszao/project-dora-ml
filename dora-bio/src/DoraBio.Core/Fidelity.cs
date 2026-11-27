@@ -117,7 +117,7 @@ public static class Fidelity
     }
 
     /// <summary>Separable Gaussian blur (radius 3σ), with edges extended by repeating the border pixel.</summary>
-    private static GrayImage Blur(GrayImage image, double sigma)
+    internal static GrayImage Blur(GrayImage image, double sigma)
     {
         int radius = (int)Math.Ceiling(3 * sigma), w = image.Width, h = image.Height;
         var kernel = new double[2 * radius + 1];

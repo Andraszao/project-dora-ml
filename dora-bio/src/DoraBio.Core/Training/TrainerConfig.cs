@@ -164,7 +164,7 @@ public sealed record EpochReport(
     TimeSpan Elapsed);
 
 /// <summary>
-/// Outcome of <see cref="Trainer.Train"/>. The network now holds the weights from <see cref="BestEpoch"/>, or the last
+/// Outcome of <see cref="Trainer"/>'s <c>Train</c>. The network now holds the weights from <see cref="BestEpoch"/>, or the last
 /// epoch's with <see cref="TrainerConfig.KeepLastEpoch"/>.
 /// </summary>
 /// <param name="History">Every epoch's report, in order.</param>

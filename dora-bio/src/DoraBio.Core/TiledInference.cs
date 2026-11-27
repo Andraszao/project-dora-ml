@@ -42,11 +42,14 @@ public static class TiledInference
 
     /// <summary>
     /// Denoises the centre frame of a multi-frame input (brick 39) with a network of <see cref="NetConfig.InputFrames"/>
-    /// frames. Every tile takes the same window from every frame, so the spatial margin covers every frame channel and
-    /// tiling stays exact.
+    /// frames, or for a skip-centre network (brick 40) the frame between its two input frames. Every tile takes the same
+    /// window from every frame, so the spatial margin covers every frame channel and tiling stays exact.
     /// </summary>
     /// <param name="net">A network with as many input frames as <paramref name="frames"/> holds.</param>
-    /// <param name="frames">Normalized frames in time order, all the same size; the centre one is denoised.</param>
+    /// <param name="frames">
+    /// Normalized frames in time order, all the same size: the network's input planes (the centre one is denoised; a
+    /// skip-centre network gets t − 1 and t + 1 only).
+    /// </param>
     /// <param name="tileCore">Side length of the region each tile writes (at least 8).</param>
     /// <param name="cancellation">Stops scheduling further tiles. Throws <see cref="OperationCanceledException"/>.</param>
     public static GrayImage Denoise(DenoisingNet net, IReadOnlyList<GrayImage> frames, int tileCore = DefaultTileCore,
@@ -79,8 +82,10 @@ public static class TiledInference
         if (frames.Count != net.Config.InputFrames)
             throw new ArgumentException(net.Config.InputFrames == 1
                 ? "This network denoises single frames."
-                : $"This network needs {net.Config.InputFrames} frames (the frame and its neighbours), got {frames.Count}.", nameof(frames));
-        var input = frames[net.Config.CenterFrame];
+                : net.Config.SkipsCentre
+                    ? $"This skip-centre network needs the frame's two neighbours (t − 1, t + 1), got {frames.Count} frames."
+                    : $"This network needs {net.Config.InputFrames} frames (the frame and its neighbours), got {frames.Count}.", nameof(frames));
+        var input = frames[0];
         if (frames.Any(f => f.Width != input.Width || f.Height != input.Height))
             throw new ArgumentException("Every frame must have the same size.", nameof(frames));
         int align = net.Config.TileAlignment;

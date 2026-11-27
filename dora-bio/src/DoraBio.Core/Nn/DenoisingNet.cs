@@ -26,6 +26,20 @@ public enum NetConditioning
     NoiseLevel,
 }
 
+/// <summary>What the network's predicted residual is subtracted from (brick 40).</summary>
+public enum NetResidualBase
+{
+    /// <summary>The frame being denoised, the centre input frame: output = centre − network(input). Every network before brick 40.</summary>
+    CentreFrame,
+
+    /// <summary>
+    /// Skip-centre Noise2Noise (brick 40): the input is (t − 1, t + 1) without frame t, and the output is their mean
+    /// minus the network's correction, output = ½(I_{t−1} + I_{t+1}) − network(input). Frame t is only the training
+    /// target, so the network never sees the pixels it is scored against.
+    /// </summary>
+    NeighbourMean,
+}
+
 /// <summary>
 /// Architecture of the denoiser.
 /// <list type="bullet">
@@ -68,8 +82,29 @@ public sealed record NetConfig(int Features, int[] Dilations)
     /// </summary>
     public int InputFrames { get; init; } = 1;
 
-    /// <summary>The input channel of the frame being denoised: InputFrames / 2.</summary>
+    /// <summary>The input channel of the frame being denoised: InputFrames / 2 (centre-frame networks; a skip-centre
+    /// network's input doesn't hold that frame).</summary>
     public int CenterFrame => InputFrames / 2;
+
+    /// <summary>
+    /// What the residual is subtracted from (brick 40): the centre frame (the default), or for a skip-centre network
+    /// (<see cref="InputFrames"/> = 2, input t − 1 and t + 1) the mean of the two neighbours.
+    /// </summary>
+    public NetResidualBase ResidualBase { get; init; }
+
+    /// <summary>True for a skip-centre network (<see cref="NetResidualBase.NeighbourMean"/>): frame t is never in its input.</summary>
+    public bool SkipsCentre => ResidualBase == NetResidualBase.NeighbourMean;
+
+    /// <summary>
+    /// The frames t − k … t + k one output frame depends on, frame t included: 1 for a single-frame network, 3 for a
+    /// 3-frame or a skip-centre network (for which frame t sets only the normalization and the noise check, never the
+    /// network's input). A time-lapse is streamed with this window.
+    /// </summary>
+    public int WindowFrames => SkipsCentre ? 3 : InputFrames;
+
+    /// <summary>A skip-centre Noise2Noise network (brick 40) on <paramref name="config"/>'s architecture: input (t − 1, t + 1).</summary>
+    public static NetConfig SkipCentre(NetConfig config) =>
+        config with { InputFrames = 2, ResidualBase = NetResidualBase.NeighbourMean };
 
     /// <summary>A U-Net with <paramref name="features"/> channels at full resolution and <paramref name="depth"/> levels below it.</summary>
     /// <remarks>16 features and depth 2 cost about as much compute per pixel as <see cref="Default"/>, with 4.5× the parameters.</remarks>
@@ -107,8 +142,13 @@ public sealed record NetConfig(int Features, int[] Dilations)
     {
         if (Features <= 0) throw new ArgumentOutOfRangeException(nameof(Features), "Features must be positive.");
         if (!Enum.IsDefined(Conditioning)) throw new ArgumentOutOfRangeException(nameof(Conditioning));
-        if (InputFrames is not (1 or 3))
-            throw new ArgumentOutOfRangeException(nameof(InputFrames), "Input frames must be 1 or 3 (wider windows would reflect the centre frame into a neighbour channel).");
+        if (!Enum.IsDefined(ResidualBase)) throw new ArgumentOutOfRangeException(nameof(ResidualBase));
+        if (SkipsCentre ? InputFrames != 2 : InputFrames is not (1 or 3))
+            throw new ArgumentOutOfRangeException(nameof(InputFrames), SkipsCentre
+                ? "A skip-centre network takes exactly 2 input frames: t − 1 and t + 1."
+                : InputFrames == 2
+                    ? "2 input frames are a skip-centre network (residual base: the neighbours' mean); a centre-frame network takes 1 or 3."
+                    : "Input frames must be 1 or 3 (wider windows would reflect the centre frame into a neighbour channel).");
         if (InputFrames > 1 && IsConditioned)
             throw new ArgumentException("Noise conditioning works on single-frame networks only.", nameof(InputFrames));
         if (Architecture == NetArchitecture.UNet)
@@ -127,16 +167,17 @@ public sealed record NetConfig(int Features, int[] Dilations)
           $"{LayerCount} conv layers, receptive field up to {2 * ReceptiveRadius + 1}px"
         : $"{LayerCount} conv layers × {Features} features, dilations [{string.Join(",", Dilations)}], receptive field {2 * ReceptiveRadius + 1}px")
         + (IsConditioned ? ", noise-conditioned (FiLM)" : "")
-        + (InputFrames > 1 ? $", {InputFrames} input frames" : "");
+        + (SkipsCentre ? ", skip-centre (input t−1, t+1; base: their mean)" : InputFrames > 1 ? $", {InputFrames} input frames" : "");
 
-    /// <summary>Equal when the architecture, feature count, depth, conditioning and every dilation match.</summary>
+    /// <summary>Equal when the architecture, feature count, depth, conditioning, input frames, residual base and every dilation match.</summary>
     /// <remarks>
     /// Records compare array members by reference, which would make two identical configs unequal.
     /// Weight loading and <see cref="DenoisingNet.CopyParametersFrom"/> rely on content equality.
     /// </remarks>
     public bool Equals(NetConfig? other) =>
         other is not null && Architecture == other.Architecture && Features == other.Features && Depth == other.Depth
-        && Conditioning == other.Conditioning && InputFrames == other.InputFrames && Dilations.AsSpan().SequenceEqual(other.Dilations);
+        && Conditioning == other.Conditioning && InputFrames == other.InputFrames && ResidualBase == other.ResidualBase
+        && Dilations.AsSpan().SequenceEqual(other.Dilations);
 
     /// <summary>Content-based hash, consistent with <see cref="Equals(NetConfig?)"/>.</summary>
     public override int GetHashCode()
@@ -147,6 +188,7 @@ public sealed record NetConfig(int Features, int[] Dilations)
         hash.Add(Depth);
         hash.Add(Conditioning);
         hash.Add(InputFrames);
+        hash.Add(ResidualBase);
         foreach (int d in Dilations) hash.Add(d);
         return hash.ToHashCode();
     }
@@ -272,7 +314,10 @@ public sealed partial class DenoisingNet
     /// <summary>Allocates scratch buffers for one thread. Reuse it across calls; it grows to the largest image seen.</summary>
     public Workspace CreateWorkspace() => new(this);
 
-    /// <summary>denoised = centre frame − network(input), for one [height, width] plane.</summary>
+    /// <summary>
+    /// denoised = base − network(input), for one [height, width] plane; the base is the centre frame, or for a skip-centre
+    /// network the mean of its two input frames (<see cref="NetConfig.ResidualBase"/>).
+    /// </summary>
     /// <param name="input">
     /// Normalized noisy input, row-major: one plane of <paramref name="height"/>×<paramref name="width"/> values, or
     /// <see cref="NetConfig.InputFrames"/> such planes one after another (time order) for a multi-frame network.
@@ -288,7 +333,7 @@ public sealed partial class DenoisingNet
         float condition = float.NaN)
     {
         CheckInput(input, height, width);
-        var center = input.Slice(Config.CenterFrame * height * width, height * width);   // the whole input when single-frame
+        var center = ResidualBase(input, height * width, workspace);   // the whole input when single-frame
         int a = Config.TileAlignment;
         if (height % a == 0 && width % a == 0)
         {
@@ -306,6 +351,20 @@ public sealed partial class DenoisingNet
         for (int y = 0; y < height; y++)
             for (int x = 0; x < width; x++)
                 output[y * width + x] = center[y * width + x] - paddedResidual[y * pw + x];
+    }
+
+    /// <summary>
+    /// The plane the predicted residual is subtracted from: a view of the centre frame, or for a skip-centre network
+    /// ½(frame 0 + frame 1) computed into the workspace. In float, 0.5f · (a + b) is exact up to the one rounding of the sum,
+    /// and it is the same expression in training and inference, so tiled and whole-frame passes still agree bit for bit.
+    /// </summary>
+    private ReadOnlySpan<float> ResidualBase(ReadOnlySpan<float> input, int plane, Workspace workspace)
+    {
+        if (!Config.SkipsCentre) return input.Slice(Config.CenterFrame * plane, plane);
+        var mean = workspace.ResidualBaseBuffer(plane);
+        ReadOnlySpan<float> before = input[..plane], after = input.Slice(plane, plane);
+        for (int i = 0; i < plane; i++) mean[i] = 0.5f * (before[i] + after[i]);
+        return mean;
     }
 
     /// <summary>Pads each of the input's frames into its own ph × pw plane of <paramref name="padded"/>.</summary>
@@ -386,10 +445,11 @@ public sealed partial class DenoisingNet
 
         var residual = Forward(input, height, width, workspace, condition);
         var gradResidual = workspace.LossGradient.AsSpan(0, residual.Length);
-        var center = input.Slice(Config.CenterFrame * height * width, height * width);
+        var center = ResidualBase(input, height * width, workspace);
 
         // Loss gradient with respect to the network's raw output (the predicted noise r):
-        //   denoised = centre frame − r,  loss_i = scale · m_i · (denoised_i − target_i)²
+        //   denoised = base − r,  loss_i = scale · m_i · (denoised_i − target_i)²
+        // The base (centre frame or neighbours' mean) is data, not a function of the parameters, so it adds no gradient.
         //   ∂loss_i/∂r_i = scale · m_i · 2 · (denoised_i − target_i) · (−1)
         // Pixels outside the mask contribute nothing, which is what makes Noise2Void's blind spots work.
         double sse = 0;
@@ -514,7 +574,7 @@ public sealed partial class DenoisingNet
         private int _capacityPixels;
         private int _capacityPadded;
         private float[] _alignedInput = [], _alignedTarget = [], _alignedMask = [];
-        private float[] _tileIn = [], _tileOut = [];
+        private float[] _tileIn = [], _tileOut = [], _residualBase = [];
 
         /// <summary>The parameters the kernels read during the current pass (set by Forward).</summary>
         internal float[] Active { get; set; } = [];
@@ -536,6 +596,13 @@ public sealed partial class DenoisingNet
         {
             if (_tileIn.Length < length) (_tileIn, _tileOut) = (new float[length], new float[length]);
             return (_tileIn, _tileOut);
+        }
+
+        /// <summary>The neighbours' mean of a skip-centre network (<see cref="ResidualBase"/>), at least <paramref name="length"/> long.</summary>
+        internal Span<float> ResidualBaseBuffer(int length)
+        {
+            if (_residualBase.Length < length) _residualBase = new float[length];
+            return _residualBase.AsSpan(0, length);
         }
 
         /// <summary>A zero-padding buffer for <see cref="Predict"/> on sizes that aren't multiples of 2^Depth.</summary>

@@ -10,6 +10,8 @@ namespace DoraBio.Core.Data;
 /// only, target frame t's hidden pixels. The neighbours' noise is independent of frame t's, so they help without leaking.</item>
 /// <item><b>Noise2Noise from neighbouring frames</b>: input frame t, target frame t+1 (and t+1 → t), every pixel in
 /// the loss. Single-frame only: with several input frames the target would sit in the input, and the network could copy it.</item>
+/// <item><b>Skip-centre Noise2Noise</b> (brick 40, TeD-inspired): input (t−1, t+1), target frame t, every pixel in the
+/// loss; frame t is never part of the input (<see cref="SkipCentre"/>).</item>
 /// </list>
 /// Validation is held out by blocks of frames (<c>name/b…</c> groups), so one long time-lapse still splits by time.
 /// </summary>
@@ -81,6 +83,47 @@ public static class Sequences
     }
 
     /// <summary>
+    /// The neighbours a skip-centre network (brick 40) sees for frame <paramref name="t"/>: (t − 1, t + 1), reflected at
+    /// the ends exactly as <see cref="FrameIndices"/> reflects a 3-frame window, so (1, 1) at t = 0 and (T − 2, T − 2) at the
+    /// last frame. Neither is ever t: reflection moves an index by at least one frame, which a test checks for every t of
+    /// every length. A 2-frame sequence works ((1, 1), then (0, 0)); a single frame has no neighbour and is refused.
+    /// </summary>
+    /// <exception cref="ArgumentException">The sequence has fewer than 2 frames.</exception>
+    public static int[] NeighbourIndices(int t, int frameCount)
+    {
+        var window = FrameIndices(t, frameCount, 3);
+        return [window[0], window[2]];
+    }
+
+    /// <summary>
+    /// Training images for skip-centre Noise2Noise (brick 40): one per <b>interior</b> frame t = 1 … T − 2, the frame as
+    /// <see cref="ImagePair.Noisy"/> (the target, which the sampler never puts into the input) and (t − 1, t + 1) as
+    /// <see cref="ImagePair.Context"/>. The two end frames aren't targets: their reflected input would be one neighbour
+    /// twice, an input training otherwise never shows. Inference still denoises them (<see cref="NeighbourIndices"/>).
+    /// Every frame is normalized by its own percentiles, as at inference.
+    /// </summary>
+    /// <param name="frames">The noisy frames in time order (raw units).</param>
+    /// <param name="name">The sequence's name (group ids and names start with it).</param>
+    /// <param name="clean">Optional ground-truth frames, for validation scores only.</param>
+    /// <param name="blockSize">Frames per validation group.</param>
+    /// <exception cref="ArgumentException">Fewer than 3 frames, so no interior frame.</exception>
+    public static List<ImagePair> SkipCentre(IReadOnlyList<GrayImage> frames, string name,
+        IReadOnlyList<GrayImage>? clean = null, int blockSize = DefaultBlockSize)
+    {
+        if (frames.Count < 3) throw new ArgumentException($"Skip-centre training needs at least 3 frames (an interior target); '{name}' has {frames.Count}.");
+        if (clean is not null && clean.Count != frames.Count) throw new ArgumentException("One clean frame per noisy frame is needed.", nameof(clean));
+        var (normalized, maps) = NormalizeEach(frames);
+        var result = new List<ImagePair>(frames.Count - 2);
+        for (int t = 1; t + 1 < frames.Count; t++)
+            result.Add(new ImagePair(normalized[t], clean is null ? null : Normalization.Apply(clean[t], maps[t]),
+                $"{name}/b{t / blockSize}", $"{name}/t{t:0000}")
+            {
+                Context = [normalized[t - 1], normalized[t + 1]],
+            });
+        return result;
+    }
+
+    /// <summary>
     /// Training images for Noise2Noise from neighbouring frames: (t → t+1) and (t+1 → t) for every adjacent pair, the
     /// target in <see cref="ImagePair.Clean"/>. A pair belongs to the validation group of its earlier frame.
     /// </summary>
@@ -104,13 +147,22 @@ public static class Sequences
     /// ground-truth stacks in <c>clean/</c>, or directly in the folder). Every plane of a stack, in file order, is a frame.
     /// </summary>
     /// <param name="path">A stack file or a folder.</param>
-    /// <param name="mode">Noise2Void (spatiotemporal, with <paramref name="inputFrames"/>) or Noise2Noise (one input frame).</param>
-    /// <param name="inputFrames">The network's input frames: 1 for Noise2Noise.</param>
+    /// <param name="mode">
+    /// Noise2Void (spatiotemporal, with <paramref name="inputFrames"/>), Noise2Noise (one input frame) or skip-centre
+    /// (two input frames, t − 1 and t + 1).
+    /// </param>
+    /// <param name="inputFrames">The network's input frames: 1 for Noise2Noise, 2 for skip-centre.</param>
     /// <param name="blockSize">Frames per validation group.</param>
-    public static List<ImagePair> Load(string path, TrainingMode mode, int inputFrames, int blockSize = DefaultBlockSize)
+    /// <param name="range">
+    /// Only these frames of a single stack file, as a standalone sequence (brick 40's training block); null for every frame.
+    /// </param>
+    public static List<ImagePair> Load(string path, TrainingMode mode, int inputFrames, int blockSize = DefaultBlockSize, FrameRange? range = null)
     {
+        if (range is not null && !File.Exists(path)) throw new ArgumentException($"A frame range needs a single stack file; {path} isn't one.");
         if (mode == TrainingMode.Noise2Noise && inputFrames != 1)
             throw new ArgumentException("Noise2Noise takes one input frame: with several, its target would be part of the input.");
+        if (mode == TrainingMode.SkipCentre && inputFrames != 2)
+            throw new ArgumentException("Skip-centre Noise2Noise takes two input frames, t − 1 and t + 1.");
         if (mode == TrainingMode.Supervised) throw new ArgumentException("Time-lapse training is Noise2Void or Noise2Noise.");
         var stacks = new List<(string Noisy, string? Clean)>();
         if (File.Exists(path)) stacks.Add((path, null));
@@ -131,10 +183,14 @@ public static class Sequences
         foreach (var (noisy, clean) in stacks)
         {
             string name = Path.GetFileNameWithoutExtension(noisy);
-            var frames = ReadPlanes(noisy);
-            result.AddRange(mode == TrainingMode.Noise2Noise
-                ? NeighbourPairs(frames, name, blockSize)
-                : Spatiotemporal(frames, inputFrames, name, clean is null ? null : ReadPlanes(clean), blockSize));
+            var frames = range is { } r ? ReadPlanes(noisy, r) : ReadPlanes(noisy);
+            var truth = clean is null ? null : ReadPlanes(clean);
+            result.AddRange(mode switch
+            {
+                TrainingMode.Noise2Noise => NeighbourPairs(frames, name, blockSize),
+                TrainingMode.SkipCentre => SkipCentre(frames, name, truth, blockSize),
+                _ => Spatiotemporal(frames, inputFrames, name, truth, blockSize),
+            });
         }
         return result;
     }
@@ -146,9 +202,90 @@ public static class Sequences
         return Enumerable.Range(0, stack.PlaneCount).Select(stack.ReadPlane).ToList();
     }
 
+    /// <summary>
+    /// Frames <paramref name="range"/>.First … Last (inclusive, 0-based) of a stack file, read one plane at a time, so a
+    /// block of a long time-lapse is loaded without the rest (brick 40). The block is then a standalone sequence: its own
+    /// first and last frames are its ends, and nothing outside it is read.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">The range is empty or runs past the stack.</exception>
+    public static List<GrayImage> ReadPlanes(string path, FrameRange range)
+    {
+        using var stack = ImageStack.Open(path);
+        if (range.Last >= stack.PlaneCount)
+            throw new ArgumentOutOfRangeException(nameof(range), $"{path} has {stack.PlaneCount} frames; frames {range} run past it.");
+        return Enumerable.Range(range.First, range.Count).Select(stack.ReadPlane).ToList();
+    }
+
+    /// <summary>
+    /// Validation images for a held-out block of a time-lapse (brick 40): one per <b>interior</b> frame t = 1 … T − 2 of
+    /// the block, each its own group (<c>name/v</c> + the frame's number in the movie), built for the arm being trained:
+    /// <list type="bullet">
+    /// <item>Noise2Void, 1 input frame: the frame alone; 3 input frames: with (t − 1, t + 1) as context.</item>
+    /// <item>Noise2Noise: the frame, with frame t + 1 as its target (one direction only, so one image per frame).</item>
+    /// <item>Skip-centre: the frame as target, (t − 1, t + 1) as context.</item>
+    /// </list>
+    /// Interior frames only, so every arm's inputs and targets lie inside the block. Because every arm gets the same
+    /// number of images, the same groups and the same sizes, <see cref="Training.ValidationSet"/> draws the same frames and
+    /// positions for all of them from the same seed: the fixed subset the pre-registration names.
+    /// </summary>
+    /// <param name="frames">The block's noisy frames (raw units), in time order.</param>
+    /// <param name="mode">The arm's training mode.</param>
+    /// <param name="inputFrames">The arm's network input frames (1 or 3 for Noise2Void, 1 for Noise2Noise, 2 for skip-centre).</param>
+    /// <param name="name">The sequence's name.</param>
+    /// <param name="firstFrame">The block's first frame in the movie, so names and groups carry movie frame numbers.</param>
+    /// <exception cref="ArgumentException">Fewer than 3 frames, or a mode and frame count that don't go together.</exception>
+    public static List<ImagePair> ValidationFrames(IReadOnlyList<GrayImage> frames, TrainingMode mode, int inputFrames, string name, int firstFrame = 0)
+    {
+        if (frames.Count < 3) throw new ArgumentException($"A validation block needs at least 3 frames (an interior one); '{name}' has {frames.Count}.");
+        bool ok = mode switch
+        {
+            TrainingMode.Noise2Void => inputFrames is 1 or 3,
+            TrainingMode.Noise2Noise => inputFrames == 1,
+            TrainingMode.SkipCentre => inputFrames == 2,
+            _ => false,
+        };
+        if (!ok) throw new ArgumentException($"No time-lapse validation for mode {mode} with {inputFrames} input frame(s).");
+        var (normalized, _) = NormalizeEach(frames);
+        var result = new List<ImagePair>(frames.Count - 2);
+        for (int t = 1; t + 1 < frames.Count; t++)
+        {
+            string id = $"{name}/v{firstFrame + t:0000}";
+            var frame = normalized[t];
+            result.Add(mode switch
+            {
+                TrainingMode.Noise2Noise => new ImagePair(frame, normalized[t + 1], id, id),
+                _ when inputFrames == 1 => new ImagePair(frame, null, id, id),
+                _ => new ImagePair(frame, null, id, id) { Context = [normalized[t - 1], normalized[t + 1]] },
+            });
+        }
+        return result;
+    }
+
     private static (GrayImage[] Normalized, IntensityMap[] Maps) NormalizeEach(IReadOnlyList<GrayImage> frames)
     {
         var maps = frames.Select(f => Normalization.FromPercentiles(f.Pixels)).ToArray();
         return (frames.Select((f, i) => Normalization.Apply(f, maps[i])).ToArray(), maps);
     }
+}
+
+/// <summary>A block of frames First … Last of a time-lapse, both inclusive and 0-based (brick 40's training, validation and test blocks).</summary>
+/// <param name="First">The block's first frame.</param>
+/// <param name="Last">The block's last frame.</param>
+public readonly record struct FrameRange(int First, int Last)
+{
+    /// <summary>Number of frames in the block.</summary>
+    public int Count => Last - First + 1;
+
+    /// <summary>Parses "A-B" (for example "1370-1669").</summary>
+    /// <exception cref="FormatException">Not two non-negative integers A ≤ B separated by a hyphen.</exception>
+    public static FrameRange Parse(string text)
+    {
+        var parts = text.Split('-');
+        if (parts.Length != 2 || !int.TryParse(parts[0], out int first) || !int.TryParse(parts[1], out int last) || first < 0 || last < first)
+            throw new FormatException($"'{text}' is not a frame range: write FIRST-LAST, e.g. 1370-1669 (0-based, both included).");
+        return new FrameRange(first, last);
+    }
+
+    /// <summary>"First-Last".</summary>
+    public override string ToString() => $"{First}-{Last}";
 }

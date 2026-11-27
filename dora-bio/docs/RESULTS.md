@@ -814,6 +814,221 @@ dynamic: each pixel's mean over ~64 frames around the block subtracted from both
   (motile). Pair 02 of the neutrophil record was fetched as its own manifest entry (`deepcad-neutrophils-02`, 5.6 GiB,
   SHA-256 pinned) to fit the disk.
 
+## Time-lapse modes on real data (brick 40, Track A)
+
+Pre-registered in PATHWAY.md (commit `da40edd`) before any of its code existed; run by `tools/experiments/timelapse.sh`.
+Four arms on the same U-Net (16 base features, depth 2) under Q2's rule C, one matched budget (60 × 50 steps, batch 16,
+64 px patches, seed 2026, CPU), on two DeepCAD-RT two-photon movies scored frame by frame against their aligned
+high-SNR movies (CARE's protocol per frame). Training frames 0–1199, validation 1210–1359 (one patch source per
+interior frame, the same 48 frames and positions for every arm), test 1370–1669; on the neutrophils also a late block
+5000–5299, reported only. Every block is a standalone sequence, reflected at its own ends.
+
+- **A1** single-frame Noise2Void (today's default network and rule); **A2** one-sided Noise2Noise (t → t + 1 and back);
+  **A3** the 3-frame spatiotemporal blind spot; **A4** skip-centre Noise2Noise, built in this brick (input t − 1 and
+  t + 1, never t; output their mean minus a correction; weights format 5).
+- **Routing parity:** the noise check called 0 of 1,200 training frames correlated on both movies (A1's and A3's logs),
+  so every Noise2Void arm is the U-Net the routed default would have trained; no deviation.
+
+**Test block 1370–1669 (the only block the rule reads)** and the neutrophils' late block. PSNR and SSIM are means over
+the block's frames; "dynamic" and "steady" are PSNR over each frame's top 10% of change (PATHWAY.md); slope and ratio
+error are brick 32's, per frame; the gain over A1 is in brackets.
+
+| Movie, block | Arm | PSNR | SSIM | Dynamic | Steady | Slope | Converged | Train min |
+|---|---|---|---|---|---|---|---|---|
+| Zebrafish, test | noisy input | 16.81 | 0.068 | 13.32 | 13.27 | 0.18 | | |
+| | A1 | 16.85 | 0.068 | 13.36 | 13.31 | 0.44 | yes | 7.1 |
+| | A2 | 17.46 (+0.61) | 0.091 | 13.88 (+0.53) | 13.88 | 2.34 | yes | 6.9 |
+| | A3 | 16.90 (+0.05) | 0.069 | 13.40 (+0.04) | 13.35 | 0.58 | **no** (1.27%) | 7.1 |
+| | A4 | **17.57 (+0.71)** | 0.097 | 13.95 (+0.60) | 13.95 | 2.45 | yes | 7.0 |
+| | A3, 180 epochs (post-hoc diagnostic) | 16.89 | 0.069 | 13.39 | 13.34 | 0.57 | yes | 20.3 |
+| Neutrophils, test | noisy input | 19.61 | 0.236 | 13.65 | 13.23 | 0.32 | | |
+| | A1 | 20.66 | 0.236 | 15.04 | 14.72 | 1.06 | yes | 6.8 |
+| | A2 | 21.64 (+0.98) | 0.315 | 15.71 (+0.67) | 15.43 | 1.75 | yes | 6.7 |
+| | A3 | 21.26 (+0.60) | 0.269 | 15.60 (+0.56) | 15.32 | 1.18 | yes | 6.6 |
+| | A4 | **21.90 (+1.24)** | 0.327 | 15.96 (+0.93) | 15.71 | 1.80 | yes | 6.8 |
+| Neutrophils, late (reported only) | noisy input | 19.46 | 0.215 | 13.52 | 13.12 | 0.29 | | |
+| | A1 | 20.33 | 0.217 | 14.71 | 14.41 | 1.10 | | |
+| | A2 | 21.17 (+0.84) | 0.276 | 15.32 | 15.08 | 1.88 | | |
+| | A3 | 20.80 (+0.47) | 0.237 | 15.18 | 14.94 | 1.21 | | |
+| | A4 | 21.40 (+1.07) | 0.287 | 15.55 | 15.32 | 1.98 | | |
+
+The summary the rule reads (`timelapse.sh`, 4 decimals; `run <movie> <block> <arm> <PSNR> <SSIM> <dynamic> <steady>
+<slope> <ratio-err> <found> <real> <converged> <train-min>`) and the pre-registered reading of it
+(`tools/experiments/timelapse_reading.awk`; gate 40 recomputes it):
+
+<!-- tl-summary -->
+```text
+noisy zebrafish test 16.8128 0.0677 13.3206 13.2669 0.176 0.078 0.000 NaN
+run zebrafish test A1 16.8517 0.0680 13.3571 13.3070 0.444 0.058 0.000 NaN 1 7.1
+run zebrafish test A2 17.4634 0.0907 13.8845 13.8790 2.341 0.147 0.000 0.000 1 6.9
+run zebrafish test A3 16.8992 0.0689 13.3998 13.3539 0.583 0.048 0.000 0.000 0 7.1
+run zebrafish test A4 17.5654 0.0969 13.9538 13.9528 2.451 0.145 0.000 0.000 1 7.0
+run zebrafish test A3_long 16.8885 0.0686 13.3883 13.3414 0.566 0.050 0.000 0.000 1 20.3
+noisy neutrophils test 19.6117 0.2363 13.6505 13.2316 0.323 0.161 0.041 0.690
+run neutrophils test A1 20.6615 0.2363 15.0372 14.7191 1.055 0.083 0.091 0.374 1 6.8
+run neutrophils test A2 21.6412 0.3147 15.7054 15.4285 1.745 0.210 0.129 0.666 1 6.7
+run neutrophils test A3 21.2606 0.2686 15.5962 15.3236 1.183 0.079 0.169 0.520 1 6.6
+run neutrophils test A4 21.9035 0.3266 15.9623 15.7089 1.803 0.210 0.177 0.712 1 6.8
+noisy neutrophils late 19.4603 0.2150 13.5155 13.1236 0.294 0.169 0.011 0.740
+run neutrophils late A1 20.3296 0.2173 14.7072 14.4142 1.100 0.089 0.066 0.368 1 6.8
+run neutrophils late A2 21.1716 0.2757 15.3217 15.0761 1.883 0.247 0.101 0.638 1 6.7
+run neutrophils late A3 20.7994 0.2372 15.1838 14.9364 1.209 0.086 0.130 0.498 1 6.6
+run neutrophils late A4 21.4000 0.2865 15.5495 15.3249 1.981 0.257 0.142 0.690 1 6.8
+```
+<!-- /tl-summary -->
+
+<!-- tl-reading -->
+```text
+arm A2: qualifies (mean test PSNR 19.5523)
+arm A3: fails: zebrafish PSNR +0.0475 < +0.5; (mean test PSNR 19.0799)
+arm A4: qualifies (mean test PSNR 19.7345)
+adopted: A4
+```
+<!-- /tl-reading -->
+
+**The pre-registered reading: A4 adopted** <!-- tl-adopted: skip-centre -->. A2 also qualifies; A3 fails on the
+zebrafish (+0.05 dB against the +0.5 dB bar; +0.60 on the neutrophils). Every arm gains more on the motile movie than
+on the mostly still one (A2 +0.37, A3 +0.55, A4 +0.53 dB more), and the late block keeps the order. A3 tripped the
+pre-registered non-convergence flag on the zebrafish; the pre-registered post-hoc run at three times the budget lowered
+its validation loss (0.01013 → 0.00988) but not its test score (16.90 → 16.89), so undertraining is not why it fails.
+(The first summary marked that long run "not converged" because the script compared epochs 50 and 60 of its log; it
+now compares a run's own last ten epochs. Only that row changed.)
+
+### After the run: could the guards see what they guard? (post hoc; the owner's veto)
+
+Two of the three guards looked uninformative on this data: the raw noisy input, proportional to the truth by
+construction, scored slopes of 0.18 and 0.32, and every row's dynamic-pixel PSNR sat 3.5–6 dB below its whole-frame
+PSNR. So before the default was locked, the owner asked for four readouts (`dora-bio seq-diagnose`,
+`SequenceDiagnostics.cs`; not part of the pre-registered reading, added after it was known). They use the one property
+of this data that doesn't depend on trusting the noisy reference pixel by pixel: the two movies' noises are
+independent.
+
+<!-- diag-tl-zebrafish -->
+```text
+🔬 frames 1370-1669 of 01_ZebrafishOT_GCaMP6s_492x492x6955_lowSNR.tif against 01_ZebrafishOT_GCaMP6s_492x492x6955_highSNR.tif (post hoc, after brick 40)
+mask audit, low- vs high-SNR signed change: dynamic -0.020 in its mask, -0.012 over all pixels; first difference -0.019 in its mask, -0.012 over all pixels
+shared change, noisy input vs reference, raw units, all pixels: midpoint -0.0412 ± 0.0002, first difference -0.0411 ± 0.0002 (jackknife over 10 frame chunks)
+          change  mean-slope  mean-ratio-err  tile-slope  tile-ratio-err  transients-kept (se)  motion-kept (se)  gain-jitter-dB  flicker  trace-corr
+noisy     0.0000       0.855           0.032       0.992           0.018         1.000 (0.000)     1.000 (0.000)           0.000    0.002       0.074
+A1        0.0964       0.772           0.052       0.952           0.059         0.219 (0.003)     0.218 (0.002)           0.000    0.002       0.080
+A2        0.1029       0.918           0.035       0.977           0.058        -0.001 (0.000)    -0.002 (0.000)           0.000    0.004       0.092
+A3        0.0984       0.755           0.054       0.932           0.047         0.125 (0.002)     0.124 (0.001)           0.001    0.004       0.086
+A4        0.1038       0.951           0.023       1.002           0.038        -0.000 (0.000)    -0.001 (0.000)           0.105    0.064       0.061
+```
+<!-- /diag-tl-zebrafish -->
+
+<!-- diag-tl-neutrophils -->
+```text
+🔬 frames 1370-1669 of 02_neutrophil_0.465umPerPixel_512x512x5706_lowSNR.tif against 02_neutrophil_0.465umPerPixel_512x512x5706_highSNR.tif (post hoc, after brick 40)
+mask audit, low- vs high-SNR signed change: dynamic 0.007 in its mask, 0.001 over all pixels; first difference 0.011 in its mask, 0.003 over all pixels
+shared change, noisy input vs reference, raw units, all pixels: midpoint -0.0237 ± 0.0003, first difference -0.0232 ± 0.0005 (jackknife over 10 frame chunks)
+          change  mean-slope  mean-ratio-err  tile-slope  tile-ratio-err  transients-kept (se)  motion-kept (se)  gain-jitter-dB  flicker  trace-corr
+noisy     0.0000       0.962           0.023       1.031           0.024         1.000 (0.000)     1.000 (0.000)           0.000    0.001       0.529
+A1        0.0852       0.973           0.059       0.997           0.096         0.197 (0.006)     0.196 (0.007)           0.001    0.004       0.525
+A2        0.0829       1.104           0.036       1.052           0.045        -0.002 (0.006)    -0.009 (0.010)           0.001    0.001       0.542
+A3        0.0859       1.015           0.050       1.018           0.079         0.144 (0.002)     0.142 (0.003)           0.017    0.015       0.586
+A4        0.0865       1.090           0.031       1.037           0.032        -0.000 (0.004)    -0.006 (0.004)           0.044    0.023       0.556
+```
+<!-- /diag-tl-neutrophils -->
+
+1. **The dynamic mask held essentially no real change.** Inside it, the low- and high-SNR movies' signed changes
+   correlate at −0.020 (zebrafish) and 0.007 (neutrophils): at the scale of single frames both movies' changes are
+   almost all noise, so the dynamic guard was scoring reference noise.
+2. **Proportionality: the per-frame slopes were an artifact, and A4 is as proportional as the raw input.** On the
+   block's time averages, brick 32's slope moves the raw input from 0.18 / 0.32 to 0.86 / 0.96. Brick 32 takes each
+   image's background and scale from single pixels' 0.1st and 99.9th percentiles, which residual noise moves; with
+   them taken from 16 px tile means instead (`tile-slope`), raw reads 0.99 / 1.03 and A4 1.00 / 1.04, with the lowest
+   tile ratio error of the four arms (3.8% / 3.2%). A synthetic test reproduces the artifact (the exact truth reads 1.49
+   by pixel percentiles, 1.00 by tiles, and a square-root compression still reads well below 1). This weakness applies
+   to every brick 32 slope measured against a noisy reference; parked as Q26.
+3. **A4 flickers; no other arm does.** One least-squares match for the whole block fits A4 0.105 / 0.044 dB worse than
+   one per frame (A1 and A2: at most 0.001); its frame means drift by 6.4% / 2.3% of the reference's 1st–99th
+   percentile range from frame to frame (A1 and A2: at most 0.4%; the raw input 0.2% / 0.1%), and its tile traces
+   correlate least with the reference's on the zebrafish. A 6% frame-to-frame gain error would corrupt calcium ΔF/F
+   traces. Untested guess at the mechanism: A4's output is mapped back with frame t's percentile map, taken from a very
+   noisy frame, while its input frames used their own maps; the other arms map in and out with the same map, so that
+   map's noise cancels. Parked as Q25.
+4. **What the arms keep of frame-specific change: not interpretable on this data.** The retention ratios divide by the
+   change the noisy input shares with the reference, and that shared change is **negative on both movies**: −0.0412 ±
+   0.0002 (zebrafish) and −0.0237 ± 0.0003 (neutrophils) for midpoint changes in raw units, jackknife over 10 frame
+   chunks, although near zero in the √-blurred domain (readout 1). So the two movies' frame-to-frame changes are
+   anti-correlated, which real transients can't produce. A timing offset of about a frame between the movies, or an
+   interleaved acquisition, would give that sign; it is unexplained. The ratios (A2 and A4 about 0, A1 about 0.2, A3
+   about 0.13, all with small standard errors) say only what share of that anti-correlated component each arm carries,
+   not how much real transient signal it keeps. Every arm changes the image by about the same amount (RMS 8–10% of the
+   frame's range), so A1 did denoise; the zebrafish reference is noisy enough to cap every arm near 17.5 dB.
+
+**Owner decision (2026-11-27, post hoc, disclosed): A4 is not made the default.** By the veto rule set before the
+readouts were seen, A4 would ship only if (a) its time-averaged proportionality held, (b) it showed no frame-to-frame
+gain flicker and (c) it smeared no verified motion against A1. (a) holds; (b) fails; (c) can't be checked: no
+verified-motion mask exists on this data, and readout 4 is uninterpretable. The veto rests on (b). A2 isn't promoted in
+its place: it doesn't flicker, but whether it smears can't be checked either, and choosing it now would be a new decision
+rather than the rule's. So `train --data STACK` with neither `--mode` nor `--frames` still refuses and
+asks for a mode <!-- tl-default: none -->; `--mode skip-centre`, `--mode n2n` and `--frames 3` stay opt-in.
+
+<!-- tl-veto -->
+```text
+pre-registered reading: adopted A4 (skip-centre)
+post-hoc readouts: (a) time-averaged tile slope 1.00 / 1.04, ratio error 3.8% / 3.2%: holds
+                   (b) gain jitter 0.105 / 0.044 dB, flicker 6.4% / 2.3% (A1, A2 <= 0.4%): fails
+                   (c) no verified-motion mask exists; shared change anti-correlated on both movies: not checkable
+shipped default: none (owner decision 2026-11-27)
+```
+<!-- /tl-veto -->
+
+**Known weaknesses.** One seed (spread about 0.3 dB; A4's lead over A2 is 0.18 dB). Two movies, both two-photon. The
+"high-SNR" movies are themselves noisy at the scale of single frames, which made the dynamic guard blind and the
+per-frame slopes misleading; a time-lapse benchmark needs a reference averaged over repeats, or synthetic ground truth,
+to measure transients. Gate 40 re-runs the readouts and a spot check of every run (the first five test frames) with the
+data; the full summary is re-scored by `timelapse.sh --rescore DIR` (about 40 minutes), not by the gate. Before the
+commit, the spot check's frames 1370–1373 were compared with the original run's per-frame output for all eight runs
+(noisy input and model, 64 rows): identical, so nothing changed after the run touches its training or scoring path.
+
+<!-- tl-spot -->
+```text
+zebrafish A1
+method: zebrafish A1
+         PSNR      SSIM    dynamic   steady   slope   ratio-err  spots-found  spots-real
+noisy    17.0111   0.0708   13.6216  13.5826   0.193     0.074       0.000         NaN
+method   17.0475   0.0710   13.6610  13.6241   0.440     0.057       0.000         NaN
+zebrafish A2
+method: zebrafish A2
+         PSNR      SSIM    dynamic   steady   slope   ratio-err  spots-found  spots-real
+noisy    17.0111   0.0708   13.6216  13.5826   0.193     0.074       0.000         NaN
+method   17.6910   0.0938   14.2850  14.2802   2.420     0.148       0.000       0.000
+zebrafish A3
+method: zebrafish A3
+         PSNR      SSIM    dynamic   steady   slope   ratio-err  spots-found  spots-real
+noisy    17.0111   0.0708   13.6216  13.5826   0.193     0.074       0.000         NaN
+method   17.0979   0.0722   13.7129  13.6790   0.572     0.046       0.000         NaN
+zebrafish A4
+method: zebrafish A4
+         PSNR      SSIM    dynamic   steady   slope   ratio-err  spots-found  spots-real
+noisy    17.0111   0.0708   13.6216  13.5826   0.193     0.074       0.000         NaN
+method   17.7404   0.0977   14.2992  14.2982   2.365     0.140       0.000         NaN
+neutrophils A1
+method: neutrophils A1
+         PSNR      SSIM    dynamic   steady   slope   ratio-err  spots-found  spots-real
+noisy    19.6632   0.2396   13.7857  13.5346   0.325     0.153       0.044       0.670
+method   20.7452   0.2410   15.2133  15.0298   1.045     0.085       0.094       0.378
+neutrophils A2
+method: neutrophils A2
+         PSNR      SSIM    dynamic   steady   slope   ratio-err  spots-found  spots-real
+noisy    19.6632   0.2396   13.7857  13.5346   0.325     0.153       0.044       0.670
+method   21.7355   0.3200   15.8952  15.7419   1.723     0.200       0.134       0.672
+neutrophils A3
+method: neutrophils A3
+         PSNR      SSIM    dynamic   steady   slope   ratio-err  spots-found  spots-real
+noisy    19.6632   0.2396   13.7857  13.5346   0.325     0.153       0.044       0.670
+method   21.3117   0.2738   15.7417  15.5860   1.157     0.076       0.169       0.506
+neutrophils A4
+method: neutrophils A4
+         PSNR      SSIM    dynamic   steady   slope   ratio-err  spots-found  spots-real
+noisy    19.6632   0.2396   13.7857  13.5346   0.325     0.153       0.044       0.670
+method   21.8550   0.3279   16.0425  15.8936   1.665     0.179       0.183       0.609
+```
+<!-- /tl-spot -->
+
 ## Systems S1 + S2 (brick 36): where the time goes, and 512-bit kernels
 
 Measured with `dora-bio bench --roofline` (and `dora-bio bench` for whole-model timings) on the 4-vCPU cloud container
@@ -936,7 +1151,7 @@ the high-SNR reference (`Fidelity.cs`; reproduce: `tools/experiments/fidelity.sh
 - **Weights trained on FMD are not published** (CC BY-SA terms for derived models are a separate decision). The
   bundled model stays the synthetic one.
 
-## Reproducibility checks (gates 13, 15, 21, 25, 27, 29, 31, 32, 33, 35, 37 and 38)
+## Reproducibility checks (gates 13, 15, 21, 25, 27, 29, 31, 32, 33, 35, 37, 38 and 40)
 
 The blocks marked `fmd-noise` above and the blocks below are verbatim program output. `bricks.sh` gate 13 re-runs
 the first two whenever the data is present and requires an exact match. The block below is

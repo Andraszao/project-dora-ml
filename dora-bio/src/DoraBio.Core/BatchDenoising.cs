@@ -33,9 +33,10 @@ public sealed class FrameDenoiser
     public FrameDenoiser(DenoisingNet net, DenoisingNet? correlatedNet = null, bool stabilize = false, int tileCore = TiledInference.DefaultTileCore)
     {
         (Net, CorrelatedNet, Stabilize, TileCore) = (net, correlatedNet, stabilize, tileCore);
-        if (correlatedNet is not null && correlatedNet.Config.InputFrames != net.Config.InputFrames)
-            throw new ArgumentException("Both models of a routed pair must take the same number of frames.");
-        if (stabilize && net.Config.InputFrames > 1)
+        if (correlatedNet is not null && (correlatedNet.Config.InputFrames != net.Config.InputFrames
+            || correlatedNet.Config.ResidualBase != net.Config.ResidualBase))
+            throw new ArgumentException("Both models of a routed pair must take the same frames.");
+        if (stabilize && net.Config.WindowFrames > 1)
             throw new ArgumentException("Variance stabilization works with single-frame models only.");
         _pool = new WorkspacePool(net);
         _correlatedPool = correlatedNet is null ? null : new WorkspacePool(correlatedNet);
@@ -80,7 +81,9 @@ public sealed class FrameDenoiser
     /// Denoises one frame of a time-lapse with a multi-frame model (brick 39): <paramref name="context"/> holds its
     /// neighbours in time order without the frame itself (for 3 frames: t−1, t+1; reflected at a sequence's ends,
     /// <see cref="Sequences.FrameIndices"/>). Each frame is normalized by its own percentiles, as in training, and the
-    /// output is mapped back with the frame's own map. Single-frame models take no context.
+    /// output is mapped back with the frame's own map. Single-frame models take no context. A skip-centre model
+    /// (brick 40) takes the same two neighbours and only them: the frame sets the intensity map and the noise check,
+    /// as its target did in training, but never enters the network's input.
     /// </summary>
     /// <param name="raw">The frame, in original units.</param>
     /// <param name="context">Its neighbouring frames (raw units), or null for a single-frame model.</param>
@@ -89,11 +92,13 @@ public sealed class FrameDenoiser
     /// <exception cref="ArgumentException">The model and the number of frames given don't match.</exception>
     public FrameResult Denoise(GrayImage raw, IReadOnlyList<GrayImage>? context, bool withBaseline = false, CancellationToken cancellation = default)
     {
-        int needed = Net.Config.InputFrames - 1;
+        int needed = Net.Config.WindowFrames - 1;
         if ((context?.Count ?? 0) != needed)
             throw new ArgumentException(needed == 0
                 ? "This model denoises single frames; it takes no neighbouring frames."
-                : $"This model takes {Net.Config.InputFrames} frames: denoise a time-lapse stack, so each frame comes with its neighbours.");
+                : Net.Config.SkipsCentre
+                    ? "This skip-centre model denoises a frame from its two neighbours: denoise a time-lapse stack, so each frame comes with them."
+                    : $"This model takes {Net.Config.InputFrames} frames: denoise a time-lapse stack, so each frame comes with its neighbours.");
         var map = Normalization.FromPercentiles(raw.Pixels);
         var input = Normalization.Apply(raw, map);
         bool correlated = CorrelatedNet is not null && LooksCorrelated(raw);
@@ -112,7 +117,7 @@ public sealed class FrameDenoiser
             // Neighbours around the frame, each normalized by its own percentiles, as in training.
             var frames = new List<GrayImage>(context.Count + 1);
             frames.AddRange(context.Take(context.Count / 2).Select(NormalizeOwn));
-            frames.Add(input);
+            if (!net.Config.SkipsCentre) frames.Add(input);   // a skip-centre network never sees the frame itself
             frames.AddRange(context.Skip(context.Count / 2).Select(NormalizeOwn));
             denoised = TiledInference.Denoise(net, frames, TileCore, cancellation, pool);
             output = Normalization.Invert(denoised, map);
@@ -162,7 +167,7 @@ public static class BatchDenoising
     public static int DenoiseStack(FrameDenoiser denoiser, TiffStackReader input, TiffStackWriter output, TiffStackWriter? baseline = null,
         PageDone? onPage = null, CancellationToken cancellation = default)
     {
-        if (denoiser.Net.Config.InputFrames > 1) return DenoiseWindowed(denoiser, input, output, baseline, onPage, cancellation);
+        if (denoiser.Net.Config.WindowFrames > 1) return DenoiseWindowed(denoiser, input, output, baseline, onPage, cancellation);
         long allocatedAtLastCollection = GC.GetTotalAllocatedBytes();
         for (int p = 0; p < input.PageCount; p++)
         {
@@ -197,14 +202,16 @@ public static class BatchDenoising
     /// <summary>
     /// A multi-frame model on a stack (brick 39): page t is denoised with its neighbours (<see cref="Sequences.FrameIndices"/>,
     /// reflected at both ends), so frame t is written once t + 1 has been read. Only the model's window of pages is kept:
-    /// nothing older than t − k (k = frames / 2) outlives the step that reads t + k.
+    /// nothing older than t − k (k = window / 2) outlives the step that reads t + k. A skip-centre model (brick 40) streams
+    /// with the same 3-frame window (<see cref="NetConfig.WindowFrames"/>); only its input leaves frame t out.
     /// </summary>
     private static int DenoiseWindowed(FrameDenoiser denoiser, TiffStackReader input, TiffStackWriter output, TiffStackWriter? baseline,
         PageDone? onPage, CancellationToken cancellation)
     {
-        int frames = denoiser.Net.Config.InputFrames, k = frames / 2, count = input.PageCount;
+        int frames = denoiser.Net.Config.WindowFrames, k = frames / 2, count = input.PageCount;
         if (count < Sequences.MinimumFrames(frames))
-            throw new ArgumentException($"This model takes {frames} frames; the stack has {count} page(s), too few to give each frame neighbours.");
+            throw new ArgumentException((denoiser.Net.Config.SkipsCentre ? "This skip-centre model denoises a frame from its two neighbours"
+                : $"This model takes {frames} frames") + $"; the stack has {count} page(s), too few to give each frame neighbours.");
         var window = new Dictionary<int, GrayImage>();
         GrayImage Page(int i)
         {

@@ -15,6 +15,15 @@ public enum TrainingMode
     /// target never appears in the input. Validation reports the loss only: a noisy target can't give a PSNR.
     /// </summary>
     Noise2Noise,
+
+    /// <summary>
+    /// Skip-centre Noise2Noise (brick 40, TeD-inspired): the input is the two neighbours (t − 1, t + 1) of a time-lapse
+    /// frame, held in <see cref="ImagePair.Context"/>, and the target is frame t itself (<see cref="ImagePair.Noisy"/>),
+    /// every pixel in the loss. Frame t is never written into the input, so its noise can't be copied; the network
+    /// (<see cref="Nn.NetConfig.SkipCentre"/>) outputs the neighbours' mean minus a correction. <see cref="ImagePair.Clean"/>,
+    /// if present, is ground truth for validation scores only.
+    /// </summary>
+    SkipCentre,
 }
 
 /// <summary>A mini-batch of square patches, stored sample-major: index = sample * Size² + y * Size + x.</summary>
@@ -82,6 +91,8 @@ public sealed class TrainingBatch
 /// Supervised and Noise2Noise: input = noisy, target = clean (or the neighbouring noisy frame), mask = all ones.
 /// Multi-frame images (<see cref="ImagePair.Context"/>): the neighbours get the same window and symmetry and fill the
 /// other input planes unmasked; blind spots go into the centre plane only.
+/// Skip-centre: input = the two neighbours only, target = the frame (noisy), mask = all ones; the frame's patch never
+/// reaches the input.
 /// </summary>
 public sealed class PatchSampler
 {
@@ -100,7 +111,10 @@ public sealed class PatchSampler
     /// <summary>Whether batches are built for Noise2Void or supervised training.</summary>
     public TrainingMode Mode { get; }
 
-    /// <summary>Frames per input (the images' <see cref="ImagePair.FrameCount"/>; all must agree).</summary>
+    /// <summary>
+    /// Planes per network input: the images' <see cref="ImagePair.FrameCount"/> (all must agree), or for skip-centre
+    /// training their context frames alone.
+    /// </summary>
     public int InputFrames { get; }
 
     /// <summary>Fraction of pixels blind-spotted per patch (Noise2Void only).</summary>
@@ -130,9 +144,11 @@ public sealed class PatchSampler
             throw new ArgumentException("Noise2Noise training needs a neighbouring frame (the target) for every training image.");
         if (mode == TrainingMode.Noise2Noise && usable.Any(i => i.Context is not null))
             throw new ArgumentException("Noise2Noise takes one input frame: its target must never be part of the input.");
+        if (mode == TrainingMode.SkipCentre && usable.Any(i => i.Context is not { Length: 2 }))
+            throw new ArgumentException("Skip-centre training needs each frame's two neighbours (t − 1, t + 1) as its context.");
         foreach (var image in usable) image.Validate();
-        InputFrames = usable[0].FrameCount;
-        if (usable.Any(i => i.FrameCount != InputFrames)) throw new ArgumentException("Every training image must have the same number of frames.");
+        InputFrames = mode == TrainingMode.SkipCentre ? 2 : usable[0].FrameCount;
+        if (usable.Any(i => i.FrameCount != usable[0].FrameCount)) throw new ArgumentException("Every training image must have the same number of frames.");
         if (InputFrames > 1 && augmentation == AugmentationMode.V1RotateScale)
             throw new ArgumentException("v1-style augmentation works on single frames only.");
 
@@ -198,17 +214,25 @@ public sealed class PatchSampler
             int y = _rng.Next(image.Noisy.Height - PatchSize + 1);
             int transform = _rng.Next(Dihedral.Count);
             ExtractAugmented(image.Noisy, x, y, transform, _noisyPatch);
-            if (Mode != TrainingMode.Noise2Void) ExtractAugmented(image.Clean!, x, y, transform, _cleanPatch);
-            // Neighbouring frames: the same window and symmetry, into the planes before and after the centre. They draw
-            // nothing from the random generator, so single-frame runs are unchanged.
+            if (Mode is TrainingMode.Supervised or TrainingMode.Noise2Noise) ExtractAugmented(image.Clean!, x, y, transform, _cleanPatch);
+            // Neighbouring frames: the same window and symmetry, into the planes before and after the centre (a
+            // skip-centre input has no centre plane: they fill planes 0 and 1). They draw nothing from the random
+            // generator, so single-frame runs are unchanged.
             if (image.Context is { } context)
                 for (int k = 0; k < context.Length; k++)
                 {
-                    int channel = k < context.Length / 2 ? k : k + 1;
+                    int channel = Mode == TrainingMode.SkipCentre || k < context.Length / 2 ? k : k + 1;
                     ExtractAugmented(context[k], x, y, transform, input.Slice(channel * _plane, _plane));
                 }
         }
 
+        if (Mode == TrainingMode.SkipCentre)
+        {
+            // The frame is the target only: nothing of it goes into the input.
+            _noisyPatch.CopyTo(target);
+            mask.Fill(1f);
+            return _conditions[index];
+        }
         var centerInput = input.Slice(InputFrames / 2 * _plane, _plane);   // the whole input when single-frame
         if (Mode != TrainingMode.Noise2Void)
         {

@@ -19,7 +19,8 @@ public sealed record ModelInfo(NetConfig Config, string ModelVersion, string Pro
 ///
 /// Layout, little-endian:
 ///   "DORABIO\0"                         8-byte magic
-///   u16      format version (2; 3 for a noise-conditioned network; 4 for a multi-frame network; format 1 is still read)
+///   u16      format version (2; 3 for a noise-conditioned network; 4 for a 3-frame network; 5 for a skip-centre network;
+///            format 1 is still read)
 ///   string   model version, e.g. "2.0.0-bio"   (BinaryWriter length-prefixed UTF-8)
 ///   string   provenance: free text saying what the weights were trained on
 ///   i64      saved time, UTC ticks
@@ -28,17 +29,20 @@ public sealed record ModelInfo(NetConfig Config, string ModelVersion, string Pro
 ///   U-Net:   i32 features, i32 depth
 ///   format 3 only: u8 conditioning (1 = noise level, FiLM), u16 generator hidden units (16)
 ///   format 4 only: u8 input frames (3; brick 39's spatiotemporal blind spot)
+///   format 5 only: u8 input frames (2), u8 residual base (1 = the neighbours' mean; brick 40's skip-centre Noise2Noise)
 ///   i32      parameter count, f32[parameter count] parameters
 ///   u32      CRC-32 of every preceding byte
 /// Format 1 is format 2 without the architecture byte, so it always describes a dilated network (the bundled model,
 /// and every file written before P4). Plain networks keep writing format 2, so their files are unchanged by Q13 and by
-/// brick 39 (single-frame networks never write format 4).
+/// brick 39 (single-frame networks never write format 4), and 3-frame networks keep writing format 4 after brick 40: format 5
+/// is written only when the residual base isn't the centre frame, so an older reader refuses such a file rather than
+/// loading it as a centre-frame network that would subtract its output from the wrong plane.
 /// </summary>
 public static class WeightsFile
 {
     /// <summary>Model version written into new files. Readers accept any "2.x" version.</summary>
     public const string ModelVersion = "2.0.0-bio";
-    private const ushort FormatVersion = 2, ConditionedFormat = 3, MultiFrameFormat = 4;
+    private const ushort FormatVersion = 2, ConditionedFormat = 3, MultiFrameFormat = 4, ResidualBaseFormat = 5;
     private static ReadOnlySpan<byte> Magic => "DORABIO\0"u8;
 
     /// <summary>Serializes the network to a stream (timestamped now).</summary>
@@ -86,7 +90,7 @@ public static class WeightsFile
         reader.ReadBytes(Magic.Length);
 
         ushort format = reader.ReadUInt16();
-        if (format is not (1 or FormatVersion or ConditionedFormat or MultiFrameFormat)) throw new InvalidDataException($"Unsupported weights format version {format}.");
+        if (format is not (1 or FormatVersion or ConditionedFormat or MultiFrameFormat or ResidualBaseFormat)) throw new InvalidDataException($"Unsupported weights format version {format}.");
 
         string modelVersion = reader.ReadString();
         if (!modelVersion.StartsWith("2.", StringComparison.Ordinal))
@@ -124,6 +128,14 @@ public static class WeightsFile
             if (frames < 3) throw new InvalidDataException($"A multi-frame weights file says {frames} input frames.");
             config = config with { InputFrames = frames };
         }
+        if (format == ResidualBaseFormat)
+        {
+            int frames = reader.ReadByte();
+            var residualBase = (NetResidualBase)reader.ReadByte();
+            if (residualBase != NetResidualBase.NeighbourMean)
+                throw new InvalidDataException($"A format-5 weights file must name a residual base other than the centre frame; it says {(int)residualBase}.");
+            config = config with { InputFrames = frames, ResidualBase = residualBase };
+        }
         try { config.Validate(); }
         catch (ArgumentException e) { throw new InvalidDataException($"Invalid architecture in weights file: {e.Message}"); }
 
@@ -147,7 +159,9 @@ public static class WeightsFile
         using (var writer = new BinaryWriter(memory, Encoding.UTF8, leaveOpen: true))
         {
             writer.Write(Magic);
-            writer.Write(net.Config.IsConditioned ? ConditionedFormat : net.Config.InputFrames > 1 ? MultiFrameFormat : FormatVersion);
+            writer.Write(net.Config.IsConditioned ? ConditionedFormat
+                : net.Config.SkipsCentre ? ResidualBaseFormat
+                : net.Config.InputFrames > 1 ? MultiFrameFormat : FormatVersion);
             writer.Write(ModelVersion);
             writer.Write(provenance ?? "");
             writer.Write(savedUtc.ToUniversalTime().Ticks);
@@ -165,6 +179,7 @@ public static class WeightsFile
                 writer.Write((ushort)DenoisingNet.FilmHidden);
             }
             if (net.Config.InputFrames > 1) writer.Write((byte)net.Config.InputFrames);
+            if (net.Config.SkipsCentre) writer.Write((byte)net.Config.ResidualBase);
             writer.Write(net.ParameterCount);
             foreach (float p in net.Parameters) writer.Write(p);
         }

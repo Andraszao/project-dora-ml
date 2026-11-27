@@ -40,14 +40,30 @@ public sealed class Trainer
         Action<EpochReport>? onEpoch = null,
         CancellationToken cancellation = default)
     {
-        // Setup: split by FOV, build the sampler and the fixed validation set, and create a fresh optimizer.
+        var (trainImages, valImages) = DatasetSplit.Split(dataset, _config.ValidationFraction, _config.Seed);
+        return Train(trainImages, valImages, onEpoch, cancellation);
+    }
+
+    /// <summary>
+    /// As <see cref="Train(IReadOnlyList{ImagePair}, Action{EpochReport}?, CancellationToken)"/>, with the validation
+    /// images given instead of split off by FOV: for a held-out block chosen in advance, such as brick 40's contiguous
+    /// validation frames of a time-lapse.
+    /// </summary>
+    /// <param name="trainImages">Normalized training images.</param>
+    /// <param name="valImages">Normalized validation images (never trained on).</param>
+    /// <param name="onEpoch">Called on the training thread after every epoch.</param>
+    /// <param name="cancellation">Checked between steps.</param>
+    public TrainingResult Train(
+        IReadOnlyList<ImagePair> trainImages,
+        IReadOnlyList<ImagePair> valImages,
+        Action<EpochReport>? onEpoch = null,
+        CancellationToken cancellation = default)
+    {
+        // Setup: build the sampler and the fixed validation set, and create a fresh optimizer.
         // Targets only exist when validation has clean data (PSNR gain needs ground truth).
         var cfg = _config;
-        if (dataset.Any(i => i.FrameCount != _net.Config.InputFrames))
-            throw new ArgumentException(_net.Config.InputFrames == 1
-                ? "This network takes single frames, but the training images carry neighbouring frames."
-                : $"This network takes {_net.Config.InputFrames} frames; every training image needs {_net.Config.InputFrames - 1} neighbouring frames.");
-        var (trainImages, valImages) = DatasetSplit.Split(dataset, cfg.ValidationFraction, cfg.Seed);
+        CheckFrames(trainImages.Concat(valImages));
+        if (trainImages.Count == 0 || valImages.Count == 0) throw new ArgumentException("Training and validation images are both needed.");
         var rng = new Random(cfg.Seed);
         var sampler = new PatchSampler(trainImages, cfg.PatchSize, cfg.Mode, cfg.MaskRatio, rng, cfg.Augmentation);
         var validation = new ValidationSet(valImages, cfg);
@@ -128,6 +144,24 @@ public sealed class Trainer
         {
             LastParameters = last,
         };
+    }
+
+    /// <summary>
+    /// Every image must carry the frames the network's window needs (<see cref="NetConfig.WindowFrames"/>), and a
+    /// skip-centre network trains only in skip-centre mode (and the other way round): any other mode would put frame t,
+    /// its target, into the network's input planes.
+    /// </summary>
+    private void CheckFrames(IEnumerable<ImagePair> images)
+    {
+        var net = _net.Config;
+        if (net.SkipsCentre != (_config.Mode == TrainingMode.SkipCentre))
+            throw new ArgumentException(net.SkipsCentre
+                ? "A skip-centre network trains only in skip-centre mode (input t − 1, t + 1; target t)."
+                : "Skip-centre training needs a skip-centre network (NetConfig.SkipCentre).");
+        if (images.Any(i => i.FrameCount != net.WindowFrames))
+            throw new ArgumentException(net.WindowFrames == 1
+                ? "This network takes single frames, but the training images carry neighbouring frames."
+                : $"This network takes {net.InputFrames} frames; every training image needs {net.WindowFrames - 1} neighbouring frames.");
     }
 }
 

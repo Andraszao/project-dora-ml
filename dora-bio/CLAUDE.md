@@ -24,7 +24,8 @@ src/DoraBio.Core/              ALL ML/IO code. net8.0. No Godot, no NuGet depend
              DatasetLoader, FmdDataset (real FMD layouts + test-FOV exclusion), ExtDatasets (the public paired sets in data/ext),
              ExtStacks (the benchmark stack datasets: patterns, partners, published counts), ExtDerived (2D sets
              exported from stack sets with the scoreboard's splits; `group__plane` names), FmdExport (FMD for other tools),
-             Sequences (time-lapses, brick 39: reflected frame windows, spatiotemporal and Noise2Noise training images),
+             Sequences (time-lapses, brick 39: reflected frame windows, spatiotemporal and Noise2Noise training images;
+             brick 40: skip-centre training images, frame ranges (FrameRange), per-frame validation blocks),
              SyntheticFluorescence (+ GenerateSequence: still or drifting time-lapses)
   IO/        TiffCodec (classic TIFF + BigTIFF), TiffStack (page-by-page reader and writer), ImageStack (+StackLayout: planes
              by axis from ImageJ/tifffile metadata), MrcReader, PngDecoder, ImageLoader, WeightsFile, Crc32
@@ -37,12 +38,15 @@ src/DoraBio.Core/              ALL ML/IO code. net8.0. No Godot, no NuGet depend
   NoiseCalibration.cs (variance = gain · intensity + intercept, from the noisy image alone),
   NoiseConditioning.cs (the per-frame condition a noise-conditioned network gets: ln(σ̂ / 0.05) of the whole frame),
   ExtBenchmark.cs (CARE's scoring protocol), Fidelity.cs (proportionality, ratio error, spots found and real),
+  SequenceBenchmark.cs (brick 40: a time-lapse block scored frame by frame against its high-SNR movie, dynamic and steady masks),
+  SequenceDiagnostics.cs (post hoc, after brick 40: mask audit, retention, time-averaged and tile fidelity, gain jitter, flicker),
   PerformanceBench.cs (timings for gates 22/24) and Roofline.cs (measured peaks, per-kernel GFLOP/s, stack-run split)
 tests/DoraBio.Core.Tests/      xunit. Fixtures/ written by Pillow/ImageMagick (make_fixtures.py) and tifffile/mrcfile (make_stack_fixtures.py)
 tools/DoraBio.Cli/             `dora-bio` CLI: synth | train | denoise | eval | info | bench | diagnose | ext-check | ext-eval | fidelity |
                                stack-check | stack-info | stack-export | fmd-check | fmd-eval | fmd-export |
-                               fmd-noise | fmd-diagnose | fmd-route | noise-residual   (train --frames 3 / --mode n2n and
-                               synth --sequence for time-lapses, brick 39)
+                               fmd-noise | fmd-diagnose | fmd-route | noise-residual | seq-eval   (train --frames 3 / --mode n2n and
+                               synth --sequence for time-lapses, brick 39; --mode skip-centre, --frame-range, --validation-range
+                               and seq-eval, brick 40)
 tools/fetch_fmd.sh             downloads + verifies the real FMD dataset into data/fmd/ (gitignored)
 tools/ext_manifest.json        EVERY external dataset: Zenodo record, files, sizes, MD5s, SHA-256 pins, licence, use (train /
                                eval-only), credit. The single source for fetching, gates 30/34 and ATTRIBUTIONS.md
@@ -53,6 +57,8 @@ ATTRIBUTIONS.md                GENERATED from the manifest (`python3 -I tools/ex
 tools/experiments/p2_fmd.sh    every P2 training run and evaluation behind docs/RESULTS.md
 tools/experiments/scoreboard.sh  brick 38: DORA's default vs CAREamics N2V/N2V2 on every scorable set; the pre-registered
                                reading lives in scoreboard_reading.awk (gate 38 applies it to the recorded summary)
+tools/experiments/timelapse.sh   brick 40: the four time-lapse arms on DeepCAD-RT's two movies; the adoption rule lives in
+                               timelapse_reading.awk (gate 40 applies it to the recorded summary)
 docs/RESULTS.md                measured results on real microscope data (FMD), with reproducible blocks
 godot/                         Godot 4.5 .NET project (open THIS folder in Godot)
   DoraBio.Godot.csproj         Godot.NET.Sdk/4.5.1, ProjectReference → src/DoraBio.Core
@@ -84,8 +90,10 @@ dropped that floor and adopted the design: `train --mode n2v` now routes by defa
 (the self-supervised scoreboard), done: DORA within 0.3 dB of CAREamics Noise2Void/N2V2 on all five scorable sets, +1.76 dB on
 FMD; by its reading brick 39 starts with Noise2Noise. A post-hoc diagnostic confirmed Tribolium's noise is correlated along one
 axis (so its routing is right). Brick 39 built Noise2Noise from neighbouring frames (single-frame input only) and the 3-frame
-spatiotemporal blind spot (`train --frames 3`); next is 40 (Track A, pre-registered in `PATHWAY.md`), the pass that compares them and a skip-centre Noise2Noise (built first) on
-DeepCAD-RT's still zebrafish and motile neutrophil movies; then 41–42 (Track B: N2V2's pieces and their ablation). Owner decisions there: GPU training is
+spatiotemporal blind spot (`train --frames 3`). Brick 40 (Track A) compared them and a skip-centre Noise2Noise (built in it) on
+DeepCAD-RT's zebrafish and neutrophil movies: the pre-registered rule adopted skip-centre, but post-hoc readouts found it
+flickers frame to frame, so no time-lapse mode is a default (owner veto, disclosed; `seq-diagnose`). Next, in the owner's
+order: a docs fix, a wild-data check, then pilot readiness, before Track B (N2V2). Owner decisions there: GPU training is
 an optional offline step, GPU inference is approved only as an opt-in forward path in the Godot app (S10; the CPU
 engine stays the reference and the CLI's engine), and the shipped model is trained only on synthetic and
 CC BY / CC0 data, with FMD kept for evaluation.
@@ -139,6 +147,7 @@ before anything is built on top.** `./bricks.sh` runs the gates in order and sto
 | 37 | q19-routed (quality pass, SOTA stage 1; + Q20) | `NoiseDiagnostics.ChooseThreshold`, CLI `fmd-diagnose --validation-seed/--choose-threshold`, `ext-eval`/`fidelity --weights-correlated`, `tools/experiments/q19_routed.sh`; Q20: `Training/RoutedNoise2Void.cs`, CLI `train --route auto|off --out-correlated`, `info --default-n2v-route` | `Brick=37-q19-routed`: the threshold rule; routed training splits by verdict and trains one network per kind; the recorded threshold decision (validation only) equals the shipped threshold, the correlated-network choice and Q19's verdict follow the pre-registered rule, and Q20's re-application (no CARE 2D floor) decides `train --mode n2v`'s routed default, which runs end to end from the CLI; with data + runs/q19 the blocks reproduce |
 | 38 | scoreboard (SOTA stage 1, a measurement) | `Data/ExtDerived.cs`, `ExtDataset.Source`/`ExtDatasets.Derived`/`GroupOf`, `Data/FmdExport.cs`, `FmdBenchmark.EvaluatePredictions`, CLI `stack-export`, `fmd-export`, `fmd-eval --predictions`, `ext-eval --precise`, `tools/experiments/scoreboard.sh`, `scoreboard_reading.awk`, `ext_careamics.py --n2v2`; after it, `NoiseResidual.cs` and CLI `noise-residual` (the Tribolium diagnostic; `--stack/--reference/--offset` for time-lapses), `tools/experiments/align_sweep.py`, manifest entry `deepcad-neutrophils-02` | `Brick=38-scoreboard`: derived sets follow the pre-registered splits and keep a patch or cell in one validation group, planes keep their raw values, FMD export = DORA's training plan (never FOV 19), outside outputs scored and clipped like DORA's; the recorded reading follows the pre-registered rule, RESULTS.md and PATHWAY.md name the next brick it gives; the residual measure finds one-axis noise correlation and tells it from misalignment; with data + runs/scoreboard every score reproduces (`scoreboard.sh --rescore`), and with runs/tribolium_diag the diagnostic's blocks |
 | 39 | temporal (SOTA stage 2) | `NetConfig.InputFrames` (1 or 3; residual from the centre frame), weights format 4, `ImagePair.Context`, `TrainingMode.Noise2Noise`, `Data/Sequences.cs`, multi-frame `PatchSampler`/`ValidationSet`/`TiledInference`/`FrameDenoiser`, windowed `BatchDenoising`, `SyntheticFluorescence.GenerateSequence`, CLI `train --frames 3 / --mode n2n / --frame-block`, `synth --sequence --drift` | `Brick=39-temporal`: finite differences for a 3-frame first layer (both architectures, unaligned too); single-frame networks unchanged (format 2); the residual comes from the centre frame; endpoints reflected, never clamped, and no neighbour channel ever holds the target frame (5 frames refused for that reason); tiled = whole frame across frame channels; blind spots in the centre frame only; Noise2Noise never sees its target; stacks stream with a 3-frame window (T = 2 included, T = 1 refused); on synthetic still scenes both modes beat single-frame Noise2Void and Noise2Noise's lead turns into a loss with drift; CLI trains and denoises both, and refuses `--mode n2n --frames 3` and 1-frame stacks |
+| 40 | timelapse-modes (quality pass, SOTA stage 2, Track A; + its skip-centre build) | `NetConfig.ResidualBase`/`SkipCentre`/`WindowFrames` (skip-centre: input t−1, t+1, output their mean minus a correction), weights format 5, `TrainingMode.SkipCentre`, `Sequences.SkipCentre`/`NeighbourIndices`/`ValidationFrames`/`FrameRange`, `Trainer.Train(train, validation)`, `TrainingJobOptions.Validation`, `SequenceBenchmark.cs`, `SequenceDiagnostics.cs` (post hoc), CLI `train --mode skip-centre --frame-range --validation-range`, `seq-eval`, `seq-diagnose`, `info --default-timelapse`, `tools/experiments/timelapse.sh`, `timelapse_reading.awk` | `Brick=40-timelapse-modes`: no input index, sampler plane, validation patch or inference input ever holds frame t (a shuffled frame t leaves the output bit for bit unchanged); the residual base is the neighbours' mean; finite differences (both architectures, unaligned too); tiled = whole frame; format 5 round-trips and a centre-frame base byte is refused; streaming with a 3-frame window (T = 2 included, T = 1 refused); per-frame validation blocks give every arm the same frames and positions; the masks follow their formulas and a block never reads outside itself; the post-hoc readouts see synthetic flashes, smears and flicker; the recorded reading follows the pre-registered rule, and `train --data STACK`'s default follows it or a recorded veto (it is a veto: none); with data + runs/timelapse the spot check and the readouts reproduce |
 
 Gates 11–15 and 21 need the dataset (the reproductions in gates 15 and 21 also need the weights from `tools/experiments/`) (`tools/fetch_fmd.sh`, about 9 GB into the gitignored `data/fmd/`). Without it, their
 data-dependent part reports SKIPPED (exit code 77) while the pins, unit tests and RESULTS.md checks still run. CI has
@@ -191,6 +200,8 @@ tools/experiments/p3_struct.sh                            # P3: plain vs structu
 tools/experiments/p3_vst.sh                               # P3: with and without variance stabilization (~16 min CPU)
 tools/experiments/p4_arch.sh                              # P4: U-Net vs dilated network (~21 min CPU)
 CAREAMICS_PYTHON=VENV/bin/python tools/experiments/scoreboard.sh   # brick 38 scoreboard (~2 h CPU; --rescore DIR re-scores only)
+tools/experiments/timelapse.sh                            # brick 40: 4 time-lapse arms x 2 DeepCAD-RT movies (~1 h training + 40 min scoring)
+dotnet tools/DoraBio.Cli/bin/Release/net8.0/dora-bio.dll seq-eval --stack LOW.tif --reference HIGH.tif --frames 1370-1669 --weights W.bin
 dotnet tools/DoraBio.Cli/bin/Release/net8.0/dora-bio.dll fmd-noise --root data/fmd   # is the real noise pixel-independent?
 dotnet tools/DoraBio.Cli/bin/Release/net8.0/dora-bio.dll diagnose --in IMAGE          # the same question, without ground truth
 dotnet tools/DoraBio.Cli/bin/Release/net8.0/dora-bio.dll bench --json bench.json   # timings (~1 min; --quick: seconds)
@@ -245,6 +256,9 @@ cd godot && dotnet build && godot --headless --path . --import \
     (`--condition noise`, Q13) is opt-in for the same reason: it lost to the plain U-Net on every seed.
     The same goes for the architecture: by P4's rule the dilated network is the default (the U-Net won supervised,
     +0.98 dB, but lost Noise2Void); gate 21 fails if `NetConfig.Default` disagrees with the recorded results.
+    **Time-lapse modes are opt-in** (brick 40): `train --data STACK` with neither `--mode` nor `--frames` refuses and asks
+    for one (`info --default-timelapse` = none). Skip-centre won the pre-registered comparison but flickers frame to
+    frame; gate 40 checks the default against the recorded verdict and the recorded veto.
 11. **Never train on FMD's test FOV (19).** `FmdOptions.ExcludedFovs` defaults to it, the CLI doesn't expose it, and
     gate 12 proves test_mix is FOV 19 and absent from the training plan. Report results on test_mix only.
 12. **Don't commit FMD or external data, or weights trained on them, without a license decision.** The data is CC BY-SA 4.0;
@@ -257,7 +271,9 @@ cd godot && dotnet build && godot --headless --path . --import \
     Don't describe them as real microscope data, and don't claim real-data accuracy that hasn't been measured.
 14. **Stacks stream; nothing older than the model's window is held.** For a single-frame model that window is the
     page itself; for a 3-frame model (brick 39) it is t−1, t, t+1, so page t is written once t+1 is read and page t−2 is
-    then collectable (`TemporalTests`). `BatchDenoising` reads a page, denoises it, writes it, and lets it
+    then collectable (`TemporalTests`). A skip-centre model (brick 40) streams with the same window
+    (`NetConfig.WindowFrames` = 3), but its input is only t−1 and t+1: frame t sets the intensity map and the noise check,
+    never a network input plane (`SkipCentreTests`). `BatchDenoising` reads a page, denoises it, writes it, and lets it
     go; `FrameDenoiser` keeps the inference workspaces for its lifetime instead of reallocating them per frame. Gate 28
     checks both (weak references, and peak memory flat in stack length). Every frame, stack page or single image, goes
     through `FrameDenoiser.Denoise`, so they can't drift apart.
@@ -284,7 +300,8 @@ cd godot && dotnet build && godot --headless --path . --import \
 - **Weights** (`WeightsFile`): `"DORABIO\0"`, u16 format = 2 (3 for a noise-conditioned network), model version
   `"2.0.0-bio"`, provenance string, saved-UTC ticks, architecture byte (0 dilated, 1 U-Net), then features + layer
   count + dilations[] (dilated) or features + depth (U-Net), format 3 only: conditioning byte + u16 generator hidden
-  units (16), format 4 only (a 3-frame network, brick 39): u8 input frames, then parameter count, float32 LE[], CRC-32.
+  units (16), format 4 only (a 3-frame network, brick 39): u8 input frames, format 5 only (a skip-centre network, brick 40):
+  u8 input frames (2) + u8 residual base (1 = the neighbours' mean), then parameter count, float32 LE[], CRC-32.
   Plain networks still write format 2, byte for byte as before. Format 1 (no architecture byte, always dilated:
   the bundled model) still loads. v1 JSON `.dat` files are rejected with a clear message.
 - **Images out:** TIFF, uint8/uint16/float32, uncompressed or Deflate, single pages or multi-page stacks

@@ -44,7 +44,13 @@ public static class Program
                    Time-lapses (brick 39; --data is a stack file or a folder of stacks, every plane a frame):
                     [--frames 3]  (Noise2Void with the spatiotemporal blind spot: input t-1, t, t+1, blind spots in t only)
                     [--mode n2n]  (Noise2Noise from neighbouring frames: t -> t+1 and t+1 -> t; one input frame only)
+                    [--mode skip-centre]  (skip-centre Noise2Noise, brick 40: input t-1, t+1, target t, never t itself;
+                     the output is their mean minus the network's correction)
                     [--frame-block 32]  (frames per validation group, so one long time-lapse still splits by time)
+                    [--frame-range A-B]  (train on frames A..B of one stack, a standalone sequence; also for single frames)
+                    [--validation-range C-D]  (validate on frames C..D of the same stack instead of splitting by blocks:
+                     one patch source per interior frame, the same frames and positions for every mode; with Noise2Void
+                     it needs --route off)
                    FMD folders: [--fmd-frames 4] [--fmd-levels raw,avg2,avg4,avg8,avg16] [--fmd-categories A,B]
                    External sets: --ext NAME [--data data/ext]  (its training split from tools/fetch_ext.sh; supervised
                     pairs are normalized each by their own percentiles; --mode n2v uses the noisy images alone)
@@ -59,6 +65,7 @@ public static class Program
                    Per-image PSNR/SSIM of noisy, bilateral and DORA against clean (needs clean images).
           info     --weights WEIGHTS.bin   |   info --default-arch   (prints dilated or unet)
                    |   info --default-condition   (supervised training's default --condition: none or noise)
+                   |   info --default-timelapse   (train --data STACK with no --mode/--frames: none, n2n, frames-3 or skip-centre)
           bench    [--quick] [--json OUT.json]
                    Timings: denoise a frame and one training step, for both architectures (see PerformanceBench).
           bench --roofline [--json OUT.json]
@@ -78,6 +85,15 @@ public static class Program
                     [--frames 24] [--offset dt,dx,dy]) [--only PREFIX]
                    The real noise correlation of a set's test pairs, per axis and region (background, interiors, edges),
                    from (noisy - matched reference) / sqrt(reference); next to the blind check's verdicts on the same images.
+          seq-eval --stack LOW.tif --reference HIGH.tif --frames A-B [--weights W.bin [--label TEXT]] [--per-frame FILE.tsv]
+                   A time-lapse block against its frame-aligned high-SNR movie (brick 40), frame by frame with CARE's
+                   protocol, the block a standalone sequence (reflected at its ends): PSNR, SSIM, PSNR on the pixels that
+                   change most (dynamic: |S_t - (S_t-1 + S_t+1)/2|; steady: |S_t - S_t-1| + |S_t - S_t+1|; top 10%,
+                   S = sqrt(max(blurred reference, 0))) and brick 32's fidelity, for the noisy input and the model.
+          seq-diagnose --stack LOW.tif --reference HIGH.tif --frames A-B --weights W1.bin,W2.bin,... --labels L1,L2,...
+                   Post-hoc checks of brick 40's guards (not part of its reading): how much real change its masks hold
+                   (low- vs high-SNR signed changes), the share of real transients and motion each model keeps relative
+                   to the raw frames, time-averaged fidelity, gain jitter and flicker over the block, tile-trace correlation.
           fmd-export --root data/fmd --out DIR
                    FMD for other tools: DORA's default training frames (4 raw per FOV, never FOV 19) to DIR/train/low_SNR,
                    test_mix raw to DIR/test/low_SNR, float32 TIFF; score their outputs with fmd-eval --predictions.
@@ -142,6 +158,8 @@ public static class Program
                 "stack-export" => StackExport(options),
                 "fmd-export" => FmdExportCommand(options),
                 "noise-residual" => NoiseResidualCommand(options),
+                "seq-eval" => SeqEval(options),
+                "seq-diagnose" => SeqDiagnose(options),
                 "ext-eval" => ExtEval(options),
                 "fidelity" => FidelityCommand(options),
                 "fmd-eval" => FmdEval(options),
@@ -216,22 +234,55 @@ public static class Program
     private static int Train(Options o)
     {
         bool vst = o.Has("vst");
-        int frames = o.Int("frames", 1);
         string? modeOption = o.StringOrNull("mode");
+        int? defaultFrames = null;
+        if (modeOption is null && !o.Has("frames") && !o.Has("ext") && o.StringOrNull("data") is { } dataPath && File.Exists(dataPath))
+        {
+            // A stack file with no mode: brick 40's verdict decides (DefaultTimeLapse).
+            if (DefaultTimeLapse == "none")
+                throw new ArgumentException($"{dataPath} is a stack file: train a time-lapse with --mode n2n, --mode skip-centre or " +
+                                            "--frames 3 (brick 40 made none of them the default), or give a folder of images.");
+            (modeOption, defaultFrames) = DefaultTimeLapse switch
+            {
+                "n2n" => ("n2n", (int?)null),
+                "skip-centre" => ("skip-centre", null),
+                "frames-3" => ("n2v", 3),
+                var d => throw new InvalidOperationException($"Unknown DefaultTimeLapse '{d}'."),
+            };
+            Console.WriteLine($"🎞 {Path.GetFileName(dataPath)} is a stack: brick 40's default time-lapse mode, {DefaultTimeLapse}");
+        }
         bool neighbourPairs = modeOption is "n2n" or "noise2noise";
+        bool skipCentre = modeOption is "skip-centre";
+        int frames = defaultFrames ?? o.Int("frames", skipCentre ? 2 : 1);
         if (neighbourPairs && frames != 1)
             throw new ArgumentException("Noise2Noise takes one input frame (--frames 1): with several, its target would be part of the input.");
-        bool timeLapse = frames > 1 || neighbourPairs;
+        if (skipCentre && frames != 2)
+            throw new ArgumentException("Skip-centre Noise2Noise takes two input frames (t − 1, t + 1); leave --frames out.");
+        var frameRange = o.StringOrNull("frame-range") is { } fr ? FrameRange.Parse(fr) : (FrameRange?)null;
+        var validationRange = o.StringOrNull("validation-range") is { } vr ? FrameRange.Parse(vr) : (FrameRange?)null;
+        bool timeLapse = frames > 1 || neighbourPairs || skipCentre || frameRange is not null;
+        if (validationRange is { } v0 && frameRange is { } f0 && v0.First <= f0.Last && f0.First <= v0.Last)
+            throw new ArgumentException($"--validation-range {v0} overlaps --frame-range {f0}: validation frames must never be trained on.");
+        if (validationRange is not null && frameRange is null)
+            throw new ArgumentException("--validation-range needs --frame-range, so the training frames are named too.");
+        List<ImagePair>? validation = null;
         List<ImagePair> dataset;
         if (timeLapse)
         {
             // Time-lapses (brick 39): a stack file or a folder of stacks; every plane is a frame.
             if (o.Has("ext") || o.Has("vst") || o.Has("fmd-frames") || o.Has("fmd-levels") || o.Has("fmd-categories"))
                 throw new ArgumentException("--frames and --mode n2n train on time-lapse stacks (--data FILE.tif or a folder of stacks).");
-            if (!neighbourPairs && modeOption is not (null or "n2v" or "noise2void"))
+            if (!neighbourPairs && !skipCentre && modeOption is not (null or "n2v" or "noise2void"))
                 throw new ArgumentException("--frames 3 is the spatiotemporal blind spot, a Noise2Void mode (--mode n2v).");
-            dataset = Sequences.Load(o.Required("data"), neighbourPairs ? TrainingMode.Noise2Noise : TrainingMode.Noise2Void,
-                frames, o.Int("frame-block", Sequences.DefaultBlockSize));
+            var sequenceMode = neighbourPairs ? TrainingMode.Noise2Noise : skipCentre ? TrainingMode.SkipCentre : TrainingMode.Noise2Void;
+            dataset = Sequences.Load(o.Required("data"), sequenceMode, frames, o.Int("frame-block", Sequences.DefaultBlockSize), frameRange);
+            if (validationRange is { } range)
+            {
+                string stack = o.Required("data");
+                validation = Sequences.ValidationFrames(Sequences.ReadPlanes(stack, range), sequenceMode, frames,
+                    Path.GetFileNameWithoutExtension(stack), range.First);
+                Console.WriteLine($"🧪 validation: frames {range} of {Path.GetFileName(stack)}, {validation.Count} interior frames as patch sources");
+            }
         }
         else if (o.StringOrNull("ext") is { } extName)
         {
@@ -244,12 +295,12 @@ public static class Program
             dataset = ExtDatasets.LoadTraining(o.String("data", "data/ext"), ext, supervised);
         }
         else dataset = DatasetLoader.LoadDirectory(o.Required("data"), FmdOptionsFrom(o), vst ? VarianceStabilization.Stabilize : null);
-        var mode = timeLapse ? (neighbourPairs ? TrainingMode.Noise2Noise : TrainingMode.Noise2Void)
+        var mode = timeLapse ? (neighbourPairs ? TrainingMode.Noise2Noise : skipCentre ? TrainingMode.SkipCentre : TrainingMode.Noise2Void)
             : o.String("mode", dataset.All(d => d.HasClean) ? "supervised" : "n2v") switch
             {
                 "n2v" or "noise2void" => TrainingMode.Noise2Void,
                 "supervised" => TrainingMode.Supervised,
-                var m => throw new ArgumentException($"Unknown mode '{m}' (use n2v, supervised or n2n)."),
+                var m => throw new ArgumentException($"Unknown mode '{m}' (use n2v, supervised, n2n or skip-centre)."),
             };
 
         var config = new TrainerConfig
@@ -296,6 +347,7 @@ public static class Program
         if (route == "auto")
         {
             if (!n2vMode) throw new ArgumentException("--route auto is for Noise2Void training.");
+            if (validation is not null) throw new ArgumentException("--validation-range trains one network: add --route off (and the recipe you want).");
             var verdicts = StructuredMasking.Diagnose(dataset);
             ReportNoiseCheck(verdicts);
             string routedDescription = o.StringOrNull("describe")
@@ -342,7 +394,7 @@ public static class Program
                 "noise" => architecture with { Conditioning = NetConditioning.NoiseLevel },
                 var c => throw new ArgumentException($"Unknown --condition '{c}' (use none or noise)."),
             };
-            architecture = architecture with { InputFrames = frames };
+            architecture = skipCentre ? NetConfig.SkipCentre(architecture) : architecture with { InputFrames = frames };
             architecture.Validate();
             net = DenoisingNet.Create(architecture, config.Seed);
         }
@@ -390,6 +442,7 @@ public static class Program
         string cleanUse = withClean == 0 ? "no clean images"
             : mode == TrainingMode.Noise2Void ? $"{withClean} clean images used only to score validation"
             : mode == TrainingMode.Noise2Noise ? $"{withClean} neighbouring-frame pairs, no ground truth"
+            : mode == TrainingMode.SkipCentre ? $"{withClean} clean images used only to score validation"
             : $"{withClean} clean targets";
         string description = (o.StringOrNull("describe")
             ?? $"{dataset.Count} images from '{o.StringOrNull("ext") ?? Path.GetFileName(Path.GetFullPath(o.Required("data")))}' ({cleanUse})") + structure;
@@ -401,11 +454,12 @@ public static class Program
             new TrainingJobOptions
             {
                 DatasetDescription = description, WeightsPath = o.Required("out"), JournalPath = o.StringOrNull("journey"),
-                LastWeightsPath = o.StringOrNull("save-last"),
+                LastWeightsPath = o.StringOrNull("save-last"), Validation = validation,
             },
             report => Console.WriteLine(FormatEpoch(report)));
 
-        Console.WriteLine($"✅ stopped: {result.StopReason} after {result.History.Count} epochs in {clock.Elapsed:mm\\:ss}");
+        // Total minutes, so a run past an hour doesn't wrap (mm:ss alone would print 05:00 for 1 h 5 min).
+        Console.WriteLine($"✅ stopped: {result.StopReason} after {result.History.Count} epochs in {(int)clock.Elapsed.TotalMinutes:00}:{clock.Elapsed.Seconds:00}");
         if ((config.KeepLastEpoch ? result.Last : result.Best) is { } kept)
         {
             string psnr = kept.ValPsnr is { } p ? $", val PSNR {p:0.00} dB vs noisy {result.NoisyBaselinePsnr:0.00} dB" : "";
@@ -969,6 +1023,91 @@ public static class Program
         };
 
     /// <summary>
+    /// <c>seq-eval</c>: scores a block of a time-lapse against its high-SNR movie (<see cref="SequenceBenchmark"/>), for the
+    /// noisy input and, with <c>--weights</c>, a model applied as a standalone stack of that block would be: each frame with
+    /// its neighbours reflected at the block's ends, never read from outside it. Deterministic, so brick 40's recorded
+    /// blocks are re-run by gate 40.
+    /// </summary>
+    private static int SeqEval(Options o)
+    {
+        string stackPath = o.Required("stack"), referencePath = o.Required("reference");
+        var block = FrameRange.Parse(o.Required("frames"));
+        using var noisy = ImageStack.Open(stackPath);
+        using var reference = ImageStack.Open(referencePath);
+        var methods = new List<Func<GrayImage, GrayImage[], GrayImage>> { (raw, _) => raw };
+        var names = new List<string> { "noisy" };
+        string label = "";
+        if (o.StringOrNull("weights") is { } weights)
+        {
+            var (net, info) = WeightsFile.Load(weights);
+            var denoiser = new FrameDenoiser(net);
+            methods.Add(net.Config.WindowFrames == 1
+                ? (raw, _) => denoiser.Denoise(raw).Output
+                : (raw, neighbours) => denoiser.Denoise(raw, neighbours).Output);
+            names.Add("method");
+            label = o.String("label", info.Provenance);
+        }
+        StreamWriter? perFrame = o.StringOrNull("per-frame") is { } tsv ? new StreamWriter(tsv) : null;
+        perFrame?.WriteLine("method\tframe\tpsnr\tssim\tdynamic_psnr\tsteady_psnr\tslope");
+        var scores = SequenceBenchmark.Evaluate(noisy, reference, block, methods, (m, s) =>
+            perFrame?.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                $"{names[m]}\t{s.Frame}\t{s.Psnr:0.0000}\t{s.Ssim:0.0000}\t{s.DynamicPsnr:0.0000}\t{s.SteadyPsnr:0.0000}\t{s.Fidelity.Slope:0.0000}")));
+        perFrame?.Dispose();
+
+        Console.WriteLine($"🎞 frames {block} of {Path.GetFileName(stackPath)} against {Path.GetFileName(referencePath)}: {block.Count} frames, " +
+                          "CARE's protocol per frame, the block a standalone sequence");
+        if (label.Length > 0) Console.WriteLine($"method: {label}");
+        Console.WriteLine("         PSNR      SSIM    dynamic   steady   slope   ratio-err  spots-found  spots-real");
+        for (int m = 0; m < scores.Count; m++)
+        {
+            var s = scores[m];
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                $"{names[m],-7} {s.Psnr,8:0.0000} {s.Ssim,8:0.0000} {s.DynamicPsnr,9:0.0000} {s.SteadyPsnr,8:0.0000} {s.Fidelity.Slope,7:0.000} {s.Fidelity.RatioError,9:0.000} {s.Fidelity.SpotsFound,11:0.000} {s.Fidelity.SpotsReal,11:0.000}"));
+        }
+        return 0;
+    }
+
+    /// <summary>
+    /// <c>seq-diagnose</c>: brick 40's post-hoc diagnostics (<see cref="SequenceDiagnostics"/>) for the noisy input and every
+    /// model given, in one pass over the block. Deterministic, so docs/RESULTS.md records it verbatim.
+    /// </summary>
+    private static int SeqDiagnose(Options o)
+    {
+        string stackPath = o.Required("stack"), referencePath = o.Required("reference");
+        var block = FrameRange.Parse(o.Required("frames"));
+        var weights = o.Required("weights").Split(',');
+        var labels = o.String("labels", string.Join(",", weights.Select(Path.GetFileNameWithoutExtension))).Split(',');
+        if (labels.Length != weights.Length) throw new ArgumentException("--labels needs one label per --weights file.");
+        using var noisy = ImageStack.Open(stackPath);
+        using var reference = ImageStack.Open(referencePath);
+        var methods = new List<Func<GrayImage, GrayImage[], GrayImage>> { (raw, _) => raw };
+        foreach (var path in weights)
+        {
+            var denoiser = new FrameDenoiser(WeightsFile.Load(path).Net);
+            methods.Add(denoiser.Net.Config.WindowFrames == 1
+                ? (raw, _) => denoiser.Denoise(raw).Output
+                : (raw, neighbours) => denoiser.Denoise(raw, neighbours).Output);
+        }
+        var (audit, readouts) = SequenceDiagnostics.Run(noisy, reference, block, methods);
+        Console.WriteLine($"🔬 frames {block} of {Path.GetFileName(stackPath)} against {Path.GetFileName(referencePath)} (post hoc, after brick 40)");
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+            $"mask audit, low- vs high-SNR signed change: dynamic {audit.DynamicInMask:0.000} in its mask, {audit.DynamicAll:0.000} over all pixels; " +
+            $"first difference {audit.SteadyInMask:0.000} in its mask, {audit.SteadyAll:0.000} over all pixels"));
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+            $"shared change, noisy input vs reference, raw units, all pixels: midpoint {audit.RawDynamic:0.0000} ± {audit.RawDynamicSe:0.0000}, " +
+            $"first difference {audit.RawSteady:0.0000} ± {audit.RawSteadySe:0.0000} (jackknife over {SequenceDiagnostics.Chunks} frame chunks)"));
+        Console.WriteLine("          change  mean-slope  mean-ratio-err  tile-slope  tile-ratio-err  transients-kept (se)  motion-kept (se)  gain-jitter-dB  flicker  trace-corr");
+        string[] names = ["noisy", .. labels];
+        for (int j = 0; j < readouts.Count; j++)
+        {
+            var r = readouts[j];
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                $"{names[j],-8} {r.Change,7:0.0000} {r.MeanFidelity.Slope,11:0.000} {r.MeanFidelity.RatioError,15:0.000} {r.TileSlope,11:0.000} {r.TileRatioError,15:0.000} {r.TransientKept,13:0.000} ({r.TransientKeptSe:0.000}) {r.MotionKept,9:0.000} ({r.MotionKeptSe:0.000}) {r.GainJitterDb,15:0.000} {r.Flicker,8:0.000} {r.TraceCorrelation,11:0.000}"));
+        }
+        return 0;
+    }
+
+    /// <summary>
     /// <c>fidelity</c>: the measurements of brick 32 (<see cref="Fidelity"/>) for the noisy input, the bilateral filter and a
     /// model or another tool's saved outputs, pooled over an external set's test images or FMD's test_mix at one noise
     /// level. Deterministic, so docs/RESULTS.md records it verbatim and gate 32 re-runs it.
@@ -1052,6 +1191,14 @@ public static class Program
     /// <see cref="DefaultN2v"/>. Gate 37 checks that it follows the recorded Q20 verdict.
     /// </summary>
     private const string DefaultN2vRoute = "auto";
+
+    /// <summary>
+    /// What <c>train --data STACK.tif</c> does with neither <c>--mode</c> nor <c>--frames</c> (brick 40's adoption rule,
+    /// pre-registered in PATHWAY.md; gate 40 checks it against the recorded verdict): "none" refuses and asks for a mode,
+    /// "n2n" is one-sided Noise2Noise (A2), "frames-3" the 3-frame spatiotemporal blind spot (A3), "skip-centre"
+    /// skip-centre Noise2Noise (A4).
+    /// </summary>
+    private static readonly string DefaultTimeLapse = "none";   // readonly, not const: a const would make the other branches unreachable
 
     /// <summary>
     /// <c>ext-check</c>: for every external dataset that <c>tools/fetch_ext.sh</c> has downloaded, checks that the train
@@ -1238,6 +1385,11 @@ public static class Program
             Console.WriteLine(DefaultN2vRoute == "auto"
                 ? "auto: independent → unet16 select=loss patience=0 keep=last; correlated → dilated24 struct=diamond-2 select=auto patience=6 keep=best"
                 : "off");
+            return 0;
+        }
+        if (o.Has("default-timelapse"))
+        {
+            Console.WriteLine(DefaultTimeLapse);
             return 0;
         }
         if (o.Has("default-n2v"))

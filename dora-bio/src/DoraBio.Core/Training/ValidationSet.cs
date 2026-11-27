@@ -42,6 +42,9 @@ internal sealed class ValidationSet
     /// <summary>The field of view (<see cref="ImagePair.GroupId"/>) each patch was cut from, in patch order.</summary>
     internal IReadOnlyList<string> PatchSources { get; }
 
+    /// <summary>Each patch's top-left corner in its image, in patch order (with <see cref="PatchSources"/>: where every patch came from).</summary>
+    internal IReadOnlyList<(int X, int Y)> PatchOrigins { get; }
+
     /// <summary>
     /// Extracts <see cref="TrainerConfig.ValidationPatches"/> patches spread over the held-out fields of view: the FOVs
     /// are visited in a seeded random order, one patch each (from a random frame of that FOV), starting over once every
@@ -63,6 +66,7 @@ internal sealed class ValidationSet
         var fovs = images.GroupBy(i => i.GroupId).OrderBy(g => g.Key, StringComparer.Ordinal)
             .Select(g => g.ToList()).OrderBy(_ => rng.Next()).ToList();
         var sources = new List<string>();
+        var origins = new List<(int X, int Y)>();
         for (int k = 0; k < config.ValidationPatches; k++)
         {
             var fov = fovs[k % fovs.Count];
@@ -70,28 +74,36 @@ internal sealed class ValidationSet
             sources.Add(image.GroupId);
             int x = rng.Next(image.Noisy.Width - _size + 1);
             int y = rng.Next(image.Noisy.Height - _size + 1);
+            origins.Add((x, y));
             var noisy = image.Noisy.Crop(x, y, _size, _size).Pixels;
             var clean = image.Clean?.Crop(x, y, _size, _size).Pixels;
-            int plane = noisy.Length, frames = image.FrameCount, center = frames / 2;
+            bool skipCentre = _mode == TrainingMode.SkipCentre;
+            if (skipCentre && image.Context is not { Length: 2 })
+                throw new ArgumentException("Skip-centre validation needs each frame's two neighbours (t − 1, t + 1) as its context.");
+            int plane = noisy.Length, frames = skipCentre ? 2 : image.FrameCount, center = frames / 2;
             var input = frames == 1 ? noisy : new float[frames * plane];
             var masked = new float[frames * plane];
             var mask = new float[plane];
-            if (image.Context is { } context)   // neighbours, unmasked, around the centre frame
+            if (image.Context is { } context)   // neighbours, unmasked, around the centre frame (skip-centre: planes 0 and 1)
                 for (int c = 0; c < context.Length; c++)
                 {
-                    int channel = c < context.Length / 2 ? c : c + 1;
+                    int channel = skipCentre || c < context.Length / 2 ? c : c + 1;
                     var window = context[c].Crop(x, y, _size, _size).Pixels;
                     window.CopyTo(input, channel * plane);
                     window.CopyTo(masked, channel * plane);
                 }
-            if (frames > 1) noisy.CopyTo(input, center * plane);
-            // The same blind spot as in training, so the Noise2Void validation loss scores what training optimizes.
-            BlindSpot.Apply(noisy, masked.AsSpan(center * plane, plane), mask, _size, config.MaskRatio, rng, footprint: image.Footprint);
+            if (frames > 1 && !skipCentre) noisy.CopyTo(input, center * plane);
+            // The same blind spot as in training, so the Noise2Void validation loss scores what training optimizes. It is
+            // drawn in every mode, even where it goes unused (skip-centre draws it into a scratch plane, never the input),
+            // so the generator advances alike and every mode gets the same frames and positions from the same images.
+            Span<float> blindTarget = skipCentre ? new float[plane] : masked.AsSpan(center * plane, plane);
+            BlindSpot.Apply(noisy, blindTarget, mask, _size, config.MaskRatio, rng, footprint: image.Footprint);
             // The whole frame's condition, as in training and inference (read only by conditioned networks).
             _patches.Add(new Patch(noisy, input, masked, mask, clean, NoiseConditioning.Of(image.Noisy)));
         }
 
         PatchSources = sources;
+        PatchOrigins = origins;
         bool allTargets = _patches.All(p => p.Clean is not null);
         if (_mode is TrainingMode.Supervised or TrainingMode.Noise2Noise && !allTargets)
             throw new ArgumentException(_mode == TrainingMode.Supervised
@@ -130,6 +142,12 @@ internal sealed class ValidationSet
             var p = _patches[i];
             var output = new float[p.Noisy.Length];
 
+            if (_mode == TrainingMode.SkipCentre)
+            {
+                // Every pixel against the frame itself, which the input never held.
+                net.Predict(p.Input, _size, _size, output, ws, p.Condition);
+                losses[i] = Metrics.Mse(output, p.Noisy);
+            }
             if (_mode == TrainingMode.Noise2Void)
             {
                 net.Predict(p.MaskedInput, _size, _size, output, ws, p.Condition);
@@ -149,7 +167,7 @@ internal sealed class ValidationSet
                 net.Predict(p.Input, _size, _size, output, ws, p.Condition);
                 mses[i] = Metrics.Mse(output, p.Clean);
                 ssims[i] = Metrics.Ssim(new GrayImage(_size, _size, output), new GrayImage(_size, _size, p.Clean));
-                if (_mode != TrainingMode.Noise2Void) losses[i] = mses[i];
+                if (_mode is TrainingMode.Supervised or TrainingMode.Noise2Noise) losses[i] = mses[i];
             }
             return ws;
         }, pool.Return);

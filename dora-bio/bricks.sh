@@ -24,7 +24,7 @@ export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_SKIP_FIRST_TIME_EXPE
 
 NAMES=(scaffold nn data io inference training cli godot-build godot-smoke ci-core ci-godot fmd-fetch fmd-loader fmd-eval
        n2v-diagnostic structured-mask vst calibration pool-upsample unet unet-tiling arch-eval
-       bench blocked-conv perf-budget q1-recipe tiff-stack-write q10-routing cli-batch q13-conditioning ext-data q18-ext-bench quant-fidelity q12-n2v-recipe ext-data-2 q2-n2v-stop roofline-wide q19-routed scoreboard temporal)
+       bench blocked-conv perf-budget q1-recipe tiff-stack-write q10-routing cli-batch q13-conditioning ext-data q18-ext-bench quant-fidelity q12-n2v-recipe ext-data-2 q2-n2v-stop roofline-wide q19-routed scoreboard temporal timelapse-modes)
 CHECKS=(
   "solution builds (warnings are errors, missing XML docs included); every test class belongs to exactly one brick"
   "ConvLayer/DenoisingNet/Adam/Simd: finite-difference gradient checks, optimizer behavior"
@@ -66,6 +66,7 @@ CHECKS=(
   "quality pass Q19 + Q20: the threshold rule and routed training; the recorded threshold decision (validation only), correlated-network choice and Q19 verdict follow the pre-registered rule, Q20's re-application (no CARE 2D floor) decides the routed Noise2Void default; with data + runs/q19 the blocks reproduce"
   "scoreboard: derived 2D sets keep a patch or cell in one validation group, FMD export + outside outputs scored with FMD's protocol; the recorded reading follows the pre-registered rule and PATHWAY.md's next brick follows it; noise-residual separates one-axis noise correlation from misalignment; with data + runs every score and the Tribolium diagnostic reproduce"
   "Noise2Noise from neighbouring frames and the 3-frame spatiotemporal blind spot: gradients, centre-frame residual, reflected (never clamped) endpoints, exact tiling, blind spots in the centre frame only, streaming window; both modes train and denoise from the CLI, and the leaks are refused"
+  "Track A: skip-centre Noise2Noise never sees frame t (indices, sampler, validation, inference), neighbours'-mean residual, gradients, exact tiling, format 5, streaming; per-frame CARE scoring with dynamic/steady masks inside a standalone block; the post-hoc readouts see flashes, smears and flicker; the recorded reading follows the pre-registered rule, the shipped default follows it or a recorded veto; with data + runs/timelapse the spot check and readouts reproduce"
 )
 LAST=$((${#NAMES[@]} - 1))
 LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dora-bricks.XXXXXX")"
@@ -855,6 +856,89 @@ gate_39() {   # temporal (brick 39: Noise2Noise from neighbouring frames, the sp
   echo ">> 3-frame and Noise2Noise training, stack denoising and the refusals work from the CLI"
 }
 
+gate_40() {   # timelapse-modes (brick 40, Track A, pre-registered in PATHWAY.md, commit da40edd, before any of its code)
+  test_gate 40-timelapse-modes || return 1
+  local b
+  for b in tl-summary tl-reading; do
+    [[ -n "$(recorded_block "$b")" ]] || { echo ">> docs/RESULTS.md needs the $b block"; return 1; }
+  done
+  # The reading, recomputed from the recorded summary with the pre-registered rule.
+  local reading
+  reading="$(recorded_block tl-summary | awk -f tools/experiments/timelapse_reading.awk)" || { echo ">> the reading failed: $reading"; return 1; }
+  if [[ "$reading" != "$(recorded_block tl-reading)" ]]; then
+    echo ">> the pre-registered reading of the recorded summary differs from the recorded reading:"
+    diff <(recorded_block tl-reading) <(echo "$reading") | head -20; return 1
+  fi
+  # The rule's verdict marker follows the reading (A2 = n2n, A3 = frames-3, A4 = skip-centre). The shipped default
+  # follows it too, unless RESULTS.md records a veto (the owner's post-hoc decision, with its evidence in <!-- tl-veto -->).
+  local adopted rule want
+  adopted="$(sed -n 's/^adopted: \([A-Za-z0-9]*\).*/\1/p' <<< "$reading")"
+  case "$adopted" in none) rule=none ;; A2) rule=n2n ;; A3) rule=frames-3 ;; A4) rule=skip-centre ;; *) echo ">> unknown verdict '$adopted'"; return 1 ;; esac
+  [[ "$(sed -n 's/.*<!-- tl-adopted: \([a-z0-9-]*\) -->.*/\1/p' docs/RESULTS.md)" == "$rule" ]] \
+    || { echo ">> the reading adopts '$rule', but RESULTS.md's <!-- tl-adopted --> marker disagrees"; return 1; }
+  want="$(sed -n 's/.*<!-- tl-default: \([a-z0-9-]*\) -->.*/\1/p' docs/RESULTS.md)"
+  [[ -n "$want" ]] || { echo ">> RESULTS.md needs a <!-- tl-default: ... --> marker (the shipped time-lapse default)"; return 1; }
+  if [[ "$want" != "$rule" ]]; then
+    recorded_block tl-veto | grep -q "^shipped default: $want " \
+      || { echo ">> the shipped default '$want' differs from the rule's '$rule' without a <!-- tl-veto --> block saying so"; return 1; }
+  fi
+  dotnet build tools/DoraBio.Cli -c Release >/dev/null || return 1
+  [[ "$(dotnet "$CLI_DLL" info --default-timelapse)" == "$want" ]] \
+    || { echo ">> train's default time-lapse mode is '$(dotnet "$CLI_DLL" info --default-timelapse)', RESULTS.md records '$want'"; return 1; }
+  echo ">> reading: the rule adopts $rule; shipped default $want; RESULTS.md and the CLI agree"
+  # Skip-centre from the CLI: trains on a frame range with a validation range, reports itself, denoises a stack.
+  local t="$LOG_DIR/timelapse" code
+  dotnet "$CLI_DLL" synth --out "$t/seq" --count 1 --size 48 --sequence 12 --seed 5 >/dev/null || return 1
+  local stack="$t/seq/noisy/seq_000.tif"
+  dotnet "$CLI_DLL" train --data "$stack" --mode skip-centre --frame-range 0-6 --validation-range 8-11 --out "$t/sc.bin" \
+    --epochs 1 --steps 2 --batch 2 --patch 32 >/dev/null || return 1
+  dotnet "$CLI_DLL" info --weights "$t/sc.bin" | grep -q "skip-centre" || { echo ">> info doesn't report the skip-centre network"; return 1; }
+  dotnet "$CLI_DLL" denoise --weights "$t/sc.bin" --in "$stack" --out "$t/sc.tif" >/dev/null || return 1
+  dotnet "$CLI_DLL" stack-info --in "$t/sc.tif" | grep -q "(12 planes" || { echo ">> the denoised stack doesn't have the input's 12 pages"; return 1; }
+  dotnet "$CLI_DLL" seq-eval --stack "$stack" --reference "$t/seq/clean/seq_000.tif" --frames 8-11 --weights "$t/sc.bin" \
+    | grep -q "^method " || { echo ">> seq-eval didn't score the model"; return 1; }
+  # And the refusals: frame t in the input, validation frames trained on, a time-lapse default the verdict didn't give.
+  code=0; dotnet "$CLI_DLL" train --data "$stack" --mode skip-centre --frames 3 --out "$t/x.bin" >/dev/null 2>&1 || code=$?
+  [[ $code -eq 2 ]] || { echo ">> --mode skip-centre --frames 3 must be refused: exit 2, got $code"; return 1; }
+  code=0; dotnet "$CLI_DLL" train --data "$stack" --mode n2n --frame-range 0-6 --validation-range 6-9 --out "$t/x.bin" >/dev/null 2>&1 || code=$?
+  [[ $code -eq 2 ]] || { echo ">> a validation range overlapping the training frames must be refused: exit 2, got $code"; return 1; }
+  dotnet "$CLI_DLL" synth --out "$t/one" --count 1 --size 48 --sequence 1 --seed 3 >/dev/null || return 1
+  code=0; dotnet "$CLI_DLL" denoise --weights "$t/sc.bin" --in "$t/one/noisy/seq_000.tif" --out "$t/one.tif" >/dev/null 2>&1 || code=$?
+  [[ $code -eq 2 ]] || { echo ">> a skip-centre model on a 1-frame stack must be refused: exit 2, got $code"; return 1; }
+  code=0; dotnet "$CLI_DLL" train --data "$stack" --out "$t/default.bin" --epochs 1 --steps 1 --batch 2 --patch 32 >/dev/null 2>&1 || code=$?
+  if [[ "$want" == none ]]; then
+    [[ $code -eq 2 ]] || { echo ">> with no adopted mode, a stack without --mode must be refused: exit 2, got $code"; return 1; }
+  else
+    [[ $code -eq 0 ]] || { echo ">> a stack without --mode should train the adopted mode ($want): exit $code"; return 1; }
+  fi
+  echo ">> skip-centre training, validation ranges, stack denoising, seq-eval and the refusals work from the CLI"
+  # With the data and the runs: the recorded spot check (the first 5 test frames of every run) and the post-hoc
+  # readouts reproduce.
+  local z="$EXT/deepcad-zebrafish-ot/01_ZebrafishOT_GCaMP6s_492x492x6955" n="$EXT/deepcad-neutrophils-02/02_neutrophil_0.465umPerPixel_512x512x5706"
+  [[ -f "${z}_lowSNR.tif" && -f "${n}_lowSNR.tif" && -f runs/timelapse/neutrophils_A4.bin ]] \
+    || { echo "reading checked; reproduction skipped (needs deepcad-zebrafish-ot, deepcad-neutrophils-02 and runs/timelapse)"; return 77; }
+  local fresh="" movie arm low
+  for movie in zebrafish neutrophils; do
+    low="$z"; [[ "$movie" == neutrophils ]] && low="$n"
+    for arm in A1 A2 A3 A4; do
+      fresh+="$movie $arm"$'\n'
+      fresh+="$(dotnet "$CLI_DLL" seq-eval --stack "${low}_lowSNR.tif" --reference "${low}_highSNR.tif" --frames 1370-1374 \
+        --weights "runs/timelapse/${movie}_$arm.bin" --label "$movie $arm" | sed 1d)"$'\n'
+    done
+  done
+  if [[ "${fresh%$'\n'}" != "$(recorded_block tl-spot)" ]]; then
+    echo ">> RESULTS.md block 'tl-spot' differs from a fresh run:"; diff <(recorded_block tl-spot) <(echo "${fresh%$'\n'}") | head -20; return 1
+  fi
+  echo ">> the spot check of every run reproduces"
+  local m
+  for movie in zebrafish neutrophils; do
+    low="$z"; [[ "$movie" == neutrophils ]] && low="$n"
+    m="runs/timelapse/$movie"
+    reproduces "diag-tl-$movie" seq-diagnose --stack "${low}_lowSNR.tif" --reference "${low}_highSNR.tif" --frames 1370-1669 \
+      --weights "${m}_A1.bin,${m}_A2.bin,${m}_A3.bin,${m}_A4.bin" --labels A1,A2,A3,A4 || return 1
+  done
+}
+
 # recorded_block <marker>: the contents of the ```text block between <!-- marker --> and <!-- /marker --> in RESULTS.md.
 recorded_block() { sed -n "/<!-- $1 -->/,/<!-- \/$1 -->/p" docs/RESULTS.md | sed '1,2d;$d' | sed '$d'; }
 
@@ -930,9 +1014,15 @@ MUTATIONS=(
   '38|src/DoraBio.Core/FmdBenchmark.cs|clipped.Pixels[i] = (float)Math.Clamp(output.Pixels[i], 0, DataRange);|clipped.Pixels[i] = output.Pixels[i];'
   '38|docs/RESULTS.md|<!-- sb-next-brick: noise2noise -->|<!-- sb-next-brick: n2v2 -->'
   '39|src/DoraBio.Core/Data/Sequences.cs|            if (i < 0) i = -i;|            if (i < 0) i = 0;'
-  '39|src/DoraBio.Core/Nn/DenoisingNet.cs|        var center = input.Slice(Config.CenterFrame * height * width, height * width);   // the whole input when single-frame|        var center = input.Slice(0, height * width);'
+  '39|src/DoraBio.Core/Nn/DenoisingNet.cs|if (!Config.SkipsCentre) return input.Slice(Config.CenterFrame * plane, plane);|if (!Config.SkipsCentre) return input.Slice(0, plane);'
   $'39|src/DoraBio.Core/BatchDenoising.cs|            foreach (int old in window.Keys.Where(i => i < t - k).ToList()) window.Remove(old);   // older than the window\n|'
   '38|src/DoraBio.Core/NoiseResidual.cs|private static readonly (int Dx, int Dy)[] Offsets = [(1, 0), (0, 1), (2, 0), (0, 2)];|private static readonly (int Dx, int Dy)[] Offsets = [(0, 1), (1, 0), (2, 0), (0, 2)];'
+  '40|src/DoraBio.Core/Data/PatchSampler.cs|            // The frame is the target only: nothing of it goes into the input.|            _noisyPatch.CopyTo(input);'
+  '40|src/DoraBio.Core/Nn/DenoisingNet.cs|for (int i = 0; i < plane; i++) mean[i] = 0.5f * (before[i] + after[i]);|for (int i = 0; i < plane; i++) mean[i] = after[i];'
+  '40|src/DoraBio.Core/SequenceBenchmark.cs|change[i] = MathF.Abs(current[i] - 0.5f * (before[i] + after[i]));|change[i] = MathF.Abs(current[i] - before[i]);'
+  '40|src/DoraBio.Core/Data/Sequences.cs|        return [window[0], window[2]];|        return [window[0], window[1]];'
+  '40|docs/RESULTS.md|<!-- tl-adopted: skip-centre -->|<!-- tl-adopted: n2n -->'
+  '40|docs/RESULTS.md|<!-- tl-default: none -->|<!-- tl-default: skip-centre -->'
 )
 
 self_test() {

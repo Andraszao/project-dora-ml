@@ -19,6 +19,12 @@ public sealed record TrainingJobOptions
 
     /// <summary>Also write the final epoch's weights here (whatever <see cref="WeightsPath"/> keeps). Null skips it.</summary>
     public string? LastWeightsPath { get; init; }
+
+    /// <summary>
+    /// Validation images chosen in advance (normalized), such as brick 40's held-out block of a time-lapse; then the
+    /// whole dataset trains. Null (the default) splits the dataset by FOV, as always.
+    /// </summary>
+    public IReadOnlyList<ImagePair>? Validation { get; init; }
 }
 
 /// <summary>
@@ -52,13 +58,17 @@ public static class TrainingJob
 
         try
         {
-            var result = new Trainer(net, config).Train(dataset, report =>
+            void Epoch(EpochReport report)
             {
                 if (journal is not null) journal.RecordEpoch(session!, report);
                 if (report.IsBest && !config.KeepLastEpoch && options.WeightsPath is not null)
                     WeightsFile.Save(options.WeightsPath, net, Provenance(config, options, report, "checkpoint at"));
                 onEpoch?.Invoke(report);
-            }, cancellation);
+            }
+            var trainer = new Trainer(net, config);
+            var result = options.Validation is null
+                ? trainer.Train(dataset, Epoch, cancellation)
+                : trainer.Train(dataset, options.Validation, Epoch, cancellation);
 
             // The trainer has restored the weights it keeps into the network (the best epoch's, or the last's); save those.
             var kept = config.KeepLastEpoch ? result.Last : result.Best;
