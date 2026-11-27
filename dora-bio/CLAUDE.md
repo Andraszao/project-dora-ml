@@ -84,7 +84,8 @@ dropped that floor and adopted the design: `train --mode n2v` now routes by defa
 (the self-supervised scoreboard), done: DORA within 0.3 dB of CAREamics Noise2Void/N2V2 on all five scorable sets, +1.76 dB on
 FMD; by its reading brick 39 starts with Noise2Noise. A post-hoc diagnostic confirmed Tribolium's noise is correlated along one
 axis (so its routing is right). Brick 39 built Noise2Noise from neighbouring frames (single-frame input only) and the 3-frame
-spatiotemporal blind spot (`train --frames 3`); next is 40, the pre-registered pass that compares them on still and motile data. Owner decisions there: GPU training is
+spatiotemporal blind spot (`train --frames 3`); next is 40 (Track A, pre-registered in `PATHWAY.md`), the pass that compares them and a skip-centre Noise2Noise (built first) on
+DeepCAD-RT's still zebrafish and motile neutrophil movies; then 41–42 (Track B: N2V2's pieces and their ablation). Owner decisions there: GPU training is
 an optional offline step, GPU inference is approved only as an opt-in forward path in the Godot app (S10; the CPU
 engine stays the reference and the CLI's engine), and the shipped model is trained only on synthetic and
 CC BY / CC0 data, with FMD kept for evaluation.
