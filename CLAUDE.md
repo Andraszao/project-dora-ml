@@ -275,10 +275,10 @@ The code prints "Panel actual size" at startup, so check that line before relyin
   None of the v1 scripts, MNIST data or `.dat` weights are used. v1 weights are rejected by v2's loader.
 - **Isolation:** `dora-bio/.gdignore` stops v1's Godot project from importing it, and `dora-bio/godot/project.godot`
   is a separate Godot project. Open that folder, not the repo root, to run v2.
-- **Built brick by brick:** `cd dora-bio && ./bricks.sh` runs 38 ordered gates (scaffold → nn → data → io →
+- **Built brick by brick:** `cd dora-bio && ./bricks.sh` runs 39 ordered gates (scaffold → nn → data → io →
   inference → training → cli → godot-build → godot-smoke → ci-core → ci-godot → fmd-fetch → fmd-loader → fmd-eval →
   n2v-diagnostic → structured-mask → vst → calibration → pool-upsample → unet → unet-tiling → arch-eval → bench →
-  blocked-conv → perf-budget → q1-recipe → tiff-stack-write → q10-routing → cli-batch → q13-conditioning → ext-data → q18-ext-bench → quant-fidelity → q12-n2v-recipe → ext-data-2 → q2-n2v-stop → roofline-wide → q19-routed) and stops at the first failure. Gates 11–13 check the real FMD dataset when `dora-bio/tools/fetch_fmd.sh` has
+  blocked-conv → perf-budget → q1-recipe → tiff-stack-write → q10-routing → cli-batch → q13-conditioning → ext-data → q18-ext-bench → quant-fidelity → q12-n2v-recipe → ext-data-2 → q2-n2v-stop → roofline-wide → q19-routed → scoreboard) and stops at the first failure. Gates 11–13 check the real FMD dataset when `dora-bio/tools/fetch_fmd.sh` has
   downloaded it (about 9 GB, gitignored); without it, their data checks report SKIPPED.
   CI (`.github/workflows/dora-bio.yml`) runs them all, with headless Godot, on PRs into `main`, pushes to `main`
   and manual runs (not on working-branch pushes or docs-only changes). Work on one brick at a time
@@ -289,7 +289,9 @@ The code prints "Panel actual size" at startup, so check that line before relyin
 - **Real-data results:** `dora-bio/docs/RESULTS.md`. On FMD's 48 held-out images, supervised DORA scores 33.75 dB
   against 30.22 for a bilateral filter (34.73 with the U-Net, `--arch unet`; the dilated network stays the default). Plain Noise2Void fails on widefield, whose noise is correlated between
   pixels; two Noise2Void networks routed by DORA's own noise check reach 32.97 dB without any ground truth, and 33.24 dB
-  with the U-Net for independent noise (Q19). Since Q20 that routed design is `train --mode n2v`'s default.
+  with the U-Net for independent noise (Q19). Since Q20 that routed design is `train --mode n2v`'s default. Brick 38's
+  scoreboard puts that default within 0.3 dB of CAREamics' Noise2Void and N2V2 on all five scorable sets at the same CPU
+  budget, 1.76 dB ahead on FMD; by its pre-registered reading Noise2Noise comes before N2V2.
 - **Rules, file map and gotchas:** `dora-bio/CLAUDE.md`. **Limitations:** `dora-bio/README.md`.
   The bundled sample and weights are **synthetic**. FMD data and FMD-trained weights are never committed.
   Every external dataset (licence, pins, whether it may train a shipped model) is in `dora-bio/tools/ext_manifest.json`;

@@ -22,7 +22,8 @@ src/DoraBio.Core/              ALL ML/IO code. net8.0. No Godot, no NuGet depend
   Data/      GrayImage, Normalization, Anscombe (variance stabilization), Dihedral, V1Augment, BlindSpot (+MaskFootprint),
              PatchSampler, ImagePair/DatasetSplit,
              DatasetLoader, FmdDataset (real FMD layouts + test-FOV exclusion), ExtDatasets (the public paired sets in data/ext),
-             ExtStacks (the benchmark stack datasets: patterns, partners, published counts), SyntheticFluorescence
+             ExtStacks (the benchmark stack datasets: patterns, partners, published counts), ExtDerived (2D sets
+             exported from stack sets with the scoreboard's splits; `group__plane` names), FmdExport (FMD for other tools), SyntheticFluorescence
   IO/        TiffCodec (classic TIFF + BigTIFF), TiffStack (page-by-page reader and writer), ImageStack (+StackLayout: planes
              by axis from ImageJ/tifffile metadata), MrcReader, PngDecoder, ImageLoader, WeightsFile, Crc32
   Training/  Trainer (+BatchStepper), ValidationSet, ProgressiveTargets, TrainingJob, JourneyLog,
@@ -36,7 +37,7 @@ src/DoraBio.Core/              ALL ML/IO code. net8.0. No Godot, no NuGet depend
   PerformanceBench.cs (timings for gates 22/24) and Roofline.cs (measured peaks, per-kernel GFLOP/s, stack-run split)
 tests/DoraBio.Core.Tests/      xunit. Fixtures/ written by Pillow/ImageMagick (make_fixtures.py) and tifffile/mrcfile (make_stack_fixtures.py)
 tools/DoraBio.Cli/             `dora-bio` CLI: synth | train | denoise | eval | info | bench | diagnose | ext-check | ext-eval | fidelity |
-                               stack-check | stack-info | fmd-check | fmd-eval |
+                               stack-check | stack-info | stack-export | fmd-check | fmd-eval | fmd-export |
                                fmd-noise | fmd-diagnose | fmd-route
 tools/fetch_fmd.sh             downloads + verifies the real FMD dataset into data/fmd/ (gitignored)
 tools/ext_manifest.json        EVERY external dataset: Zenodo record, files, sizes, MD5s, SHA-256 pins, licence, use (train /
@@ -46,6 +47,8 @@ tools/fetch_ext.sh             wrapper: `tools/fetch_ext.sh` = core tier (~0.9 G
                                into data/ext/ (gitignored); tools/extract_zip.py checks every zip entry
 ATTRIBUTIONS.md                GENERATED from the manifest (`python3 -I tools/ext_data.py attributions`); gate 34 checks it
 tools/experiments/p2_fmd.sh    every P2 training run and evaluation behind docs/RESULTS.md
+tools/experiments/scoreboard.sh  brick 38: DORA's default vs CAREamics N2V/N2V2 on every scorable set; the pre-registered
+                               reading lives in scoreboard_reading.awk (gate 38 applies it to the recorded summary)
 docs/RESULTS.md                measured results on real microscope data (FMD), with reproducible blocks
 godot/                         Godot 4.5 .NET project (open THIS folder in Godot)
   DoraBio.Godot.csproj         Godot.NET.Sdk/4.5.1, ProjectReference → src/DoraBio.Core
@@ -126,6 +129,7 @@ before anything is built on top.** `./bricks.sh` runs the gates in order and sto
 | 35 | q2-n2v-stop (quality pass, SOTA stage 1) | `TrainerConfig.Selection` (`ValidationSignal`), `KeepLastEpoch`, `TrainingResult.LastParameters`, `TrainingJobOptions.LastWeightsPath`, CLI `train --select/--patience/--keep/--save-last`, `info --default-n2v`, `fmd-eval --precise`, `tools/experiments/q2_stop.sh` | `Brick=35-q2-n2v-stop`: the loss signal picks the lowest-loss epoch where PSNR would pick another; patience 0 runs the whole budget; best or last weights kept and the last always reported; the recorded choice, verdict (on unrounded FMD scores) and `train --mode n2v` defaults follow the pre-registered rule; with data + runs/q2 the blocks reproduce |
 | 36 | roofline-wide (systems S1 + S2) | `Roofline.cs`, CLI `bench --roofline`, `Nn/ConvLayer.Wide.cs` (512-bit forward and input-gradient kernels, `DORA_WIDE_KERNELS=0` turns them off), unrolled taps in `ConvLayer.Blocked.cs`, `PerformanceBench` (interleaved `blocked-256` timings), `tools/ci/perf_budget.json` (`wide_speedups`) | `Brick=36-roofline-wide`: the 512-bit kernels, forced on (any CPU), equal the reference on 200 shapes and whole networks; `bench --roofline` reports peaks, kernels and the stack split; gate 24 checks the 512-bit speedup floor on AVX-512 machines |
 | 37 | q19-routed (quality pass, SOTA stage 1; + Q20) | `NoiseDiagnostics.ChooseThreshold`, CLI `fmd-diagnose --validation-seed/--choose-threshold`, `ext-eval`/`fidelity --weights-correlated`, `tools/experiments/q19_routed.sh`; Q20: `Training/RoutedNoise2Void.cs`, CLI `train --route auto|off --out-correlated`, `info --default-n2v-route` | `Brick=37-q19-routed`: the threshold rule; routed training splits by verdict and trains one network per kind; the recorded threshold decision (validation only) equals the shipped threshold, the correlated-network choice and Q19's verdict follow the pre-registered rule, and Q20's re-application (no CARE 2D floor) decides `train --mode n2v`'s routed default, which runs end to end from the CLI; with data + runs/q19 the blocks reproduce |
+| 38 | scoreboard (SOTA stage 1, a measurement) | `Data/ExtDerived.cs`, `ExtDataset.Source`/`ExtDatasets.Derived`/`GroupOf`, `Data/FmdExport.cs`, `FmdBenchmark.EvaluatePredictions`, CLI `stack-export`, `fmd-export`, `fmd-eval --predictions`, `ext-eval --precise`, `tools/experiments/scoreboard.sh`, `scoreboard_reading.awk`, `ext_careamics.py --n2v2` | `Brick=38-scoreboard`: derived sets follow the pre-registered splits and keep a patch or cell in one validation group, planes keep their raw values, FMD export = DORA's training plan (never FOV 19), outside outputs scored and clipped like DORA's; the recorded reading follows the pre-registered rule, RESULTS.md and PATHWAY.md name the next brick it gives; with data + runs/scoreboard every score reproduces (`scoreboard.sh --rescore`) |
 
 Gates 11–15 and 21 need the dataset (the reproductions in gates 15 and 21 also need the weights from `tools/experiments/`) (`tools/fetch_fmd.sh`, about 9 GB into the gitignored `data/fmd/`). Without it, their
 data-dependent part reports SKIPPED (exit code 77) while the pins, unit tests and RESULTS.md checks still run. CI has
@@ -176,6 +180,7 @@ tools/experiments/p2_fmd.sh                               # retrain + evaluate e
 tools/experiments/p3_struct.sh                            # P3: plain vs structured blind spots (~50 min CPU)
 tools/experiments/p3_vst.sh                               # P3: with and without variance stabilization (~16 min CPU)
 tools/experiments/p4_arch.sh                              # P4: U-Net vs dilated network (~21 min CPU)
+CAREAMICS_PYTHON=VENV/bin/python tools/experiments/scoreboard.sh   # brick 38 scoreboard (~2 h CPU; --rescore DIR re-scores only)
 dotnet tools/DoraBio.Cli/bin/Release/net8.0/dora-bio.dll fmd-noise --root data/fmd   # is the real noise pixel-independent?
 dotnet tools/DoraBio.Cli/bin/Release/net8.0/dora-bio.dll diagnose --in IMAGE          # the same question, without ground truth
 dotnet tools/DoraBio.Cli/bin/Release/net8.0/dora-bio.dll bench --json bench.json   # timings (~1 min; --quick: seconds)
@@ -213,7 +218,8 @@ cd godot && dotnet build && godot --headless --path . --import \
    (v1's bug). Adaptation never saves implicitly. The user clicks Save, and the UI shows "unsaved changes".
 7. **Learning rate only decays** (×0.85 after `PlateauPatience` epochs without a new best). The best weights
    are snapshotted and restored at the end, and checkpointed to disk at each new best.
-8. **Validation is held out by FOV** (`ImagePair.GroupId`). Frames of one field of view never straddle the split.
+8. **Validation is held out by FOV** (`ImagePair.GroupId`). Frames of one field of view never straddle the split. In
+   a derived set, `group__plane.tif` files share their group (`ExtDatasets.GroupOf`): one Tribolium patch, one BioSR+ cell.
 9. **Journey log lifecycle:** a session opens only when training starts. Every epoch is appended and saved.
    The session ends as `completed` or `failed: …`. Inference-only launches write nothing.
 10. **Noise2Void routes by default since Q20** (`RoutedNoise2Void`): the noise check sends images with independent noise

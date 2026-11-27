@@ -660,6 +660,58 @@ noise check (P3's design 2) keep the gains and avoid the loss?
 - **Not changed:** the Godot app's in-app adaptation still adapts the one loaded network; supervised training is
   untouched. By Q19's pre-registration the lab pilot is now unblocked.
 
+## The self-supervised scoreboard (brick 38)
+
+Pre-registered in
+[`PATHWAY.md`](../PATHWAY.md#scoreboard-pre-registration-doras-self-supervised-default-against-careamics-brick-38)
+(commit `f91afa8`) before any of its code existed. A measurement, not an adoption pass: nothing ships from it, and its
+reading only orders the next bricks. Reproduce: `tools/experiments/scoreboard.sh` (needs `tools/fetch_ext.sh
+mdc25-tribolium biosr-ccps` and a CAREamics venv). **Question:** with every method given the same CPU budget (30 × 50
+steps, batch 16, 64 px patches, seed 2026), how does DORA's shipped Noise2Void default (`train --mode n2v`, routed by the
+noise check since Q20) compare with CAREamics 0.3.5 Noise2Void and N2V2 on every benchmark DORA can score here?
+
+| Set (test images) | Noisy | Bilateral | **DORA default** | CAREamics N2V | CAREamics N2V2 | DORA − better | Reading |
+|---|---|---|---|---|---|---|---|
+| FMD raw test_mix (48) | 27.22 | 30.22 | **33.24** | 31.48 | 31.44 | **+1.76** | competitive |
+| DeepBacs MreB (5) | 21.67 | 21.75 | 26.80 | 27.01 | 27.04 | −0.24 | competitive |
+| DeepBacs nucleoid (2) | 27.39 | 27.53 | 34.42 | 34.70 | 34.58 | −0.28 | competitive |
+| MDC25 Tribolium, 2D slices (4,000) | 17.78 | 17.82 | **18.38** | 17.77 | 18.26 | **+0.12** | competitive |
+| BioSR+ CCPs, raw SIM frames (576) | 22.52 | 25.28 | 28.82 | 28.89 | 28.95 | −0.13 | competitive |
+| CARE 2D (2), reported only (Q20) | 19.28 | 19.30 | 19.12 | 19.29 | 19.35 | −0.23 | competitive |
+
+PSNR in dB, unrounded in the summary block below. FMD keeps its own protocol (8-bit, raw test_mix); the others use CARE's
+(reference normalized by its percentiles, output matched by least squares). CAREamics Noise2Void on MreB, nucleoid and
+CARE 2D is Q18's run (same script and protocol); everything else was run for this brick.
+
+- **The pre-registered reading.** DORA is within 0.3 dB of the better CAREamics variant on all five sets with
+  references (and on CARE 2D), so no targeted quality pass is triggered. <!-- sb-next-pass: none --> CAREamics' N2V2
+  beats its Noise2Void by 0.3 dB or more on one of the five (Tribolium, +0.49), not two, so **Noise2Noise from
+  neighbouring frames goes first in brick 39**, ahead of N2V2. <!-- sb-next-brick: noise2noise -->
+- **FMD: DORA leads by 1.76 dB at this budget.** Most of it is widefield (31.76 against 27.20 and 28.06), whose
+  correlated noise a plain blind spot can't remove; DORA routes those 12 images to its structured-blind-spot network.
+  DORA is also ahead on confocal (+0.99) and two-photon (+0.63, both against N2V). This is a comparison at equal, small
+  CPU budgets with one seed, not against CAREamics trained as its authors would on a GPU.
+- **The fresh default runs reproduce Q19 exactly** (FMD 33.2439, MreB 26.80, nucleoid 34.42, CARE 2D 19.12): `train
+  --mode n2v` trains what Q19 measured.
+- **Tribolium: DORA's noise check calls all 32,000 training slices correlated**, so the routed default trains only the
+  structured-blind-spot network there. That network scores best of the three (18.38); CAREamics' plain Noise2Void doesn't
+  improve on the noisy input at all (17.77 against 17.78), as on FMD's widefield and CARE 2D, while N2V2 gains 0.47 dB. That
+  is consistent with noise that really is correlated between neighbouring pixels, not proof of it: a post-hoc diagnostic
+  (the unrouted U-Net, and the reference-based noise correlation along each axis, background and nuclei separately) follows,
+  outside this pre-registered reading.
+- **BioSR+: behind at low signal, ahead at high.** DORA trails N2V2 by 0.75 dB at signal level 1 and by 0.33 at level 2,
+  is within 0.06 dB at level 4, and is ahead from level 5 on (0.13 dB at level 8) (per-level lines in the summary). The noise check calls all
+  2,880 training frames independent, so DORA's U-Net does this set on its own.
+- **Fidelity on MreB:** DORA keeps intensities most faithfully (slope 0.96 against 0.86 and 0.93), but fewer of the spots
+  it shows are real (43.9% against 56.2% and 64.3%); N2V2 finds the fewest reference spots (35.5%).
+- **Training time:** DORA 146–321 s per set, CAREamics 187–326 s, on the same 4-core CPU. DORA's longest is FMD (two
+  networks), and it overlapped a test build on this shared machine, so it is if anything overstated.
+- **Not scored, as stated in advance:** the 2024 challenge sets (the organisers hold the references) and DeepCAD-RT (no
+  frame-aligned reference). **One deviation:** the pre-registration said the script would take Planaria and the other four
+  BioSR+ structures once downloaded; it doesn't yet, because each needs a split rule like Tribolium's and BioSR+ CCPs',
+  which would have to be fixed in advance too. The first run's reading step failed on an awk syntax error (fixed in
+  `tools/experiments/scoreboard_reading.awk`, which gate 38 also uses); no score was computed differently.
+
 ## Systems S1 + S2 (brick 36): where the time goes, and 512-bit kernels
 
 Measured with `dora-bio bench --roofline` (and `dora-bio bench` for whole-model timings) on the 4-vCPU cloud container
@@ -782,7 +834,7 @@ the high-SNR reference (`Fidelity.cs`; reproduce: `tools/experiments/fidelity.sh
 - **Weights trained on FMD are not published** (CC BY-SA terms for derived models are a separate decision). The
   bundled model stays the synthetic one.
 
-## Reproducibility checks (gates 13, 15, 21, 25, 27, 29, 31, 32, 33, 35 and 37)
+## Reproducibility checks (gates 13, 15, 21, 25, 27, 29, 31, 32, 33, 35, 37 and 38)
 
 The blocks marked `fmd-noise` above and the blocks below are verbatim program output. `bricks.sh` gate 13 re-runs
 the first two whenever the data is present and requires an exact match. The block below is
@@ -1947,3 +1999,94 @@ method       0.96      6.5%       43.4%      43.9%
 over 711 foreground tiles and 2534 reference spots
 ```
 <!-- /q19-fidelity-mreb -->
+
+
+Brick 38's scoreboard: `tools/experiments/scoreboard.sh` writes the summary (one `set` line per benchmark: unrounded
+PSNR of noisy, bilateral, DORA, CAREamics Noise2Void, N2V2, then the five SSIMs; BioSR+ per signal level; MreB fidelity;
+training seconds) and its pre-registered reading (`scoreboard_reading.awk`). Gate 38 recomputes the reading from the
+recorded summary, and with the data and `runs/scoreboard` rescores everything (`scoreboard.sh --rescore`) and requires
+these blocks exactly. The three FMD blocks are `fmd-eval` for DORA's routed pair and for CAREamics' outputs (`--predictions`).
+
+<!-- sb-summary -->
+```text
+set fmd 27.2168 30.2157 33.2439 31.4817 31.4382 0.543 0.752 0.862 0.780 0.821
+fmd-modality Confocal 34.45 33.46 32.96
+fmd-modality TwoPhoton 32.86 32.23 32.07
+fmd-modality WideField 31.76 27.20 28.06
+set deepbacs-mreb 21.6715 21.7508 26.7967 27.0074 27.0414 0.368 0.381 0.763 0.814 0.826
+set deepbacs-nucleoid 27.3897 27.5297 34.4197 34.6953 34.5805 0.808 0.823 0.973 0.979 0.971
+set zerocost-care2d 19.2785 19.3022 19.1208 19.2902 19.3518 0.461 0.469 0.429 0.466 0.484
+set mdc25-tribolium-2d 17.7844 17.8196 18.3813 17.7719 18.2585 0.333 0.342 0.330 0.333 0.342
+set biosr-ccps-2d 22.5208 25.2773 28.8241 28.8877 28.9546 0.389 0.636 0.782 0.828 0.837
+biosr-level 1 19.58 21.15 24.51 25.11 25.26
+biosr-level 2 20.82 23.54 27.52 27.75 27.85
+biosr-level 3 21.88 24.91 28.81 28.91 28.98
+biosr-level 4 22.44 25.51 29.28 29.29 29.34
+biosr-level 5 23.16 26.18 29.76 29.70 29.75
+biosr-level 6 23.70 26.65 30.04 29.94 30.00
+biosr-level 7 24.07 26.95 30.20 30.08 30.12
+biosr-level 8 24.53 27.33 30.47 30.32 30.34
+mreb-fidelity dora 0.96 6.5% 43.4% 43.9%
+mreb-fidelity n2v 0.86 7.4% 43.8% 56.2%
+mreb-fidelity n2v2 0.93 7.7% 35.5% 64.3%
+train-seconds fmd 321 205.0 222.6
+train-seconds deepbacs-mreb 167 230.2 208.0
+train-seconds deepbacs-nucleoid 163 211.6 210.9
+train-seconds zerocost-care2d 146 186.8 215.4
+train-seconds mdc25-tribolium-2d 148 323.0 325.8
+train-seconds biosr-ccps-2d 163 230.3 230.4
+```
+<!-- /sb-summary -->
+
+<!-- sb-reading -->
+```text
+set fmd: DORA 33.24, better CAREamics 31.48 (N2V), DORA +1.76 dB: competitive
+set deepbacs-mreb: DORA 26.80, better CAREamics 27.04 (N2V2), DORA -0.24 dB: competitive
+set deepbacs-nucleoid: DORA 34.42, better CAREamics 34.70 (N2V), DORA -0.28 dB: competitive
+set zerocost-care2d: DORA 19.12, better CAREamics 19.35 (N2V2), DORA -0.23 dB: competitive (reported only, Q20)
+set mdc25-tribolium-2d: DORA 18.38, better CAREamics 18.26 (N2V2), DORA +0.12 dB: competitive
+set biosr-ccps-2d: DORA 28.82, better CAREamics 28.95 (N2V2), DORA -0.13 dB: competitive
+sets counted: 5
+N2V2 beats Noise2Void by >= 0.3 dB on 1 of 5: next-brick: noise2noise (goes first)
+DORA trails the better CAREamics variant by > 0.3 dB on 0 of 5: next-pass: none (no targeted pass)
+```
+<!-- /sb-reading -->
+
+<!-- sb-fmd-dora -->
+```text
+test_mix level raw: mean PSNR (dB) / SSIM vs ground truth, 8-bit scale
+modality     n  noisy           bilateral       DORA           
+Confocal    20   29.13 / 0.701   31.74 / 0.872   34.45 / 0.903
+TwoPhoton   16   26.32 / 0.473   31.07 / 0.816   32.86 / 0.852
+WideField   12   25.23 / 0.374   26.53 / 0.466   31.76 / 0.807
+all         48   27.22 / 0.543   30.22 / 0.752   33.24 / 0.862
+routed by the noise check: 12 of 48 images to the correlated-noise model
+all, unrounded: noisy 27.2168 dB, bilateral 30.2157 dB, DORA 33.2439 dB
+```
+<!-- /sb-fmd-dora -->
+
+<!-- sb-fmd-n2v -->
+```text
+test_mix level raw: mean PSNR (dB) / SSIM vs ground truth, 8-bit scale
+method: CAREamics 0.3.5 Noise2Void, default 2D config, 30 x 50 steps x batch 16, CPU
+modality     n  noisy           bilateral       method         
+Confocal    20   29.13 / 0.701   31.74 / 0.872   33.46 / 0.892
+TwoPhoton   16   26.32 / 0.473   31.07 / 0.816   32.23 / 0.823
+WideField   12   25.23 / 0.374   26.53 / 0.466   27.20 / 0.536
+all         48   27.22 / 0.543   30.22 / 0.752   31.48 / 0.780
+all, unrounded: noisy 27.2168 dB, bilateral 30.2157 dB, method 31.4817 dB
+```
+<!-- /sb-fmd-n2v -->
+
+<!-- sb-fmd-n2v2 -->
+```text
+test_mix level raw: mean PSNR (dB) / SSIM vs ground truth, 8-bit scale
+method: CAREamics 0.3.5 N2V2, default 2D config, 30 x 50 steps x batch 16, CPU
+modality     n  noisy           bilateral       method         
+Confocal    20   29.13 / 0.701   31.74 / 0.872   32.96 / 0.895
+TwoPhoton   16   26.32 / 0.473   31.07 / 0.816   32.07 / 0.853
+WideField   12   25.23 / 0.374   26.53 / 0.466   28.06 / 0.653
+all         48   27.22 / 0.543   30.22 / 0.752   31.44 / 0.821
+all, unrounded: noisy 27.2168 dB, bilateral 30.2157 dB, method 31.4382 dB
+```
+<!-- /sb-fmd-n2v2 -->

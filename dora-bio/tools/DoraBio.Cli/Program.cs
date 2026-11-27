@@ -65,18 +65,26 @@ public static class Program
                    counts and declared axes, and that each clean partner matches its noisy file. Exit 1 on any disagreement.
           stack-info --in FILE.tif|FILE.mrc [--axes TZCYX]
                    What a stack holds: format (TIFF, BigTIFF, MRC), axes, shape and plane size, from its metadata.
+          stack-export --dataset mdc25-tribolium-2d|biosr-ccps-2d [--root data/ext]
+                   Write a derived 2D set from its downloaded stack set (the scoreboard's splits, brick 38); then train
+                   --ext and ext-eval take it like a downloaded set.
+          fmd-export --root data/fmd --out DIR
+                   FMD for other tools: DORA's default training frames (4 raw per FOV, never FOV 19) to DIR/train/low_SNR,
+                   test_mix raw to DIR/test/low_SNR, float32 TIFF; score their outputs with fmd-eval --predictions.
           ext-check [--root data/ext]
                    Verify the public paired datasets from tools/fetch_ext.sh: counts, pairing, decoding, brightness.
           fidelity (--dataset NAME [--root data/ext] | --fmd data/fmd [--level raw]) (--weights W.bin | --predictions DIR [--label TEXT])
                    What scientists measure, vs the high-SNR reference: are regional intensities still proportional
                    (slope 1.00) and how far off (ratio error), and are spots kept (found) and not invented (real)?
-          ext-eval --dataset NAME (--weights WEIGHTS.bin | --predictions DIR [--label TEXT]) [--root data/ext]
+          ext-eval --dataset NAME (--weights WEIGHTS.bin | --predictions DIR [--label TEXT]) [--root data/ext] [--precise]
                    [--split test|validation --seed S]  (validation: the training images a run with seed S held out)
                    Score a model, or another tool's outputs (DIR/<test file name>), on an external set's test images with
                    CARE's protocol: reference normalized by its 0.1-99.9 percentiles, outputs matched by least squares.
           fmd-check --root data/fmd
                    Verify a downloaded FMD dataset: structure, test_mix, and no train/test leakage.
           fmd-eval  --weights WEIGHTS.bin --root data/fmd [--levels raw,avg2,...] [--per-image] [--precise]
+                   [--predictions DIR [--label TEXT]]  (instead of --weights: score another tool's outputs on test_mix raw,
+                    DIR/<test image name>.tif in 8-bit units, clipped to 0-255 like DORA's)
                    [--validation-seed S]  (score the FOVs a training run with --seed S held out, one frame each, not test_mix)
                    [--sigma-scale K]  (noise-conditioned models: tell them K × each image's measured noise σ)
                    [--weights-correlated W2.bin]  (images whose noise check says correlated go to W2 instead)
@@ -121,6 +129,8 @@ public static class Program
                 "ext-check" => ExtCheck(options),
                 "stack-check" => StackCheck(options),
                 "stack-info" => StackInfo(options),
+                "stack-export" => StackExport(options),
+                "fmd-export" => FmdExportCommand(options),
                 "ext-eval" => ExtEval(options),
                 "fidelity" => FidelityCommand(options),
                 "fmd-eval" => FmdEval(options),
@@ -260,7 +270,7 @@ public static class Program
             }
             if (trained.Count == 2)
                 Console.WriteLine($"   denoise with: --weights {trained[0].WeightsPath} --weights-correlated {trained[1].WeightsPath}");
-            Console.WriteLine($"✅ routed training done in {routedClock.Elapsed:mm\\:ss}");
+            Console.WriteLine($"✅ routed training done in {(int)routedClock.Elapsed.TotalMinutes:00}:{routedClock.Elapsed.Seconds:00}");
             return 0;
         }
         if (route != "off") throw new ArgumentException($"Unknown --route '{route}' (use auto or off).");
@@ -492,6 +502,7 @@ public static class Program
     /// </summary>
     private static int FmdEval(Options o)
     {
+        if (o.StringOrNull("predictions") is { } predictions) return FmdEvalPredictions(o, predictions);
         var (net, _) = WeightsFile.Load(o.Required("weights"));
         // --weights-correlated: a second model for the images whose noise check says correlated (P3's routed design).
         // --weights-clean + --noise-threshold: a second model for images whose noise σ is at or below the threshold (Q10).
@@ -541,6 +552,51 @@ public static class Program
                 Console.WriteLine($"all, unrounded: noisy {all.NoisyPsnr:0.0000} dB, bilateral {all.BilateralPsnr:0.0000} dB, DORA {all.DoraPsnr:0.0000} dB");
             }
         }
+        return 0;
+    }
+
+    /// <summary>
+    /// <c>fmd-eval --predictions DIR</c>: another tool's outputs for test_mix raw (named by <see cref="FmdExport.PredictionName"/>),
+    /// scored with FMD's protocol and printed in fmd-eval's table (brick 38's scoreboard).
+    /// </summary>
+    private static int FmdEvalPredictions(Options o, string dir)
+    {
+        if (o.Has("weights")) throw new ArgumentException("Use either --weights or --predictions, not both.");
+        if (o.String("levels", "raw") != "raw") throw new ArgumentException("--predictions scores test_mix raw only.");
+        var plan = FmdDataset.PlanTestMix(Path.Combine(o.Required("root"), "test_mix"), "raw");
+        var scores = FmdBenchmark.EvaluatePredictions(p => ImageLoader.Load(Path.Combine(dir, FmdExport.PredictionName(p))), plan);
+        Console.WriteLine("test_mix level raw: mean PSNR (dB) / SSIM vs ground truth, 8-bit scale");
+        Console.WriteLine($"method: {o.String("label", "outputs in " + Path.GetFileName(Path.TrimEndingDirectorySeparator(dir)))}");
+        Console.WriteLine($"{"modality",-10} {"n",3}  {"noisy",-15} {"bilateral",-15} {"method",-15}");
+        foreach (var (group, count, m) in FmdBenchmark.Summarize(scores))
+            Console.WriteLine($"{group,-10} {count,3}  {m.NoisyPsnr,6:0.00} / {m.NoisySsim:0.000}  {m.BilateralPsnr,6:0.00} / {m.BilateralSsim:0.000}  {m.DoraPsnr,6:0.00} / {m.DoraSsim:0.000}");
+        if (o.Has("per-image"))
+            foreach (var s in scores)
+                Console.WriteLine($"  {s.Name,-40} {s.NoisyPsnr,6:0.00} {s.BilateralPsnr,6:0.00} {s.DoraPsnr,6:0.00}");
+        if (o.Has("precise"))
+        {
+            var all = FmdBenchmark.Summarize(scores)[^1].Mean;
+            Console.WriteLine($"all, unrounded: noisy {all.NoisyPsnr:0.0000} dB, bilateral {all.BilateralPsnr:0.0000} dB, method {all.DoraPsnr:0.0000} dB");
+        }
+        return 0;
+    }
+
+    /// <summary><c>fmd-export</c>: FMD's training frames and test_mix raw in the external sets' layout (<see cref="FmdExport"/>).</summary>
+    private static int FmdExportCommand(Options o)
+    {
+        string outDir = o.Required("out");
+        var (train, test) = FmdExport.Export(o.Required("root"), outDir);
+        Console.WriteLine($"FMD exported to {outDir}: {train} training frames (train/low_SNR), {test} test images (test/low_SNR)");
+        return 0;
+    }
+
+    /// <summary><c>stack-export</c>: a derived 2D set from its stack set (<see cref="ExtDerived"/>).</summary>
+    private static int StackExport(Options o)
+    {
+        string root = o.String("root", "data/ext");
+        var dataset = ExtDatasets.Get(o.Required("dataset"));
+        var (train, test) = ExtDerived.Export(root, dataset);
+        Console.WriteLine($"{dataset.Name} (from {dataset.Source}): {train} training and {test} test planes in {Path.Combine(root, dataset.Name)}");
         return 0;
     }
 
@@ -761,6 +817,9 @@ public static class Program
         Console.WriteLine($"{"mean",-12} {scores.Average(s => s.NoisyPsnr),6:0.00} / {scores.Average(s => s.NoisySsim):0.000}  " +
                           $"{scores.Average(s => s.BilateralPsnr),6:0.00} / {scores.Average(s => s.BilateralSsim):0.000}  " +
                           $"{scores.Average(s => s.MethodPsnr),6:0.00} / {scores.Average(s => s.MethodSsim):0.000}");
+        if (o.Has("precise"))   // for margins that could sit within rounding of the 2-decimal mean (brick 38's reading)
+            Console.WriteLine($"mean, unrounded: noisy {scores.Average(s => s.NoisyPsnr):0.0000} dB, bilateral {scores.Average(s => s.BilateralPsnr):0.0000} dB, " +
+                              $"method {scores.Average(s => s.MethodPsnr):0.0000} dB");
         return 0;
     }
 

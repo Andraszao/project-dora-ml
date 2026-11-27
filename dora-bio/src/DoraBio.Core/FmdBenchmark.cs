@@ -104,14 +104,45 @@ public static class FmdBenchmark
                         NoiseConditioning.FromSigma(Metrics.EstimateNoiseSigma(input) * sigmaScale))
                     : TiledInference.Denoise(net, input, tileCore), map);
             var bilateral = ToSensorUnits(BilateralBaseline.FilterAuto(input), map);
-
-            string category = p.GroupId.Split('/')[0];
-            scores.Add(new FmdScore(p.Name, category, ModalityOf(category),
-                Metrics.Psnr(noisy.Pixels, clean.Pixels, DataRange), Metrics.Ssim(noisy, clean, DataRange),
-                Metrics.Psnr(bilateral.Pixels, clean.Pixels, DataRange), Metrics.Ssim(bilateral, clean, DataRange),
-                Metrics.Psnr(dora.Pixels, clean.Pixels, DataRange), Metrics.Ssim(dora, clean, DataRange)));
+            scores.Add(Score(p, noisy, clean, bilateral, dora));
         }
         return scores;
+    }
+
+    /// <summary>
+    /// The same protocol for another tool's outputs (brick 38's scoreboard): <paramref name="predict"/> returns its
+    /// denoised image in the noisy image's own units, which is clipped to [0, 255] like DORA's and scored against ground
+    /// truth. The noisy and bilateral columns are computed exactly as in <see cref="EvaluatePlan"/>.
+    /// </summary>
+    /// <param name="predict">Given a pair, the other tool's output for its noisy image (for example read from a file).</param>
+    /// <param name="plan">The pairs to score.</param>
+    /// <exception cref="InvalidDataException">An output differs in size from its noisy image.</exception>
+    public static List<FmdScore> EvaluatePredictions(Func<FmdDataset.PlannedPair, GrayImage> predict, IReadOnlyList<FmdDataset.PlannedPair> plan)
+    {
+        var scores = new List<FmdScore>();
+        foreach (var p in plan)
+        {
+            var noisy = ImageLoader.Load(p.NoisyPath);
+            var clean = ImageLoader.Load(p.CleanPath);
+            var output = predict(p);
+            if (output.Width != noisy.Width || output.Height != noisy.Height)
+                throw new InvalidDataException($"{p.Name}: the output is {output.Width}×{output.Height}, the noisy image {noisy.Width}×{noisy.Height}.");
+            var clipped = new GrayImage(output.Width, output.Height);
+            for (int i = 0; i < clipped.Length; i++) clipped.Pixels[i] = (float)Math.Clamp(output.Pixels[i], 0, DataRange);
+            var map = Normalization.FromPercentiles(noisy.Pixels);
+            var bilateral = ToSensorUnits(BilateralBaseline.FilterAuto(Normalization.Apply(noisy, map)), map);
+            scores.Add(Score(p, noisy, clean, bilateral, clipped));
+        }
+        return scores;
+    }
+
+    private static FmdScore Score(FmdDataset.PlannedPair p, GrayImage noisy, GrayImage clean, GrayImage bilateral, GrayImage method)
+    {
+        string category = p.GroupId.Split('/')[0];
+        return new FmdScore(p.Name, category, ModalityOf(category),
+            Metrics.Psnr(noisy.Pixels, clean.Pixels, DataRange), Metrics.Ssim(noisy, clean, DataRange),
+            Metrics.Psnr(bilateral.Pixels, clean.Pixels, DataRange), Metrics.Ssim(bilateral, clean, DataRange),
+            Metrics.Psnr(method.Pixels, clean.Pixels, DataRange), Metrics.Ssim(method, clean, DataRange));
     }
 
     /// <summary>

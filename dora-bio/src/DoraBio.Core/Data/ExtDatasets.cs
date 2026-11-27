@@ -32,6 +32,12 @@ public sealed record ExtDataset(string Name, string Description, string Doi, str
 {
     /// <summary>True if noisy images come with clean (high-SNR) partners, so DORA's output can be scored.</summary>
     public bool HasGroundTruth => TrainClean is not null;
+
+    /// <summary>
+    /// For a derived set (brick 38: 2D planes exported from a stack dataset by <see cref="ExtDerived.Export"/>), the
+    /// manifest dataset it comes from; null for a downloaded set.
+    /// </summary>
+    public string? Source { get; init; }
 }
 
 /// <summary>The external datasets DORA is benchmarked on, and how to plan and load their image pairs.</summary>
@@ -56,11 +62,36 @@ public static class ExtDatasets
             "CARE (2D)/Test - Low SNR images", "CARE (2D)/Test - High SNR images", 22, 2),
     ];
 
-    /// <summary>The dataset called <paramref name="name"/>.</summary>
+    /// <summary>
+    /// 2D sets exported from stack datasets for the self-supervised scoreboard (brick 38, splits pre-registered in
+    /// PATHWAY.md), laid out like the downloaded sets. A file named <c>group__plane.tif</c> belongs to <c>group</c>, so the
+    /// planes of one patch or cell never straddle a validation split.
+    /// </summary>
+    public static IReadOnlyList<ExtDataset> Derived { get; } =
+    [
+        new("mdc25-tribolium-2d", "MDC25 Tribolium 3D patches as 2D slices (16 × 64² each): patches 00001–02000 train, 15251–15500 test",
+            "10.5281/zenodo.15615943", "Weigert et al., \"Content-aware image restoration: pushing the limits of fluorescence microscopy\", " +
+            "Nature Methods 15, 1090-1097 (2018)", "train/low_SNR", "train/high_SNR", "test/low_SNR", "test/high_SNR", 32000, 4000)
+        { Source = "mdc25-tribolium" },
+        new("biosr-ccps-2d", "BioSR+ clathrin-coated pits, raw SIM frames (512 × 256) at 8 signal levels: cells 001–040 train, 041–048 test",
+            "10.5281/zenodo.7115540", "Qiao, \"BioSR+: Dataset Extension of biological images for super-resolution microscopy\", Zenodo (2022)",
+            "train/low_SNR", "train/high_SNR", "test/low_SNR", "test/high_SNR", 2880, 576)
+        { Source = "biosr-ccps" },
+    ];
+
+    /// <summary>The dataset called <paramref name="name"/> (downloaded or derived).</summary>
     /// <exception cref="ArgumentException">No such dataset (the message lists the known names).</exception>
     public static ExtDataset Get(string name) =>
-        All.FirstOrDefault(d => d.Name == name)
-        ?? throw new ArgumentException($"Unknown external dataset '{name}'. Known: {string.Join(", ", All.Select(d => d.Name))}.");
+        All.Concat(Derived).FirstOrDefault(d => d.Name == name)
+        ?? throw new ArgumentException($"Unknown external dataset '{name}'. Known: {string.Join(", ", All.Concat(Derived).Select(d => d.Name))}.");
+
+    /// <summary>The group (field of view) of a file: <c>dataset/group</c> for <c>group__plane</c> names, else <c>dataset/stem</c>.</summary>
+    internal static string GroupOf(ExtDataset dataset, string file)
+    {
+        string stem = Path.GetFileNameWithoutExtension(file);
+        int split = stem.IndexOf("__", StringComparison.Ordinal);
+        return $"{dataset.Name}/{(split > 0 ? stem[..split] : stem)}";
+    }
 
     /// <summary>True once <c>tools/fetch_ext.sh</c> has verified and extracted the dataset under <paramref name="root"/>.</summary>
     public static bool IsPresent(string root, ExtDataset dataset) => File.Exists(Path.Combine(root, dataset.Name, ".complete"));
@@ -74,7 +105,8 @@ public static class ExtDatasets
 
     /// <summary>
     /// Noisy/clean pairs of a split, matched by file name, in ordinal order. Each file is its own field of view
-    /// (<see cref="ImagePair.GroupId"/> = dataset/stem), as in the published train/test splits.
+    /// (<see cref="ImagePair.GroupId"/> = dataset/stem), as in the published train/test splits, except in a derived set,
+    /// where <c>group__plane</c> files share their group's (<see cref="GroupOf"/>).
     /// </summary>
     /// <exception cref="InvalidOperationException">The dataset has no ground truth.</exception>
     /// <exception cref="InvalidDataException">An image has no partner of the same name.</exception>
@@ -92,8 +124,7 @@ public static class ExtDatasets
         return noisy.Select(path =>
         {
             string file = Path.GetFileName(path);
-            return new FmdDataset.PlannedPair(path, Path.Combine(dir, cleanFolder, file),
-                $"{dataset.Name}/{Path.GetFileNameWithoutExtension(file)}", $"{dataset.Name}/{file}");
+            return new FmdDataset.PlannedPair(path, Path.Combine(dir, cleanFolder, file), GroupOf(dataset, file), $"{dataset.Name}/{file}");
         }).ToList();
     }
 
@@ -151,7 +182,7 @@ public static class ExtDatasets
             var noisy = ImageLoader.Load(path);
             string file = Path.GetFileName(path);
             return new ImagePair(Normalization.Apply(noisy, Normalization.FromPercentiles(noisy.Pixels)), null,
-                $"{dataset.Name}/{Path.GetFileNameWithoutExtension(file)}", $"{dataset.Name}/{file}");
+                GroupOf(dataset, file), $"{dataset.Name}/{file}");
         }).ToList();
     }
 

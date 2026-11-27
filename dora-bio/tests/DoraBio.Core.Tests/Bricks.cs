@@ -43,6 +43,7 @@ internal static class Bricks
     public const string NoiseStop = "35-q2-n2v-stop";          // quality pass Q2: what chooses a Noise2Void run's weights
     public const string WideKernels = "36-roofline-wide";      // systems S1 + S2: roofline, 512-bit bit-identical kernels
     public const string Routing = "37-q19-routed";             // quality pass Q19: the U-Net with routing
+    public const string Scoreboard = "38-scoreboard";          // the self-supervised scoreboard: DORA vs CAREamics N2V/N2V2
 }
 
 [Trait(Bricks.Trait, Bricks.Scaffold)]
@@ -52,7 +53,7 @@ public class BrickWiringTests
         [Bricks.Scaffold, Bricks.Nn, Bricks.Data, Bricks.IO, Bricks.Inference, Bricks.Training, Bricks.Fmd, Bricks.FmdEval,
          Bricks.NoiseDiagnostic, Bricks.StructuredMask, Bricks.Vst, Bricks.Calibration,
          Bricks.PoolUpsample, Bricks.UNet, Bricks.UNetTiling, Bricks.ArchEval,
-         Bricks.Bench, Bricks.BlockedConv, Bricks.PerfBudget, Bricks.TiffStackWrite, Bricks.NoiseRouting, Bricks.CliBatch, Bricks.NoiseConditioning, Bricks.ExtData, Bricks.ExtBench, Bricks.QuantFidelity, Bricks.SelfSupervisedRecipe, Bricks.ExtData2, Bricks.NoiseStop, Bricks.WideKernels, Bricks.Routing];
+         Bricks.Bench, Bricks.BlockedConv, Bricks.PerfBudget, Bricks.TiffStackWrite, Bricks.NoiseRouting, Bricks.CliBatch, Bricks.NoiseConditioning, Bricks.ExtData, Bricks.ExtBench, Bricks.QuantFidelity, Bricks.SelfSupervisedRecipe, Bricks.ExtData2, Bricks.NoiseStop, Bricks.WideKernels, Bricks.Routing, Bricks.Scoreboard];
 
     /// <summary>An untagged test would silently run in no gate, so treat a missing or unknown brick as a build error.</summary>
     [Xunit.Fact]

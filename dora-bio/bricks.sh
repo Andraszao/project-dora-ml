@@ -24,7 +24,7 @@ export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_SKIP_FIRST_TIME_EXPE
 
 NAMES=(scaffold nn data io inference training cli godot-build godot-smoke ci-core ci-godot fmd-fetch fmd-loader fmd-eval
        n2v-diagnostic structured-mask vst calibration pool-upsample unet unet-tiling arch-eval
-       bench blocked-conv perf-budget q1-recipe tiff-stack-write q10-routing cli-batch q13-conditioning ext-data q18-ext-bench quant-fidelity q12-n2v-recipe ext-data-2 q2-n2v-stop roofline-wide q19-routed)
+       bench blocked-conv perf-budget q1-recipe tiff-stack-write q10-routing cli-batch q13-conditioning ext-data q18-ext-bench quant-fidelity q12-n2v-recipe ext-data-2 q2-n2v-stop roofline-wide q19-routed scoreboard)
 CHECKS=(
   "solution builds (warnings are errors, missing XML docs included); every test class belongs to exactly one brick"
   "ConvLayer/DenoisingNet/Adam/Simd: finite-difference gradient checks, optimizer behavior"
@@ -64,6 +64,7 @@ CHECKS=(
   "quality pass Q2: the selection signal decides the epoch (loss never uses ground truth), keep-last and save-last; the recorded choice, verdict and shipped Noise2Void defaults follow the pre-registered rule; with data + runs/q2 the blocks reproduce"
   "512-bit kernels bit-identical to the reference (forced on, any CPU); bench --roofline reports peaks, every kernel shape and the stack-run split; the 512-bit speedup floor is in gate 24's budget"
   "quality pass Q19 + Q20: the threshold rule and routed training; the recorded threshold decision (validation only), correlated-network choice and Q19 verdict follow the pre-registered rule, Q20's re-application (no CARE 2D floor) decides the routed Noise2Void default; with data + runs/q19 the blocks reproduce"
+  "scoreboard: derived 2D sets keep a patch or cell in one validation group, FMD export + outside outputs scored with FMD's protocol; the recorded reading follows the pre-registered rule and PATHWAY.md's next brick follows it; with data + runs/scoreboard every score reproduces"
 )
 LAST=$((${#NAMES[@]} - 1))
 LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dora-bricks.XXXXXX")"
@@ -745,6 +746,61 @@ gate_21() {   # arch-eval
   reproduces p4-unet-n2v fmd-eval --weights $w/unet_n2v.bin --root "$FMD" --levels raw || return 1
 }
 
+gate_38() {   # scoreboard (brick 38, pre-registered in PATHWAY.md, commit f91afa8, before any of its code)
+  test_gate 38-scoreboard || return 1
+  local b
+  for b in sb-summary sb-reading sb-fmd-dora sb-fmd-n2v sb-fmd-n2v2; do
+    [[ -n "$(recorded_block "$b")" ]] || { echo ">> docs/RESULTS.md needs the $b block"; return 1; }
+  done
+  # The reading, recomputed from the recorded summary with the pre-registered rule.
+  local reading
+  reading="$(recorded_block sb-summary | awk -f tools/experiments/scoreboard_reading.awk)"
+  if [[ "$reading" != "$(recorded_block sb-reading)" ]]; then
+    echo ">> the pre-registered reading of the recorded summary differs from the recorded reading:"
+    diff <(recorded_block sb-reading) <(echo "$reading") | head -20; return 1
+  fi
+  # The summary's FMD line holds the FMD blocks' unrounded means (DORA, CAREamics Noise2Void, N2V2).
+  local want have
+  want="$(for b in dora n2v n2v2; do recorded_block "sb-fmd-$b" | awk '$1 == "all," { print $(NF - 1) }'; done | paste -sd' ')"
+  have="$(recorded_block sb-summary | awk '$1 == "set" && $2 == "fmd" { print $5, $6, $7 }')"
+  [[ -n "$have" && "$want" == "$have" ]] || { echo ">> the summary's FMD line ($have) is not the FMD blocks' means ($want)"; return 1; }
+  # The order of the next bricks follows the reading, in RESULTS.md and in PATHWAY.md.
+  local next pass
+  next="$(sed -n 's/.*next-brick: \([a-z0-9]*\).*/\1/p' <<< "$reading")"
+  pass="$(sed -n 's/.*next-pass: \([a-z0-9-]*\).*/\1/p' <<< "$reading")"
+  for f in docs/RESULTS.md PATHWAY.md; do
+    [[ "$(sed -n 's/.*<!-- sb-next-brick: \([a-z0-9]*\) -->.*/\1/p' "$f")" == "$next" ]] \
+      || { echo ">> the reading puts '$next' next, but $f's <!-- sb-next-brick --> marker disagrees"; return 1; }
+  done
+  [[ "$(sed -n 's/.*<!-- sb-next-pass: \([a-z0-9-]*\) -->.*/\1/p' docs/RESULTS.md)" == "$pass" ]] \
+    || { echo ">> the reading's next pass is '$pass', but RESULTS.md's <!-- sb-next-pass --> marker disagrees"; return 1; }
+  echo ">> reading: next brick $next, next pass $pass; RESULTS.md and PATHWAY.md agree"
+  # The CLI refuses what it can't do honestly.
+  dotnet build tools/DoraBio.Cli -c Release >/dev/null || return 1
+  local code=0
+  dotnet "$CLI_DLL" stack-export --dataset deepbacs-mreb --root "$LOG_DIR/none" >/dev/null 2>&1 || code=$?
+  [[ $code -eq 2 ]] || { echo ">> stack-export on a downloaded set should fail with exit 2, got $code"; return 1; }
+  code=0
+  dotnet "$CLI_DLL" fmd-eval --weights x.bin --predictions "$LOG_DIR" --root "$LOG_DIR" >/dev/null 2>&1 || code=$?
+  [[ $code -eq 2 ]] || { echo ">> fmd-eval with both --weights and --predictions should fail with exit 2, got $code"; return 1; }
+  # With the data and the runs: every score again, from the saved weights and outputs.
+  local r=runs/scoreboard
+  for b in "$FMD/test_mix/.complete" "$EXT/deepbacs-mreb/.complete" "$EXT/mdc25-tribolium-2d/.complete" "$EXT/biosr-ccps-2d/.complete" \
+           "$r/dora_fmd.bin" "$r/dora_biosr-ccps-2d.bin" "$r/careamics_n2v2/biosr-ccps-2d/timing.json" runs/q18/careamics_n2v/deepbacs-mreb/timing.json; do
+    [[ -f "$b" ]] || { echo "reading checked; reproduction skipped (needs data/fmd, data/ext with the derived sets, runs/q18 and runs/scoreboard)"; return 77; }
+  done
+  dotnet "$CLI_DLL" info --weights "$r/dora_fmd.bin" | grep -q "routed (Q20)" || { echo ">> DORA's FMD row isn't the routed default"; return 1; }
+  tools/experiments/scoreboard.sh --rescore "$LOG_DIR/sb" >/dev/null || return 1
+  for b in dora n2v n2v2; do
+    [[ "$(recorded_block "sb-fmd-$b")" == "$(cat "$LOG_DIR/sb/eval_${b}_fmd.txt")" ]] \
+      || { echo ">> RESULTS.md block sb-fmd-$b differs from a fresh evaluation:"; diff <(recorded_block "sb-fmd-$b") "$LOG_DIR/sb/eval_${b}_fmd.txt" | head; return 1; }
+  done
+  if [[ "$(recorded_block sb-summary)" != "$(cat "$LOG_DIR/sb/summary.txt")" ]]; then
+    echo ">> the recorded summary differs from a fresh evaluation of runs/scoreboard:"; diff <(recorded_block sb-summary) "$LOG_DIR/sb/summary.txt" | head -20; return 1
+  fi
+  echo ">> every score in the recorded summary reproduces from runs/scoreboard"
+}
+
 # recorded_block <marker>: the contents of the ```text block between <!-- marker --> and <!-- /marker --> in RESULTS.md.
 recorded_block() { sed -n "/<!-- $1 -->/,/<!-- \/$1 -->/p" docs/RESULTS.md | sed '1,2d;$d' | sed '$d'; }
 
@@ -814,6 +870,9 @@ MUTATIONS=(
   '37|docs/RESULTS.md|<!-- q19-verdict: not-adopted -->|<!-- q19-verdict: adopted -->'
   '37|src/DoraBio.Core/Training/RoutedNoise2Void.cs|(verdicts[i] == true ? correlated : independent)|(verdicts[i] != false ? correlated : independent)'
   '37|docs/RESULTS.md|<!-- q20-verdict: adopted -->|<!-- q20-verdict: not-adopted -->'
+  '38|src/DoraBio.Core/Data/ExtDatasets.cs|int split = stem.IndexOf("__", StringComparison.Ordinal);|int split = -1;'
+  '38|src/DoraBio.Core/FmdBenchmark.cs|clipped.Pixels[i] = (float)Math.Clamp(output.Pixels[i], 0, DataRange);|clipped.Pixels[i] = output.Pixels[i];'
+  '38|docs/RESULTS.md|<!-- sb-next-brick: noise2noise -->|<!-- sb-next-brick: n2v2 -->'
 )
 
 self_test() {
