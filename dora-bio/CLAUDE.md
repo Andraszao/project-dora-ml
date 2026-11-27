@@ -214,7 +214,9 @@ cd godot && dotnet build && godot --headless --path . --import \
    Never use a fused multiply-add there; it would change results and break the recorded FMD reproductions.
    The 512-bit kernels (`ConvLayer.Wide.cs`) follow the same rule, and only where SIMD lanes are pixels (forward, input
    gradients). The weight-gradient kernel sums across pixels, so its lane width is part of its rounding: it stays on
-   `Vector<float>` (256 bits on AVX2/AVX-512 machines; .NET 8 never makes `Vector<T>` wider).
+   `Vector<float>` (256 bits on AVX2/AVX-512 machines; .NET 8 never makes `Vector<T>` wider). So training is bit-identical
+   only between machines with the same `Vector<T>` width (128 bits on an SSE-only CPU rounds the weight-gradient sums
+   differently); inference, whose kernels put pixels in the lanes, should reproduce on any tier (S11 checks it).
 5. **Tiled inference must equal whole-image inference** (`TiledInference` margin = receptive radius,
    clipped at image edges). Covered by `TiledInferenceMatchesWholeImage`.
 6. **Optimizer state persists** across online adaptation (`OnlineAdapter`). A fresh Adam at t = 1 is a sign-step

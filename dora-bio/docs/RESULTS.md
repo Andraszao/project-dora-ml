@@ -737,7 +737,10 @@ small to judge? Two measurements, both reproduced by gate 38:
   agree with the reference-based values, so the routing is not a small-patch false trigger. Which physical scan axis
   the image's vertical axis was in the original acquisition isn't recorded with the data here (the Zenodo record defers
   to the CARE paper and the original Edmond dataset), so this table says only that the correlation runs along the
-  stored images' columns.
+  stored images' columns. The owner quotes Weigert et al. 2018 and its Supplementary Information: acquisition "on a
+  Zeiss LSM 710 NLO Multiphoton Laser Scanning Microscope". That couldn't be checked from this environment (the paper and
+  the Edmond record are blocked here), and downstream mirrors disagree (one calls the set confocal, another light-sheet),
+  so the cause of the correlation (for example the detector's response along the fast scan axis) stays unconfirmed.
 - **The unrouted U-Net confirms it.** Q20's independent-noise recipe (U-Net 16/2, rule C) trained on every slice with
   `--route off` scores **17.80 dB**, no better than the noisy input (17.78) and level with CAREamics' plain Noise2Void
   (17.77). The routed default's structured network scores 18.38 and CAREamics N2V2 18.26.
