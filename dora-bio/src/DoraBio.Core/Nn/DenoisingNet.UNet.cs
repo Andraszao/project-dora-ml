@@ -41,7 +41,7 @@ public sealed partial class DenoisingNet
         var shapes = new List<(int, int, int)>();
         for (int l = 0; l <= d; l++)
         {
-            shapes.Add((l == 0 ? 1 : f << (l - 1), f << l, 1));
+            shapes.Add((l == 0 ? config.InputFrames : f << (l - 1), f << l, 1));
             shapes.Add((f << l, f << l, 1));
         }
         for (int l = d - 1; l >= 0; l--)

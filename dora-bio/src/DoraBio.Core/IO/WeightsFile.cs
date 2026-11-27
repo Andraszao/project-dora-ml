@@ -19,7 +19,7 @@ public sealed record ModelInfo(NetConfig Config, string ModelVersion, string Pro
 ///
 /// Layout, little-endian:
 ///   "DORABIO\0"                         8-byte magic
-///   u16      format version (2, or 3 for a noise-conditioned network; format 1 is still read)
+///   u16      format version (2; 3 for a noise-conditioned network; 4 for a multi-frame network; format 1 is still read)
 ///   string   model version, e.g. "2.0.0-bio"   (BinaryWriter length-prefixed UTF-8)
 ///   string   provenance: free text saying what the weights were trained on
 ///   i64      saved time, UTC ticks
@@ -27,16 +27,18 @@ public sealed record ModelInfo(NetConfig Config, string ModelVersion, string Pro
 ///   dilated: i32 features, i32 layer count, i32[layer count] dilations
 ///   U-Net:   i32 features, i32 depth
 ///   format 3 only: u8 conditioning (1 = noise level, FiLM), u16 generator hidden units (16)
+///   format 4 only: u8 input frames (3; brick 39's spatiotemporal blind spot)
 ///   i32      parameter count, f32[parameter count] parameters
 ///   u32      CRC-32 of every preceding byte
 /// Format 1 is format 2 without the architecture byte, so it always describes a dilated network (the bundled model,
-/// and every file written before P4). Plain networks keep writing format 2, so their files are unchanged by Q13.
+/// and every file written before P4). Plain networks keep writing format 2, so their files are unchanged by Q13 and by
+/// brick 39 (single-frame networks never write format 4).
 /// </summary>
 public static class WeightsFile
 {
     /// <summary>Model version written into new files. Readers accept any "2.x" version.</summary>
     public const string ModelVersion = "2.0.0-bio";
-    private const ushort FormatVersion = 2, ConditionedFormat = 3;
+    private const ushort FormatVersion = 2, ConditionedFormat = 3, MultiFrameFormat = 4;
     private static ReadOnlySpan<byte> Magic => "DORABIO\0"u8;
 
     /// <summary>Serializes the network to a stream (timestamped now).</summary>
@@ -84,7 +86,7 @@ public static class WeightsFile
         reader.ReadBytes(Magic.Length);
 
         ushort format = reader.ReadUInt16();
-        if (format is not (1 or FormatVersion or ConditionedFormat)) throw new InvalidDataException($"Unsupported weights format version {format}.");
+        if (format is not (1 or FormatVersion or ConditionedFormat or MultiFrameFormat)) throw new InvalidDataException($"Unsupported weights format version {format}.");
 
         string modelVersion = reader.ReadString();
         if (!modelVersion.StartsWith("2.", StringComparison.Ordinal))
@@ -116,6 +118,12 @@ public static class WeightsFile
                 throw new InvalidDataException($"Conditioning network has {hidden} hidden units; this build supports {DenoisingNet.FilmHidden}.");
             config = config with { Conditioning = conditioning };
         }
+        if (format == MultiFrameFormat)
+        {
+            int frames = reader.ReadByte();
+            if (frames < 3) throw new InvalidDataException($"A multi-frame weights file says {frames} input frames.");
+            config = config with { InputFrames = frames };
+        }
         try { config.Validate(); }
         catch (ArgumentException e) { throw new InvalidDataException($"Invalid architecture in weights file: {e.Message}"); }
 
@@ -139,7 +147,7 @@ public static class WeightsFile
         using (var writer = new BinaryWriter(memory, Encoding.UTF8, leaveOpen: true))
         {
             writer.Write(Magic);
-            writer.Write(net.Config.IsConditioned ? ConditionedFormat : FormatVersion);
+            writer.Write(net.Config.IsConditioned ? ConditionedFormat : net.Config.InputFrames > 1 ? MultiFrameFormat : FormatVersion);
             writer.Write(ModelVersion);
             writer.Write(provenance ?? "");
             writer.Write(savedUtc.ToUniversalTime().Ticks);
@@ -156,6 +164,7 @@ public static class WeightsFile
                 writer.Write((byte)net.Config.Conditioning);
                 writer.Write((ushort)DenoisingNet.FilmHidden);
             }
+            if (net.Config.InputFrames > 1) writer.Write((byte)net.Config.InputFrames);
             writer.Write(net.ParameterCount);
             foreach (float p in net.Parameters) writer.Write(p);
         }

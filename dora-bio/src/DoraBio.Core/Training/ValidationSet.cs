@@ -25,7 +25,13 @@ internal sealed class ValidationSet
     /// One fixed validation patch. The blind-spot mask is drawn once, so the Noise2Void loss is comparable
     /// from epoch to epoch.
     /// </summary>
-    private sealed record Patch(float[] Noisy, float[] MaskedInput, float[] Mask, float[]? Clean, float Condition);
+    /// <param name="Noisy">The frame's noisy patch (the Noise2Void target).</param>
+    /// <param name="Input">The network's unmasked input: Noisy, or for a multi-frame network every frame's patch in time order.</param>
+    /// <param name="MaskedInput">Input with the blind spots in the centre frame.</param>
+    /// <param name="Mask">The blind spots.</param>
+    /// <param name="Clean">Ground truth (or, for Noise2Noise, the neighbouring frame it is trained towards), or null.</param>
+    /// <param name="Condition">The whole frame's noise condition.</param>
+    private sealed record Patch(float[] Noisy, float[] Input, float[] MaskedInput, float[] Mask, float[]? Clean, float Condition);
 
     /// <summary>True when every validation patch has ground truth, so PSNR, SSIM and progressive targets are available.</summary>
     public bool HasClean { get; }
@@ -66,18 +72,33 @@ internal sealed class ValidationSet
             int y = rng.Next(image.Noisy.Height - _size + 1);
             var noisy = image.Noisy.Crop(x, y, _size, _size).Pixels;
             var clean = image.Clean?.Crop(x, y, _size, _size).Pixels;
-            var masked = new float[noisy.Length];
-            var mask = new float[noisy.Length];
+            int plane = noisy.Length, frames = image.FrameCount, center = frames / 2;
+            var input = frames == 1 ? noisy : new float[frames * plane];
+            var masked = new float[frames * plane];
+            var mask = new float[plane];
+            if (image.Context is { } context)   // neighbours, unmasked, around the centre frame
+                for (int c = 0; c < context.Length; c++)
+                {
+                    int channel = c < context.Length / 2 ? c : c + 1;
+                    var window = context[c].Crop(x, y, _size, _size).Pixels;
+                    window.CopyTo(input, channel * plane);
+                    window.CopyTo(masked, channel * plane);
+                }
+            if (frames > 1) noisy.CopyTo(input, center * plane);
             // The same blind spot as in training, so the Noise2Void validation loss scores what training optimizes.
-            BlindSpot.Apply(noisy, masked, mask, _size, config.MaskRatio, rng, footprint: image.Footprint);
+            BlindSpot.Apply(noisy, masked.AsSpan(center * plane, plane), mask, _size, config.MaskRatio, rng, footprint: image.Footprint);
             // The whole frame's condition, as in training and inference (read only by conditioned networks).
-            _patches.Add(new Patch(noisy, masked, mask, clean, NoiseConditioning.Of(image.Noisy)));
+            _patches.Add(new Patch(noisy, input, masked, mask, clean, NoiseConditioning.Of(image.Noisy)));
         }
 
         PatchSources = sources;
-        HasClean = _patches.All(p => p.Clean is not null);
-        if (_mode == TrainingMode.Supervised && !HasClean)
-            throw new ArgumentException("Supervised training needs clean validation images.");
+        bool allTargets = _patches.All(p => p.Clean is not null);
+        if (_mode is TrainingMode.Supervised or TrainingMode.Noise2Noise && !allTargets)
+            throw new ArgumentException(_mode == TrainingMode.Supervised
+                ? "Supervised training needs clean validation images."
+                : "Noise2Noise training needs a neighbouring frame for every validation image.");
+        // A Noise2Noise target is another noisy frame, not ground truth: it gives a loss but no PSNR.
+        HasClean = allTargets && _mode != TrainingMode.Noise2Noise;
         if (HasClean)
             NoisyPsnr = Metrics.PsnrFromMse(_patches.Average(p => Metrics.Mse(p.Noisy, p.Clean!)));
     }
@@ -89,7 +110,8 @@ internal sealed class ValidationSet
         foreach (var p in _patches)
             for (int i = 0; i < p.Noisy.Length; i++)
             {
-                if (p.MaskedInput[i] != p.Noisy[i]) changed++;
+                int centerOffset = p.MaskedInput.Length / p.Noisy.Length / 2 * p.Noisy.Length;
+                if (p.MaskedInput[centerOffset + i] != p.Noisy[i]) changed++;
                 if (p.Mask[i] == 1f) centres++;
             }
         return changed / Math.Max(1, centres);
@@ -124,10 +146,10 @@ internal sealed class ValidationSet
 
             if (p.Clean is not null)
             {
-                net.Predict(p.Noisy, _size, _size, output, ws, p.Condition);
+                net.Predict(p.Input, _size, _size, output, ws, p.Condition);
                 mses[i] = Metrics.Mse(output, p.Clean);
                 ssims[i] = Metrics.Ssim(new GrayImage(_size, _size, output), new GrayImage(_size, _size, p.Clean));
-                if (_mode == TrainingMode.Supervised) losses[i] = mses[i];
+                if (_mode != TrainingMode.Noise2Void) losses[i] = mses[i];
             }
             return ws;
         }, pool.Return);

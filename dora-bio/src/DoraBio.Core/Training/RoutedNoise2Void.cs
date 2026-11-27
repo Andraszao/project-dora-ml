@@ -38,12 +38,18 @@ public sealed record RoutedNetwork(NoiseKind Kind, string WeightsPath, int Image
 public static class RoutedNoise2Void
 {
     /// <summary>The network for images with independent noise, built on <paramref name="baseConfig"/>'s budget and seed.</summary>
-    public static RoutedRecipe Independent(TrainerConfig baseConfig) => new(NoiseKind.Independent, NetConfig.UNet(16, 2),
+    /// <param name="baseConfig">Budget, batch, patch, learning rate, masking and seed.</param>
+    /// <param name="inputFrames">1, or 3 for the spatiotemporal blind spot on a time-lapse (brick 39).</param>
+    public static RoutedRecipe Independent(TrainerConfig baseConfig, int inputFrames = 1) => new(NoiseKind.Independent,
+        NetConfig.UNet(16, 2) with { InputFrames = inputFrames },
         baseConfig with { Mode = TrainingMode.Noise2Void, Selection = ValidationSignal.Loss, EarlyStopPatience = int.MaxValue, KeepLastEpoch = true },
         null);
 
     /// <summary>The network for images with correlated noise (P3's), built on <paramref name="baseConfig"/>'s budget and seed.</summary>
-    public static RoutedRecipe Correlated(TrainerConfig baseConfig) => new(NoiseKind.Correlated, NetConfig.Default,
+    /// <param name="baseConfig">Budget, batch, patch, learning rate, masking and seed.</param>
+    /// <param name="inputFrames">1, or 3 for the spatiotemporal blind spot on a time-lapse (brick 39).</param>
+    public static RoutedRecipe Correlated(TrainerConfig baseConfig, int inputFrames = 1) => new(NoiseKind.Correlated,
+        NetConfig.Default with { InputFrames = inputFrames },
         baseConfig with { Mode = TrainingMode.Noise2Void }, StructuredMasking.DefaultFootprint);
 
     /// <summary>Splits images by their noise-check verdicts: true → correlated; false or null (too small to judge) → independent.</summary>
@@ -79,11 +85,12 @@ public static class RoutedNoise2Void
         string? journalPath = null, Action<NoiseKind, EpochReport>? onEpoch = null, string? correlatedPath = null, IReadOnlyList<bool?>? verdicts = null)
     {
         if (images.Count == 0) throw new ArgumentException("No training images.", nameof(images));
+        int frames = images[0].FrameCount;   // 3 for a time-lapse trained with the spatiotemporal blind spot
         verdicts ??= StructuredMasking.Diagnose(images);
         var (independent, correlated) = Split(images, verdicts);
         bool mixed = independent.Count > 0 && correlated.Count > 0;
         var trained = new List<RoutedNetwork>();
-        foreach (var (recipe, part) in new[] { (Independent(baseConfig), independent), (Correlated(baseConfig), correlated) })
+        foreach (var (recipe, part) in new[] { (Independent(baseConfig, frames), independent), (Correlated(baseConfig, frames), correlated) })
         {
             if (part.Count == 0) continue;
             string path = recipe.Kind == NoiseKind.Correlated && mixed ? correlatedPath ?? CorrelatedPath(outPath) : outPath;

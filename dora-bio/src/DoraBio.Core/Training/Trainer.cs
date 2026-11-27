@@ -43,6 +43,10 @@ public sealed class Trainer
         // Setup: split by FOV, build the sampler and the fixed validation set, and create a fresh optimizer.
         // Targets only exist when validation has clean data (PSNR gain needs ground truth).
         var cfg = _config;
+        if (dataset.Any(i => i.FrameCount != _net.Config.InputFrames))
+            throw new ArgumentException(_net.Config.InputFrames == 1
+                ? "This network takes single frames, but the training images carry neighbouring frames."
+                : $"This network takes {_net.Config.InputFrames} frames; every training image needs {_net.Config.InputFrames - 1} neighbouring frames.");
         var (trainImages, valImages) = DatasetSplit.Split(dataset, cfg.ValidationFraction, cfg.Seed);
         var rng = new Random(cfg.Seed);
         var sampler = new PatchSampler(trainImages, cfg.PatchSize, cfg.Mode, cfg.MaskRatio, rng, cfg.Augmentation);
@@ -141,7 +145,7 @@ internal sealed class BatchStepper
     public BatchStepper(DenoisingNet net, int batchSize, int patchSize)
     {
         _net = net;
-        _batch = new TrainingBatch(batchSize, patchSize);
+        _batch = new TrainingBatch(batchSize, patchSize, net.Config.InputFrames);
         _sampleGradients = Enumerable.Range(0, batchSize).Select(_ => new float[net.ParameterCount]).ToArray();
         _sampleLoss = new double[batchSize];
         _gradients = new float[net.ParameterCount];

@@ -41,6 +41,19 @@ public static class TiledInference
         Denoise(net, input, tileCore, cancellation, new WorkspacePool(net));
 
     /// <summary>
+    /// Denoises the centre frame of a multi-frame input (brick 39) with a network of <see cref="NetConfig.InputFrames"/>
+    /// frames. Every tile takes the same window from every frame, so the spatial margin covers every frame channel and
+    /// tiling stays exact.
+    /// </summary>
+    /// <param name="net">A network with as many input frames as <paramref name="frames"/> holds.</param>
+    /// <param name="frames">Normalized frames in time order, all the same size; the centre one is denoised.</param>
+    /// <param name="tileCore">Side length of the region each tile writes (at least 8).</param>
+    /// <param name="cancellation">Stops scheduling further tiles. Throws <see cref="OperationCanceledException"/>.</param>
+    public static GrayImage Denoise(DenoisingNet net, IReadOnlyList<GrayImage> frames, int tileCore = DefaultTileCore,
+        CancellationToken cancellation = default) =>
+        Denoise(net, frames, tileCore, cancellation, new WorkspacePool(net), float.NaN);
+
+    /// <summary>
     /// As the public overload, with workspaces taken from (and returned to) <paramref name="pool"/>, so a caller that
     /// denoises many frames (<see cref="FrameDenoiser"/>) allocates the tens of MB of activations per thread once,
     /// not once per frame.
@@ -48,14 +61,28 @@ public static class TiledInference
     internal static GrayImage Denoise(DenoisingNet net, GrayImage input, int tileCore, CancellationToken cancellation, WorkspacePool pool) =>
         Denoise(net, input, tileCore, cancellation, pool, net.Config.IsConditioned ? NoiseConditioning.Of(input) : float.NaN);
 
+    /// <summary>Multi-frame inference with workspaces from <paramref name="pool"/> (see the public overload).</summary>
+    internal static GrayImage Denoise(DenoisingNet net, IReadOnlyList<GrayImage> frames, int tileCore, CancellationToken cancellation,
+        WorkspacePool pool) => Denoise(net, frames, tileCore, cancellation, pool, float.NaN);
+
     /// <summary>
     /// As above with an explicit condition for a noise-conditioned network. Normally it is measured on the whole
     /// <paramref name="input"/>; evaluations pass a deliberately wrong one to test whether the network uses it (Q13).
     /// </summary>
     internal static GrayImage Denoise(DenoisingNet net, GrayImage input, int tileCore, CancellationToken cancellation,
+        WorkspacePool pool, float condition) => Denoise(net, [input], tileCore, cancellation, pool, condition);
+
+    private static GrayImage Denoise(DenoisingNet net, IReadOnlyList<GrayImage> frames, int tileCore, CancellationToken cancellation,
         WorkspacePool pool, float condition)
     {
         if (tileCore < 8) throw new ArgumentOutOfRangeException(nameof(tileCore));
+        if (frames.Count != net.Config.InputFrames)
+            throw new ArgumentException(net.Config.InputFrames == 1
+                ? "This network denoises single frames."
+                : $"This network needs {net.Config.InputFrames} frames (the frame and its neighbours), got {frames.Count}.", nameof(frames));
+        var input = frames[net.Config.CenterFrame];
+        if (frames.Any(f => f.Width != input.Width || f.Height != input.Height))
+            throw new ArgumentException("Every frame must have the same size.", nameof(frames));
         int align = net.Config.TileAlignment;
         tileCore = RoundUp(tileCore, align);
         int w = input.Width, h = input.Height, margin = RoundUp(net.Config.ReceptiveRadius, align);
@@ -86,10 +113,11 @@ public static class TiledInference
             int wx1 = Math.Min(w, cx1 + margin), wy1 = Math.Min(h, cy1 + margin);
             int ww = wx1 - wx0, wh = wy1 - wy0;
 
-            var (windowBuffer, denoisedBuffer) = workspace.TileBuffers(maxWindowW * maxWindowH);
-            var window = windowBuffer.AsSpan(0, ww * wh);
-            for (int row = 0; row < wh; row++)
-                input.Pixels.AsSpan((wy0 + row) * w + wx0, ww).CopyTo(window.Slice(row * ww, ww));
+            var (windowBuffer, denoisedBuffer) = workspace.TileBuffers(frames.Count * maxWindowW * maxWindowH);
+            var window = windowBuffer.AsSpan(0, frames.Count * ww * wh);
+            for (int f = 0; f < frames.Count; f++)   // the same window from every frame, one plane after another
+                for (int row = 0; row < wh; row++)
+                    frames[f].Pixels.AsSpan((wy0 + row) * w + wx0, ww).CopyTo(window.Slice(f * ww * wh + row * ww, ww));
 
             var denoised = denoisedBuffer.AsSpan(0, ww * wh);
             // A conditioned network gets the whole frame's condition in every tile, so tiles still agree with a

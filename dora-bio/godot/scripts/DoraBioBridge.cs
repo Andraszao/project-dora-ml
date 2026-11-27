@@ -136,6 +136,12 @@ public partial class DoraBioBridge : Node
             try
             {
                 var (net, info) = WeightsFile.Load(GodotFileAccess.GetFileAsBytes(path));
+                if (net.Config.InputFrames > 1)
+                {
+                    // A time-lapse model (brick 39) needs each frame's neighbours; the app works on single images.
+                    WriteLog($"⚠️ {path} takes {net.Config.InputFrames} frames (a time-lapse model); use the dora-bio CLI on stacks");
+                    continue;
+                }
                 SetModel(net, info, path);
                 return;
             }

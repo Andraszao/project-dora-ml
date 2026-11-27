@@ -24,7 +24,7 @@ export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_SKIP_FIRST_TIME_EXPE
 
 NAMES=(scaffold nn data io inference training cli godot-build godot-smoke ci-core ci-godot fmd-fetch fmd-loader fmd-eval
        n2v-diagnostic structured-mask vst calibration pool-upsample unet unet-tiling arch-eval
-       bench blocked-conv perf-budget q1-recipe tiff-stack-write q10-routing cli-batch q13-conditioning ext-data q18-ext-bench quant-fidelity q12-n2v-recipe ext-data-2 q2-n2v-stop roofline-wide q19-routed scoreboard)
+       bench blocked-conv perf-budget q1-recipe tiff-stack-write q10-routing cli-batch q13-conditioning ext-data q18-ext-bench quant-fidelity q12-n2v-recipe ext-data-2 q2-n2v-stop roofline-wide q19-routed scoreboard temporal)
 CHECKS=(
   "solution builds (warnings are errors, missing XML docs included); every test class belongs to exactly one brick"
   "ConvLayer/DenoisingNet/Adam/Simd: finite-difference gradient checks, optimizer behavior"
@@ -65,6 +65,7 @@ CHECKS=(
   "512-bit kernels bit-identical to the reference (forced on, any CPU); bench --roofline reports peaks, every kernel shape and the stack-run split; the 512-bit speedup floor is in gate 24's budget"
   "quality pass Q19 + Q20: the threshold rule and routed training; the recorded threshold decision (validation only), correlated-network choice and Q19 verdict follow the pre-registered rule, Q20's re-application (no CARE 2D floor) decides the routed Noise2Void default; with data + runs/q19 the blocks reproduce"
   "scoreboard: derived 2D sets keep a patch or cell in one validation group, FMD export + outside outputs scored with FMD's protocol; the recorded reading follows the pre-registered rule and PATHWAY.md's next brick follows it; noise-residual separates one-axis noise correlation from misalignment; with data + runs every score and the Tribolium diagnostic reproduce"
+  "Noise2Noise from neighbouring frames and the 3-frame spatiotemporal blind spot: gradients, centre-frame residual, reflected (never clamped) endpoints, exact tiling, blind spots in the centre frame only, streaming window; both modes train and denoise from the CLI, and the leaks are refused"
 )
 LAST=$((${#NAMES[@]} - 1))
 LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dora-bricks.XXXXXX")"
@@ -813,6 +814,32 @@ gate_38() {   # scoreboard (brick 38, pre-registered in PATHWAY.md, commit f91af
   echo ">> the Tribolium diagnostic reproduces"
 }
 
+gate_39() {   # temporal (brick 39: Noise2Noise from neighbouring frames, the spatiotemporal blind spot)
+  test_gate 39-temporal || return 1
+  dotnet build tools/DoraBio.Cli -c Release >/dev/null || return 1
+  local t="$LOG_DIR/temporal" code
+  dotnet "$CLI_DLL" synth --out "$t/seq" --count 3 --size 48 --sequence 5 --seed 2 >/dev/null || return 1
+  # The spatiotemporal blind spot trains (one network, and routed by default) and denoises a stack; info shows its frames.
+  dotnet "$CLI_DLL" train --data "$t/seq" --frames 3 --route off --out "$t/st.bin" --epochs 1 --steps 2 --batch 2 --patch 32 >/dev/null || return 1
+  dotnet "$CLI_DLL" train --data "$t/seq" --frames 3 --out "$t/routed.bin" --epochs 1 --steps 2 --batch 2 --patch 32 >/dev/null || return 1
+  for b in st routed; do
+    dotnet "$CLI_DLL" info --weights "$t/$b.bin" | grep -q "3 input frames" || { echo ">> info doesn't report the 3 input frames of $b.bin"; return 1; }
+  done
+  dotnet "$CLI_DLL" denoise --weights "$t/st.bin" --in "$t/seq/noisy/seq_000.tif" --out "$t/st.tif" >/dev/null || return 1
+  dotnet "$CLI_DLL" stack-info --in "$t/st.tif" | grep -q "(5 planes" || { echo ">> the denoised stack doesn't have the input's 5 pages"; return 1; }
+  # Noise2Noise from neighbouring frames, single-frame only.
+  dotnet "$CLI_DLL" train --data "$t/seq" --mode n2n --out "$t/n2n.bin" --epochs 1 --steps 2 --batch 2 --patch 32 >/dev/null || return 1
+  code=0; dotnet "$CLI_DLL" train --data "$t/seq" --mode n2n --frames 3 --out "$t/x.bin" >/dev/null 2>&1 || code=$?
+  [[ $code -eq 2 ]] || { echo ">> --mode n2n --frames 3 must be refused (its target would be in the input): exit 2, got $code"; return 1; }
+  # A one-frame stack has no neighbour to reflect: refused, never clamped.
+  dotnet "$CLI_DLL" synth --out "$t/one" --count 1 --size 48 --sequence 1 --seed 3 >/dev/null || return 1
+  code=0; dotnet "$CLI_DLL" denoise --weights "$t/st.bin" --in "$t/one/noisy/seq_000.tif" --out "$t/one.tif" >/dev/null 2>&1 || code=$?
+  [[ $code -eq 2 ]] || { echo ">> a 3-frame model on a 1-frame stack must be refused: exit 2, got $code"; return 1; }
+  code=0; dotnet "$CLI_DLL" train --data "$t/one" --frames 3 --out "$t/y.bin" --epochs 1 --steps 1 >/dev/null 2>&1 || code=$?
+  [[ $code -eq 2 ]] || { echo ">> 3-frame training on a 1-frame stack must be refused: exit 2, got $code"; return 1; }
+  echo ">> 3-frame and Noise2Noise training, stack denoising and the refusals work from the CLI"
+}
+
 # recorded_block <marker>: the contents of the ```text block between <!-- marker --> and <!-- /marker --> in RESULTS.md.
 recorded_block() { sed -n "/<!-- $1 -->/,/<!-- \/$1 -->/p" docs/RESULTS.md | sed '1,2d;$d' | sed '$d'; }
 
@@ -861,8 +888,10 @@ MUTATIONS=(
   '25|docs/RESULTS.md|<!-- q1-verdict: not-adopted -->|<!-- q1-verdict: adopted -->'
   '26|src/DoraBio.Core/IO/TiffStack.cs|_pointerAt = ifdOffset + ifd.Length - 4;|_pointerAt = 4;'
   '27|docs/RESULTS.md|<!-- q10-verdict: not-adopted -->|<!-- q10-verdict: adopted -->'
-  '28|src/DoraBio.Core/BatchDenoising.cs|output.Append(result.Output);|output.Append(raw);'
-  '28|src/DoraBio.Core/BatchDenoising.cs|                GC.Collect();|'
+  '28|src/DoraBio.Core/BatchDenoising.cs|var result = denoiser.Denoise(raw, baseline is not null, cancellation);
+            output.Append(result.Output);|var result = denoiser.Denoise(raw, baseline is not null, cancellation);
+            output.Append(raw);'
+  '28|src/DoraBio.Core/BatchDenoising.cs|        GC.Collect();|'
   '29|src/DoraBio.Core/Nn/DenoisingNet.Film.cs|gradients[FilmW1 + i] += dHidden[i] * ws.Condition;|gradients[FilmW1 + i] += dHidden[i];'
   '29|docs/RESULTS.md|<!-- q13-verdict: not-adopted -->|<!-- q13-verdict: adopted -->'
   '30|src/DoraBio.Core/Data/ExtDatasets.cs|.Where(n => !clean.Contains(n)).ToList();|.Where(n => false).ToList();'
@@ -885,6 +914,9 @@ MUTATIONS=(
   '38|src/DoraBio.Core/Data/ExtDatasets.cs|int split = stem.IndexOf("__", StringComparison.Ordinal);|int split = -1;'
   '38|src/DoraBio.Core/FmdBenchmark.cs|clipped.Pixels[i] = (float)Math.Clamp(output.Pixels[i], 0, DataRange);|clipped.Pixels[i] = output.Pixels[i];'
   '38|docs/RESULTS.md|<!-- sb-next-brick: noise2noise -->|<!-- sb-next-brick: n2v2 -->'
+  '39|src/DoraBio.Core/Data/Sequences.cs|            if (i < 0) i = -i;|            if (i < 0) i = 0;'
+  '39|src/DoraBio.Core/Nn/DenoisingNet.cs|        var center = input.Slice(Config.CenterFrame * height * width, height * width);   // the whole input when single-frame|        var center = input.Slice(0, height * width);'
+  $'39|src/DoraBio.Core/BatchDenoising.cs|            foreach (int old in window.Keys.Where(i => i < t - k).ToList()) window.Remove(old);   // older than the window\n|'
   '38|src/DoraBio.Core/NoiseResidual.cs|private static readonly (int Dx, int Dy)[] Offsets = [(1, 0), (0, 1), (2, 0), (0, 2)];|private static readonly (int Dx, int Dy)[] Offsets = [(0, 1), (1, 0), (2, 0), (0, 2)];'
 )
 

@@ -42,7 +42,7 @@ public sealed record KernelFigure(string Kernel, string Shape, double Gflop, dou
 /// <param name="Pages">Pages timed.</param>
 /// <param name="DecodeSeconds">Reading and decoding a page.</param>
 /// <param name="InferSeconds">Tiled inference on the normalized frame.</param>
-/// <param name="OtherProcessingSeconds">Normalization and mapping back to the input's units (the rest of <see cref="FrameDenoiser.Denoise"/>).</param>
+/// <param name="OtherProcessingSeconds">Normalization and mapping back to the input's units (the rest of <see cref="FrameDenoiser.Denoise(DoraBio.Core.Data.GrayImage, bool, System.Threading.CancellationToken)"/>).</param>
 /// <param name="EncodeWriteSeconds">Encoding and appending the output page.</param>
 public sealed record StackBreakdown(int Pages, double DecodeSeconds, double InferSeconds, double OtherProcessingSeconds, double EncodeWriteSeconds)
 {

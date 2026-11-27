@@ -56,7 +56,42 @@ public static class SyntheticFluorescence
         var o = options ?? new SyntheticOptions();
         var rng = new Random(seed);
         var signal = RenderSignal(width, height, rng, o);
+        return Acquire(signal, width, height, rng, o);
+    }
 
+    /// <summary>
+    /// A time-lapse of one scene (brick 39): every frame has its own noise draw, and with <paramref name="driftPerFrame"/>
+    /// the whole scene moves that many pixels to the right per frame (whole pixels, so no interpolation blurs the truth).
+    /// 0 gives a still sequence, where neighbouring frames differ only in their noise.
+    /// </summary>
+    /// <param name="width">Frame width in pixels.</param>
+    /// <param name="height">Frame height in pixels.</param>
+    /// <param name="frames">Number of frames (at least 1).</param>
+    /// <param name="seed">Controls the scene and every frame's noise.</param>
+    /// <param name="driftPerFrame">Pixels the scene moves right per frame (0 or more).</param>
+    /// <param name="options">Scene and camera parameters; defaults if null.</param>
+    public static List<Frame> GenerateSequence(int width, int height, int frames, int seed, int driftPerFrame = 0, SyntheticOptions? options = null)
+    {
+        if (frames < 1) throw new ArgumentOutOfRangeException(nameof(frames));
+        if (driftPerFrame < 0) throw new ArgumentOutOfRangeException(nameof(driftPerFrame));
+        var o = options ?? new SyntheticOptions();
+        int fullWidth = width + driftPerFrame * (frames - 1);
+        var scene = RenderSignal(fullWidth, height, new Random(seed), o);
+        var result = new List<Frame>(frames);
+        var window = new double[width * height];
+        for (int t = 0; t < frames; t++)
+        {
+            // Frame t shows the scene from x0 on; x0 falls by the drift each frame, so content moves right.
+            int x0 = driftPerFrame * (frames - 1 - t);
+            for (int y = 0; y < height; y++)
+                Array.Copy(scene, y * fullWidth + x0, window, y * width, width);
+            result.Add(Acquire(window, width, height, new Random(unchecked(seed * 31 + 104729 * (t + 1))), o));
+        }
+        return result;
+    }
+
+    private static Frame Acquire(double[] signal, int width, int height, Random rng, SyntheticOptions o)
+    {
         // Acquisition model per pixel:  ADU = offset + gain · Poisson(λ) + Normal(0, readNoise²),  λ = signal · peakPhotons.
         // Shot noise grows with brightness (variance = λ), so bright structures are noisier in absolute terms
         // but cleaner relative to their signal. This signal-dependent noise is what makes real fluorescence hard.

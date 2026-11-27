@@ -21,12 +21,29 @@ public sealed record ImagePair(GrayImage Noisy, GrayImage? Clean, string GroupId
     /// </summary>
     public MaskFootprint? Footprint { get; init; }
 
-    /// <summary>Throws if the clean image's size differs from the noisy one's.</summary>
+    /// <summary>
+    /// For a multi-frame network (brick 39): the frame's neighbours in time order, without the frame itself, e.g.
+    /// [t−1, t+1] for three frames. Reflected at a sequence's ends (<see cref="Sequences.FrameIndices"/>), never
+    /// clamped, because a copy of frame t in a neighbour channel would show the network the very pixels its blind spot
+    /// hides. Each is normalized by its own percentiles, as at inference. Null for single-frame training.
+    /// </summary>
+    public GrayImage[]? Context { get; init; }
+
+    /// <summary>Frames the network sees for this image: 1 plus the context frames.</summary>
+    public int FrameCount => 1 + (Context?.Length ?? 0);
+
+    /// <summary>Throws if the clean image's or a context frame's size differs from the noisy one's.</summary>
     public void Validate()
     {
         if (Clean is not null && (Clean.Width != Noisy.Width || Clean.Height != Noisy.Height))
             throw new ArgumentException(
                 $"'{Name}': clean image is {Clean.Width}x{Clean.Height} but noisy is {Noisy.Width}x{Noisy.Height}.");
+        if (Context is { } context)
+        {
+            if (context.Length % 2 != 0) throw new ArgumentException($"'{Name}': context frames must be as many before as after.");
+            if (context.Any(c => c.Width != Noisy.Width || c.Height != Noisy.Height))
+                throw new ArgumentException($"'{Name}': a neighbouring frame differs in size from the frame.");
+        }
     }
 
     /// <summary>Crops both images to the same rectangle and appends <paramref name="suffix"/> to the group id and name.</summary>
@@ -38,6 +55,7 @@ public sealed record ImagePair(GrayImage Noisy, GrayImage? Clean, string GroupId
     {
         Noisy = Noisy.Crop(x, y, w, h),
         Clean = Clean?.Crop(x, y, w, h),
+        Context = Context?.Select(c => c.Crop(x, y, w, h)).ToArray(),
         GroupId = GroupId + suffix,
         Name = Name + suffix,
     };
@@ -55,6 +73,8 @@ public sealed record ImagePair(GrayImage Noisy, GrayImage? Clean, string GroupId
         {
             Noisy = Normalization.Apply(Noisy, map),
             Clean = Clean is null ? null : Normalization.Apply(Clean, map),
+            // Neighbouring frames are normalized by their own percentiles, as each frame is at inference.
+            Context = Context?.Select(c => Normalization.Apply(c, Normalization.FromPercentiles(c.Pixels, lowFraction, highFraction))).ToArray(),
         };
         return (pair, map);
     }

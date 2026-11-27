@@ -19,7 +19,7 @@ public sealed record FrameResult(GrayImage Output, GrayImage? Baseline, bool Use
 /// Denoises one frame in original units, the way <c>dora-bio denoise</c> always has:
 /// percentile normalization; optionally the noise check that sends a frame to a second model trained for correlated
 /// noise (P3); optionally variance stabilization (P3); tiled inference; then the inverse normalization. A single image,
-/// every page of a stack and every file of a folder all go through <see cref="Denoise"/>, so a page of a stack comes
+/// every page of a stack and every file of a folder all go through <see cref="Denoise(GrayImage, bool, CancellationToken)"/>, so a page of a stack comes
 /// out exactly as the same frame denoised on its own. Each frame is normalized by its own percentiles, as a single
 /// image would be. The networks are only read, so one instance can serve several threads.
 /// </summary>
@@ -33,6 +33,10 @@ public sealed class FrameDenoiser
     public FrameDenoiser(DenoisingNet net, DenoisingNet? correlatedNet = null, bool stabilize = false, int tileCore = TiledInference.DefaultTileCore)
     {
         (Net, CorrelatedNet, Stabilize, TileCore) = (net, correlatedNet, stabilize, tileCore);
+        if (correlatedNet is not null && correlatedNet.Config.InputFrames != net.Config.InputFrames)
+            throw new ArgumentException("Both models of a routed pair must take the same number of frames.");
+        if (stabilize && net.Config.InputFrames > 1)
+            throw new ArgumentException("Variance stabilization works with single-frame models only.");
         _pool = new WorkspacePool(net);
         _correlatedPool = correlatedNet is null ? null : new WorkspacePool(correlatedNet);
     }
@@ -69,8 +73,27 @@ public sealed class FrameDenoiser
     /// <param name="raw">The frame in its original units.</param>
     /// <param name="withBaseline">Also compute the bilateral baseline.</param>
     /// <param name="cancellation">Checked between tiles.</param>
-    public FrameResult Denoise(GrayImage raw, bool withBaseline = false, CancellationToken cancellation = default)
+    public FrameResult Denoise(GrayImage raw, bool withBaseline = false, CancellationToken cancellation = default) =>
+        Denoise(raw, null, withBaseline, cancellation);
+
+    /// <summary>
+    /// Denoises one frame of a time-lapse with a multi-frame model (brick 39): <paramref name="context"/> holds its
+    /// neighbours in time order without the frame itself (for 3 frames: t−1, t+1; reflected at a sequence's ends,
+    /// <see cref="Sequences.FrameIndices"/>). Each frame is normalized by its own percentiles, as in training, and the
+    /// output is mapped back with the frame's own map. Single-frame models take no context.
+    /// </summary>
+    /// <param name="raw">The frame, in original units.</param>
+    /// <param name="context">Its neighbouring frames (raw units), or null for a single-frame model.</param>
+    /// <param name="withBaseline">Also run the bilateral filter.</param>
+    /// <param name="cancellation">Stops between tiles.</param>
+    /// <exception cref="ArgumentException">The model and the number of frames given don't match.</exception>
+    public FrameResult Denoise(GrayImage raw, IReadOnlyList<GrayImage>? context, bool withBaseline = false, CancellationToken cancellation = default)
     {
+        int needed = Net.Config.InputFrames - 1;
+        if ((context?.Count ?? 0) != needed)
+            throw new ArgumentException(needed == 0
+                ? "This model denoises single frames; it takes no neighbouring frames."
+                : $"This model takes {Net.Config.InputFrames} frames: denoise a time-lapse stack, so each frame comes with its neighbours.");
         var map = Normalization.FromPercentiles(raw.Pixels);
         var input = Normalization.Apply(raw, map);
         bool correlated = CorrelatedNet is not null && LooksCorrelated(raw);
@@ -83,6 +106,16 @@ public sealed class FrameDenoiser
             (output, var m) = VarianceStabilization.Denoise(net, raw, TileCore, cancellation, pool);
             model = m;
             denoised = Normalization.Apply(output, map);
+        }
+        else if (context is { Count: > 0 })
+        {
+            // Neighbours around the frame, each normalized by its own percentiles, as in training.
+            var frames = new List<GrayImage>(context.Count + 1);
+            frames.AddRange(context.Take(context.Count / 2).Select(NormalizeOwn));
+            frames.Add(input);
+            frames.AddRange(context.Skip(context.Count / 2).Select(NormalizeOwn));
+            denoised = TiledInference.Denoise(net, frames, TileCore, cancellation, pool);
+            output = Normalization.Invert(denoised, map);
         }
         else
         {
@@ -101,6 +134,8 @@ public sealed class FrameDenoiser
         return new FrameResult(output, baseline, correlated, model,
             Metrics.EstimateNoiseSigma(input), Metrics.EstimateNoiseSigma(denoised), baselineSigma);
     }
+
+    private static GrayImage NormalizeOwn(GrayImage frame) => Normalization.Apply(frame, Normalization.FromPercentiles(frame.Pixels));
 }
 
 /// <summary>
@@ -127,6 +162,7 @@ public static class BatchDenoising
     public static int DenoiseStack(FrameDenoiser denoiser, TiffStackReader input, TiffStackWriter output, TiffStackWriter? baseline = null,
         PageDone? onPage = null, CancellationToken cancellation = default)
     {
+        if (denoiser.Net.Config.InputFrames > 1) return DenoiseWindowed(denoiser, input, output, baseline, onPage, cancellation);
         long allocatedAtLastCollection = GC.GetTotalAllocatedBytes();
         for (int p = 0; p < input.PageCount; p++)
         {
@@ -137,21 +173,60 @@ public static class BatchDenoising
             baseline?.Append(result.Baseline!);
             onPage?.Invoke(p, raw, result);
 
-            // Each page leaves a few MB of finished frame buffers, all large-object-heap arrays, which the runtime only
-            // reclaims in full collections. On a machine with free memory it lets them pile up for hundreds of MB first
-            // (a 160-page 512² stack peaked at 850 MB). Collecting once per CollectEveryBytes of page garbage keeps
-            // the peak near the live working set, and costs nothing measurable at that spacing.
-            if (GC.GetTotalAllocatedBytes() - allocatedAtLastCollection > CollectEveryBytes)
-            {
-                GC.Collect();
-                allocatedAtLastCollection = GC.GetTotalAllocatedBytes();
-            }
+            CollectIfDue(ref allocatedAtLastCollection);
         }
         return input.PageCount;
     }
 
     /// <summary>Page garbage allowed to build up between the full collections <see cref="DenoiseStack"/> requests.</summary>
     private const long CollectEveryBytes = 64L << 20;
+
+    /// <summary>
+    /// Each page leaves a few MB of finished frame buffers, all large-object-heap arrays, which the runtime only reclaims
+    /// in full collections. On a machine with free memory it lets them pile up for hundreds of MB first (a 160-page 512²
+    /// stack peaked at 850 MB). Collecting once per <see cref="CollectEveryBytes"/> of page garbage keeps the peak near the
+    /// live working set, and costs nothing measurable at that spacing.
+    /// </summary>
+    private static void CollectIfDue(ref long allocatedAtLastCollection)
+    {
+        if (GC.GetTotalAllocatedBytes() - allocatedAtLastCollection <= CollectEveryBytes) return;
+        GC.Collect();
+        allocatedAtLastCollection = GC.GetTotalAllocatedBytes();
+    }
+
+    /// <summary>
+    /// A multi-frame model on a stack (brick 39): page t is denoised with its neighbours (<see cref="Sequences.FrameIndices"/>,
+    /// reflected at both ends), so frame t is written once t + 1 has been read. Only the model's window of pages is kept:
+    /// nothing older than t − k (k = frames / 2) outlives the step that reads t + k.
+    /// </summary>
+    private static int DenoiseWindowed(FrameDenoiser denoiser, TiffStackReader input, TiffStackWriter output, TiffStackWriter? baseline,
+        PageDone? onPage, CancellationToken cancellation)
+    {
+        int frames = denoiser.Net.Config.InputFrames, k = frames / 2, count = input.PageCount;
+        if (count < Sequences.MinimumFrames(frames))
+            throw new ArgumentException($"This model takes {frames} frames; the stack has {count} page(s), too few to give each frame neighbours.");
+        var window = new Dictionary<int, GrayImage>();
+        GrayImage Page(int i)
+        {
+            if (!window.TryGetValue(i, out var page)) window[i] = page = input.ReadPage(i);
+            return page;
+        }
+        long allocatedAtLastCollection = GC.GetTotalAllocatedBytes();
+        for (int t = 0; t < count; t++)
+        {
+            cancellation.ThrowIfCancellationRequested();
+            foreach (int old in window.Keys.Where(i => i < t - k).ToList()) window.Remove(old);   // older than the window
+            var indices = Sequences.FrameIndices(t, count, frames);
+            var raw = Page(t);
+            var context = indices.Where((_, j) => j != k).Select(Page).ToArray();
+            var result = denoiser.Denoise(raw, context, baseline is not null, cancellation);
+            output.Append(result.Output);
+            baseline?.Append(result.Baseline!);
+            onPage?.Invoke(t, raw, result);
+            CollectIfDue(ref allocatedAtLastCollection);
+        }
+        return count;
+    }
 
     /// <summary>
     /// Denoises one image file (TIFF, single page or stack, or PNG) into a float32 TIFF with the same number of pages.

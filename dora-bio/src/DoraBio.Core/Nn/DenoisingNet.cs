@@ -60,6 +60,17 @@ public sealed record NetConfig(int Features, int[] Dilations)
     /// <summary>True if the network needs a per-frame condition (see <see cref="NoiseConditioning"/>).</summary>
     public bool IsConditioned => Conditioning != NetConditioning.None;
 
+    /// <summary>
+    /// Frames the network sees at once (brick 39): 1 (the default) or 3 = (t−1, t, t+1), the spatiotemporal blind spot.
+    /// The input is [InputFrames, h, w], frames in time order; only the first layer is wider, and the residual is always
+    /// subtracted from the centre frame. Wider windows aren't allowed: reflecting t−2 at t = 1 lands on frame t itself,
+    /// which would hand the network the pixels its blind spot hides (<see cref="Data.Sequences.FrameIndices"/>).
+    /// </summary>
+    public int InputFrames { get; init; } = 1;
+
+    /// <summary>The input channel of the frame being denoised: InputFrames / 2.</summary>
+    public int CenterFrame => InputFrames / 2;
+
     /// <summary>A U-Net with <paramref name="features"/> channels at full resolution and <paramref name="depth"/> levels below it.</summary>
     /// <remarks>16 features and depth 2 cost about as much compute per pixel as <see cref="Default"/>, with 4.5× the parameters.</remarks>
     public static NetConfig UNet(int features = 16, int depth = 2) =>
@@ -96,6 +107,10 @@ public sealed record NetConfig(int Features, int[] Dilations)
     {
         if (Features <= 0) throw new ArgumentOutOfRangeException(nameof(Features), "Features must be positive.");
         if (!Enum.IsDefined(Conditioning)) throw new ArgumentOutOfRangeException(nameof(Conditioning));
+        if (InputFrames is not (1 or 3))
+            throw new ArgumentOutOfRangeException(nameof(InputFrames), "Input frames must be 1 or 3 (wider windows would reflect the centre frame into a neighbour channel).");
+        if (InputFrames > 1 && IsConditioned)
+            throw new ArgumentException("Noise conditioning works on single-frame networks only.", nameof(InputFrames));
         if (Architecture == NetArchitecture.UNet)
         {
             if (Depth is < 1 or > 4) throw new ArgumentOutOfRangeException(nameof(Depth), "U-Net depth must be 1 to 4.");
@@ -111,7 +126,8 @@ public sealed record NetConfig(int Features, int[] Dilations)
         ? $"U-Net, depth {Depth}, {string.Join("→", Enumerable.Range(0, Depth + 1).Select(l => Features << l))} features, " +
           $"{LayerCount} conv layers, receptive field up to {2 * ReceptiveRadius + 1}px"
         : $"{LayerCount} conv layers × {Features} features, dilations [{string.Join(",", Dilations)}], receptive field {2 * ReceptiveRadius + 1}px")
-        + (IsConditioned ? ", noise-conditioned (FiLM)" : "");
+        + (IsConditioned ? ", noise-conditioned (FiLM)" : "")
+        + (InputFrames > 1 ? $", {InputFrames} input frames" : "");
 
     /// <summary>Equal when the architecture, feature count, depth, conditioning and every dilation match.</summary>
     /// <remarks>
@@ -120,7 +136,7 @@ public sealed record NetConfig(int Features, int[] Dilations)
     /// </remarks>
     public bool Equals(NetConfig? other) =>
         other is not null && Architecture == other.Architecture && Features == other.Features && Depth == other.Depth
-        && Conditioning == other.Conditioning && Dilations.AsSpan().SequenceEqual(other.Dilations);
+        && Conditioning == other.Conditioning && InputFrames == other.InputFrames && Dilations.AsSpan().SequenceEqual(other.Dilations);
 
     /// <summary>Content-based hash, consistent with <see cref="Equals(NetConfig?)"/>.</summary>
     public override int GetHashCode()
@@ -130,6 +146,7 @@ public sealed record NetConfig(int Features, int[] Dilations)
         hash.Add(Features);
         hash.Add(Depth);
         hash.Add(Conditioning);
+        hash.Add(InputFrames);
         foreach (int d in Dilations) hash.Add(d);
         return hash.ToHashCode();
     }
@@ -208,10 +225,10 @@ public sealed partial class DenoisingNet
         Parameters = parameters ?? new float[offset];
     }
 
-    /// <summary>Dilated stack: 1 → Features → … → Features → 1 channels, one layer per dilation.</summary>
+    /// <summary>Dilated stack: InputFrames → Features → … → Features → 1 channels, one layer per dilation.</summary>
     private static List<(int In, int Out, int Dilation)> DilatedLayerShapes(NetConfig config) =>
         Enumerable.Range(0, config.Dilations.Length)
-            .Select(i => (i == 0 ? 1 : config.Features, i == config.Dilations.Length - 1 ? 1 : config.Features, config.Dilations[i]))
+            .Select(i => (i == 0 ? config.InputFrames : config.Features, i == config.Dilations.Length - 1 ? 1 : config.Features, config.Dilations[i]))
             .ToList();
 
     /// <summary>How many parameters a network with this architecture has (used to validate weight files).</summary>
@@ -255,8 +272,11 @@ public sealed partial class DenoisingNet
     /// <summary>Allocates scratch buffers for one thread. Reuse it across calls; it grows to the largest image seen.</summary>
     public Workspace CreateWorkspace() => new(this);
 
-    /// <summary>denoised = input − network(input), for one [height, width] plane.</summary>
-    /// <param name="input">Normalized noisy plane, row-major, <paramref name="height"/>×<paramref name="width"/> values.</param>
+    /// <summary>denoised = centre frame − network(input), for one [height, width] plane.</summary>
+    /// <param name="input">
+    /// Normalized noisy input, row-major: one plane of <paramref name="height"/>×<paramref name="width"/> values, or
+    /// <see cref="NetConfig.InputFrames"/> such planes one after another (time order) for a multi-frame network.
+    /// </param>
     /// <param name="height">Plane height in pixels.</param>
     /// <param name="width">Plane width in pixels.</param>
     /// <param name="output">Receives the denoised plane (same size). May not alias <paramref name="input"/>.</param>
@@ -267,24 +287,33 @@ public sealed partial class DenoisingNet
     public void Predict(ReadOnlySpan<float> input, int height, int width, Span<float> output, Workspace workspace,
         float condition = float.NaN)
     {
-        CheckPlane(input, height, width);
+        CheckInput(input, height, width);
+        var center = input.Slice(Config.CenterFrame * height * width, height * width);   // the whole input when single-frame
         int a = Config.TileAlignment;
         if (height % a == 0 && width % a == 0)
         {
             var residual = Forward(input, height, width, workspace, condition);
             for (int i = 0; i < residual.Length; i++)
-                output[i] = input[i] - residual[i];
+                output[i] = center[i] - residual[i];
             return;
         }
 
-        // U-Net on a size that isn't a multiple of 2^Depth: zero-pad at the bottom and right, then crop.
+        // U-Net on a size that isn't a multiple of 2^Depth: zero-pad every frame at the bottom and right, then crop.
         int ph = RoundUp(height, a), pw = RoundUp(width, a);
-        var padded = workspace.AlignedInput(ph * pw);
-        PadTo(input, height, width, padded, pw);
+        var padded = workspace.AlignedInput(Config.InputFrames * ph * pw);
+        PadFrames(input, height, width, padded, ph, pw);
         var paddedResidual = Forward(padded, ph, pw, workspace, condition);
         for (int y = 0; y < height; y++)
             for (int x = 0; x < width; x++)
-                output[y * width + x] = input[y * width + x] - paddedResidual[y * pw + x];
+                output[y * width + x] = center[y * width + x] - paddedResidual[y * pw + x];
+    }
+
+    /// <summary>Pads each of the input's frames into its own ph × pw plane of <paramref name="padded"/>.</summary>
+    private void PadFrames(ReadOnlySpan<float> input, int height, int width, Span<float> padded, int paddedHeight, int paddedWidth)
+    {
+        int plane = height * width, paddedPlane = paddedHeight * paddedWidth;
+        for (int f = 0; f < Config.InputFrames; f++)
+            PadTo(input.Slice(f * plane, plane), height, width, padded.Slice(f * paddedPlane, paddedPlane), paddedWidth);
     }
 
     private static int RoundUp(int value, int multiple) => (value + multiple - 1) / multiple * multiple;
@@ -304,7 +333,10 @@ public sealed partial class DenoisingNet
     /// An empty <paramref name="mask"/> means every pixel counts.
     /// Returns the unscaled Σ mask·(denoised − target)².
     /// </summary>
-    /// <param name="input">Network input: the noisy patch, or the blind-spot-masked patch in Noise2Void mode.</param>
+    /// <param name="input">
+    /// Network input: the noisy patch, or the blind-spot-masked patch in Noise2Void mode; for a multi-frame network,
+    /// <see cref="NetConfig.InputFrames"/> patches in time order, the blind spots only in the centre one.
+    /// </param>
     /// <param name="target">What the output should match: the clean patch (supervised) or the original noisy patch (Noise2Void).</param>
     /// <param name="mask">Per-pixel loss weight (0 or 1): every pixel in supervised mode, only the blind spots in Noise2Void.</param>
     /// <param name="height">Patch height.</param>
@@ -329,7 +361,7 @@ public sealed partial class DenoisingNet
         Workspace workspace,
         float condition = float.NaN)
     {
-        CheckPlane(input, height, width);
+        CheckInput(input, height, width);
         CheckPlane(target, height, width);
         if (!mask.IsEmpty) CheckPlane(mask, height, width);
         if (gradients.Length != ParameterCount) throw new ArgumentException("Gradient buffer has the wrong length.");
@@ -339,9 +371,9 @@ public sealed partial class DenoisingNet
         {
             // Pad input, target and mask; the padded pixels get mask 0, so they add nothing to the loss or gradients.
             int ph = RoundUp(height, a), pw = RoundUp(width, a);
-            var (bi, bt, bm) = workspace.AlignedTraining(ph * pw);
-            Span<float> pi = bi.AsSpan(0, ph * pw), pt = bt.AsSpan(0, ph * pw), pm = bm.AsSpan(0, ph * pw);
-            PadTo(input, height, width, pi, pw);
+            var (bi, bt, bm) = workspace.AlignedTraining(ph * pw, Config.InputFrames);
+            Span<float> pi = bi.AsSpan(0, Config.InputFrames * ph * pw), pt = bt.AsSpan(0, ph * pw), pm = bm.AsSpan(0, ph * pw);
+            PadFrames(input, height, width, pi, ph, pw);
             PadTo(target, height, width, pt, pw);
             if (mask.IsEmpty)
             {
@@ -354,9 +386,10 @@ public sealed partial class DenoisingNet
 
         var residual = Forward(input, height, width, workspace, condition);
         var gradResidual = workspace.LossGradient.AsSpan(0, residual.Length);
+        var center = input.Slice(Config.CenterFrame * height * width, height * width);
 
         // Loss gradient with respect to the network's raw output (the predicted noise r):
-        //   denoised = input − r,  loss_i = scale · m_i · (denoised_i − target_i)²
+        //   denoised = centre frame − r,  loss_i = scale · m_i · (denoised_i − target_i)²
         //   ∂loss_i/∂r_i = scale · m_i · 2 · (denoised_i − target_i) · (−1)
         // Pixels outside the mask contribute nothing, which is what makes Noise2Void's blind spots work.
         double sse = 0;
@@ -364,7 +397,7 @@ public sealed partial class DenoisingNet
         {
             float m = mask.IsEmpty ? 1f : mask[i];
             if (m == 0f) { gradResidual[i] = 0f; continue; }
-            float diff = input[i] - residual[i] - target[i];
+            float diff = center[i] - residual[i] - target[i];
             sse += m * diff * (double)diff;
             gradResidual[i] = -2f * scale * m * diff;
         }
@@ -454,6 +487,16 @@ public sealed partial class DenoisingNet
             if (values[i] < 0f) values[i] = 0f;
     }
 
+    /// <summary>Checks a network input: InputFrames planes of height × width.</summary>
+    private void CheckInput(ReadOnlySpan<float> input, int height, int width)
+    {
+        if (height <= 0 || width <= 0) throw new ArgumentOutOfRangeException(nameof(height));
+        if (input.Length != Config.InputFrames * height * width)
+            throw new ArgumentException(Config.InputFrames == 1
+                ? $"Expected a {width}x{height} plane ({height * width} values), got {input.Length}."
+                : $"Expected {Config.InputFrames} frames of {width}x{height} ({Config.InputFrames * height * width} values), got {input.Length}.");
+    }
+
     private static void CheckPlane(ReadOnlySpan<float> plane, int height, int width)
     {
         if (height <= 0 || width <= 0) throw new ArgumentOutOfRangeException(nameof(height));
@@ -502,10 +545,13 @@ public sealed partial class DenoisingNet
             return _alignedInput.AsSpan(0, length);
         }
 
-        /// <summary>Padding buffers for <see cref="AccumulateGradients"/> on unaligned sizes (input, target, mask), at least <paramref name="length"/> long.</summary>
-        internal (float[] Input, float[] Target, float[] Mask) AlignedTraining(int length)
+        /// <summary>
+        /// Padding buffers for <see cref="AccumulateGradients"/> on unaligned sizes: the input (<paramref name="frames"/> planes)
+        /// and the target and mask (one plane each), every plane at least <paramref name="length"/> long.
+        /// </summary>
+        internal (float[] Input, float[] Target, float[] Mask) AlignedTraining(int length, int frames = 1)
         {
-            AlignedInput(length);
+            AlignedInput(frames * length);
             if (_alignedTarget.Length < length)
             {
                 _alignedTarget = new float[length];

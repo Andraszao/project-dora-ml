@@ -20,8 +20,10 @@ public static class Program
         Commands:
           synth    --out DIR [--count 8] [--size 256 | --width W --height H] [--seed 1] [--peak 25] [--stack FILE.tif]
                    (--stack also writes the noisy frames as one multi-page uint16 TIFF)
+                   [--sequence N [--drift D]]  (instead: COUNT time-lapses of N frames, one scene each, moving D px right
+                    per frame, as DIR/noisy/seq_000.tif stacks with DIR/clean/ truth; for train --frames / --mode n2n)
                    Write a synthetic dataset: DIR/noisy/*.tif (uint16) and DIR/clean/*.tif (float32).
-          train    --data DIR --out WEIGHTS.bin [--mode n2v|supervised] [--epochs 30] [--steps 50]
+          train    --data DIR --out WEIGHTS.bin [--mode n2v|supervised|n2n] [--epochs 30] [--steps 50]
                    [--batch 16] [--patch 64] [--lr 0.001] [--journey FILE.json] [--seed 1234]
                    [--arch dilated|unet] [--features 24 (dilated) / 16 (unet)] [--depth 2 (unet)]
                    [--condition none|noise]  (noise: tell the network each frame's noise level, FiLM; quality pass Q13)
@@ -39,6 +41,10 @@ public static class Program
                     correlated noise; auto = only on images whose noise check flags them)
                    [--subset correlated|independent]  (train only on the images whose noise check says so)
                    [--vst]  (Noise2Void in the variance-stabilized domain; apply the model with --vst too)
+                   Time-lapses (brick 39; --data is a stack file or a folder of stacks, every plane a frame):
+                    [--frames 3]  (Noise2Void with the spatiotemporal blind spot: input t-1, t, t+1, blind spots in t only)
+                    [--mode n2n]  (Noise2Noise from neighbouring frames: t -> t+1 and t+1 -> t; one input frame only)
+                    [--frame-block 32]  (frames per validation group, so one long time-lapse still splits by time)
                    FMD folders: [--fmd-frames 4] [--fmd-levels raw,avg2,avg4,avg8,avg16] [--fmd-categories A,B]
                    External sets: --ext NAME [--data data/ext]  (its training split from tools/fetch_ext.sh; supervised
                     pairs are normalized each by their own percentiles; --mode n2v uses the noisy images alone)
@@ -166,6 +172,22 @@ public static class Program
         var synthOptions = new SyntheticOptions { PeakPhotons = o.Double("peak", 25) };
         Directory.CreateDirectory(Path.Combine(outDir, "noisy"));
         Directory.CreateDirectory(Path.Combine(outDir, "clean"));
+        if (o.Has("sequence"))
+        {
+            // Time-lapses (brick 39): one scene per sequence, every frame with its own noise, the scene drifting right.
+            int frames = o.Int("sequence", 8), drift = o.Int("drift", 0);
+            if (frames < 1) throw new ArgumentException("--sequence must be at least 1.");
+            if (drift < 0) throw new ArgumentException("--drift must be 0 or more.");
+            for (int i = 0; i < count; i++)
+            {
+                var sequence = SyntheticFluorescence.GenerateSequence(width, height, frames, seed + 7919 * i, drift, synthOptions);
+                string name = $"seq_{i:D3}.tif";
+                File.WriteAllBytes(Path.Combine(outDir, "noisy", name), TiffCodec.EncodeStack(sequence.Select(f => f.Noisy).ToList(), TiffSampleType.UInt16));
+                File.WriteAllBytes(Path.Combine(outDir, "clean", name), TiffCodec.EncodeStack(sequence.Select(f => f.Clean).ToList(), TiffSampleType.Float32));
+            }
+            Console.WriteLine($"🎞 wrote {count} synthetic time-lapse(s) of {frames} {width}×{height} frames (drift {drift} px/frame, peak {synthOptions.PeakPhotons} photons) to {outDir}");
+            return 0;
+        }
 
         var noisyFrames = new List<GrayImage>();
         for (int i = 0; i < count; i++)
@@ -193,8 +215,24 @@ public static class Program
     private static int Train(Options o)
     {
         bool vst = o.Has("vst");
+        int frames = o.Int("frames", 1);
+        string? modeOption = o.StringOrNull("mode");
+        bool neighbourPairs = modeOption is "n2n" or "noise2noise";
+        if (neighbourPairs && frames != 1)
+            throw new ArgumentException("Noise2Noise takes one input frame (--frames 1): with several, its target would be part of the input.");
+        bool timeLapse = frames > 1 || neighbourPairs;
         List<ImagePair> dataset;
-        if (o.StringOrNull("ext") is { } extName)
+        if (timeLapse)
+        {
+            // Time-lapses (brick 39): a stack file or a folder of stacks; every plane is a frame.
+            if (o.Has("ext") || o.Has("vst") || o.Has("fmd-frames") || o.Has("fmd-levels") || o.Has("fmd-categories"))
+                throw new ArgumentException("--frames and --mode n2n train on time-lapse stacks (--data FILE.tif or a folder of stacks).");
+            if (!neighbourPairs && modeOption is not (null or "n2v" or "noise2void"))
+                throw new ArgumentException("--frames 3 is the spatiotemporal blind spot, a Noise2Void mode (--mode n2v).");
+            dataset = Sequences.Load(o.Required("data"), neighbourPairs ? TrainingMode.Noise2Noise : TrainingMode.Noise2Void,
+                frames, o.Int("frame-block", Sequences.DefaultBlockSize));
+        }
+        else if (o.StringOrNull("ext") is { } extName)
         {
             // An external dataset's training split (field validation, Q18): supervised on its pairs, or Noise2Void on its
             // noisy images alone. Its test split is never loaded here.
@@ -205,12 +243,13 @@ public static class Program
             dataset = ExtDatasets.LoadTraining(o.String("data", "data/ext"), ext, supervised);
         }
         else dataset = DatasetLoader.LoadDirectory(o.Required("data"), FmdOptionsFrom(o), vst ? VarianceStabilization.Stabilize : null);
-        var mode = o.String("mode", dataset.All(d => d.HasClean) ? "supervised" : "n2v") switch
-        {
-            "n2v" or "noise2void" => TrainingMode.Noise2Void,
-            "supervised" => TrainingMode.Supervised,
-            var m => throw new ArgumentException($"Unknown mode '{m}' (use n2v or supervised)."),
-        };
+        var mode = timeLapse ? (neighbourPairs ? TrainingMode.Noise2Noise : TrainingMode.Noise2Void)
+            : o.String("mode", dataset.All(d => d.HasClean) ? "supervised" : "n2v") switch
+            {
+                "n2v" or "noise2void" => TrainingMode.Noise2Void,
+                "supervised" => TrainingMode.Supervised,
+                var m => throw new ArgumentException($"Unknown mode '{m}' (use n2v, supervised or n2n)."),
+            };
 
         var config = new TrainerConfig
         {
@@ -302,6 +341,7 @@ public static class Program
                 "noise" => architecture with { Conditioning = NetConditioning.NoiseLevel },
                 var c => throw new ArgumentException($"Unknown --condition '{c}' (use none or noise)."),
             };
+            architecture = architecture with { InputFrames = frames };
             architecture.Validate();
             net = DenoisingNet.Create(architecture, config.Seed);
         }
@@ -348,6 +388,7 @@ public static class Program
         int withClean = dataset.Count(d => d.HasClean);
         string cleanUse = withClean == 0 ? "no clean images"
             : mode == TrainingMode.Noise2Void ? $"{withClean} clean images used only to score validation"
+            : mode == TrainingMode.Noise2Noise ? $"{withClean} neighbouring-frame pairs, no ground truth"
             : $"{withClean} clean targets";
         string description = (o.StringOrNull("describe")
             ?? $"{dataset.Count} images from '{o.StringOrNull("ext") ?? Path.GetFileName(Path.GetFullPath(o.Required("data")))}' ({cleanUse})") + structure;

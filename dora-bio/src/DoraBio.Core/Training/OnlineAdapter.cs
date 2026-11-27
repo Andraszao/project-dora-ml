@@ -42,6 +42,8 @@ public sealed class OnlineAdapter
     {
         _net = net;
         _optimizer = new AdamOptimizer(net.ParameterCount, learningRate) { ClipNorm = 1.0f };
+        if (net.Config.InputFrames > 1)
+            throw new ArgumentException("Adapting to one image needs a single-frame model; this one takes several frames.");
         _stepper = new BatchStepper(net, batchSize, patchSize);
         _rng = new Random(seed);
         _maskRatio = maskRatio;
