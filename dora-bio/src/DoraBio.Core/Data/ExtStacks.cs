@@ -73,6 +73,8 @@ public static class ExtStacks
             [new("*_lowSNR.tif", "_lowSNR", "_highSNR", "TYX", 1, 9800)]),
         new("deepcad-neutrophils", "DeepCAD-RT mouse neutrophils (motile): 6,440 + 5,706 frames, low/high SNR",
             [new("*_lowSNR.tif", "_lowSNR", "_highSNR", "TYX", 2, 6440 + 5706)]),
+        new("deepcad-neutrophils-02", "DeepCAD-RT mouse neutrophils, pair 02 only (motile): 5,706 frames, low/high SNR (brick 40's subset)",
+            [new("*_lowSNR.tif", "_lowSNR", "_highSNR", "TYX", 1, 5706)]),
         new("deepcad-zebrafish-ot", "DeepCAD-RT zebrafish optic tectum: 6,955 two-photon frames, low/high SNR (BigTIFF)",
             [new("*_lowSNR.tif", "_lowSNR", "_highSNR", "TYX", 1, 6955)]),
     ];

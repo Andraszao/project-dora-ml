@@ -74,7 +74,8 @@ public static class Program
           stack-export --dataset mdc25-tribolium-2d|biosr-ccps-2d [--root data/ext]
                    Write a derived 2D set from its downloaded stack set (the scoreboard's splits, brick 38); then train
                    --ext and ext-eval take it like a downloaded set.
-          noise-residual (--dataset NAME [--root data/ext] | --fmd data/fmd) [--only PREFIX]
+          noise-residual (--dataset NAME [--root data/ext] | --fmd data/fmd | --stack LOW.tif --reference HIGH.tif
+                    [--frames 24] [--offset dt,dx,dy]) [--only PREFIX]
                    The real noise correlation of a set's test pairs, per axis and region (background, interiors, edges),
                    from (noisy - matched reference) / sqrt(reference); next to the blind check's verdicts on the same images.
           fmd-export --root data/fmd --out DIR
@@ -633,17 +634,47 @@ public static class Program
     /// </summary>
     private static int NoiseResidualCommand(Options o)
     {
-        List<(string Name, string NoisyPath, string CleanPath)> plan;
+        // Each entry loads one (noisy, reference) pair when measured, so only one pair is in memory at a time.
+        List<(string Name, Func<(GrayImage Noisy, GrayImage Reference)> Load)> plan;
         string scope;
         if (o.StringOrNull("fmd") is { } fmdRoot)
         {
-            plan = FmdDataset.PlanTestMix(Path.Combine(fmdRoot, "test_mix"), "raw").Select(p => (Path.GetFileName(p.NoisyPath), p.NoisyPath, p.CleanPath)).ToList();
+            plan = FmdDataset.PlanTestMix(Path.Combine(fmdRoot, "test_mix"), "raw")
+                .Select(p => (Path.GetFileName(p.NoisyPath), (Func<(GrayImage, GrayImage)>)(() => (ImageLoader.Load(p.NoisyPath), ImageLoader.Load(p.CleanPath))))).ToList();
             scope = "FMD test_mix raw";
+        }
+        else if (o.StringOrNull("stack") is { } stackPath)
+        {
+            // A time-lapse and its high-SNR movie (before brick 40): frames sampled evenly over the movie; --offset dt,dx,dy
+            // pairs noisy frame t with reference frame t + dt moved by (dx, dy), both cropped to their shared interior.
+            string referencePath = o.Required("reference");
+            var offset = o.String("offset", "0,0,0").Split(',').Select(v => int.Parse(v.Trim(), CultureInfo.InvariantCulture)).ToArray();
+            if (offset.Length != 3) throw new ArgumentException("--offset is dt,dx,dy (three integers).");
+            int dt = offset[0], dx = offset[1], dy = offset[2];
+            using var probe = ImageStack.Open(stackPath);
+            int frames = probe.PlaneCount, samples = Math.Min(o.Int("frames", 24), frames);
+            using (var reference = ImageStack.Open(referencePath))
+                if (reference.PlaneCount != frames || reference.Width != probe.Width || reference.Height != probe.Height)
+                    throw new ArgumentException("The stack and its reference must have the same frames and size.");
+            int width = probe.Width - Math.Abs(dx), height = probe.Height - Math.Abs(dy);
+            var indices = Enumerable.Range(0, samples).Select(k => (int)((long)k * (frames - 1) / Math.Max(1, samples - 1)))
+                .Where(t => t + dt >= 0 && t + dt < frames).Distinct().ToList();
+            plan = indices.Select(t => ($"t{t}", (Func<(GrayImage, GrayImage)>)(() =>
+            {
+                using var noisyStack = ImageStack.Open(stackPath);
+                using var referenceStack = ImageStack.Open(referencePath);
+                // Reference pixel (x + dx, y + dy) pairs with noisy pixel (x, y); the shared interior drops |dx|, |dy| edges.
+                var noisy = noisyStack.ReadPlane(t).Crop(Math.Max(0, -dx), Math.Max(0, -dy), width, height);
+                var matched = referenceStack.ReadPlane(t + dt).Crop(Math.Max(0, dx), Math.Max(0, dy), width, height);
+                return (noisy, matched);
+            }))).ToList();
+            scope = $"{Path.GetFileName(stackPath)}, {indices.Count} frames sampled evenly, reference offset dt {dt}, dx {dx}, dy {dy}";
         }
         else
         {
             var dataset = ExtDatasets.Get(o.Required("dataset"));
-            plan = ExtDatasets.PlanPairs(o.String("root", "data/ext"), dataset, ExtSplit.Test).Select(p => (Path.GetFileName(p.NoisyPath), p.NoisyPath, p.CleanPath)).ToList();
+            plan = ExtDatasets.PlanPairs(o.String("root", "data/ext"), dataset, ExtSplit.Test)
+                .Select(p => (Path.GetFileName(p.NoisyPath), (Func<(GrayImage, GrayImage)>)(() => (ImageLoader.Load(p.NoisyPath), ImageLoader.Load(p.CleanPath))))).ToList();
             scope = $"{dataset.Name} test";
         }
         if (o.StringOrNull("only") is { } prefix)
@@ -659,7 +690,7 @@ public static class Program
         {
             foreach (var p in plan)
             {
-                var noisy = ImageLoader.Load(p.NoisyPath);
+                var (noisy, referenceImage) = p.Load();
                 try
                 {
                     var d = NoiseDiagnostics.Diagnose(noisy);
@@ -669,7 +700,7 @@ public static class Program
                     down.Add(d.Down1);
                 }
                 catch (ArgumentException) { }   // too few flat tiles to judge
-                yield return (noisy, ImageLoader.Load(p.CleanPath));
+                yield return (noisy, referenceImage);
             }
         }
         var rows = NoiseResidual.Measure(Pairs());

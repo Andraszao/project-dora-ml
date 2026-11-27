@@ -134,8 +134,17 @@
       "content": "two-photon time-lapses of motile neutrophils, 6,440 and 5,706 frames of 512x512, paired low/high SNR; ImageJ stacks, uint16, big-endian",
       "files": [{"file": "01_neutrophil_0.349umPerPixel_512x512x6440_lowSNR.tif", "size": 3378037024, "md5": "edec267c02cd988fd84676e05acf0b8c", "sha256": null, "unpack": "file"},
                 {"file": "01_neutrophil_0.349umPerPixel_512x512x6440_highSNR.tif", "size": 3378049908, "md5": "d9510a2cc5ed9498f436ff97a79e91dd", "sha256": null, "unpack": "file"},
-                {"file": "02_neutrophil_0.465umPerPixel_512x512x5706_lowSNR.tif", "size": 2993024664, "md5": "68a6a4282f82a0fbedd94d5c04133b77", "sha256": null, "unpack": "file"},
-                {"file": "02_neutrophil_0.465umPerPixel_512x512x5706_highSNR.tif", "size": 2993036080, "md5": "3f33cb2ed33fb40221bb1eb5691f7520", "sha256": null, "unpack": "file"}]
+                {"file": "02_neutrophil_0.465umPerPixel_512x512x5706_lowSNR.tif", "size": 2993024664, "md5": "68a6a4282f82a0fbedd94d5c04133b77", "sha256": "0e5acb51c7251480aad69cfad0dbbba498f407b5f78363014e9a72c8c085c4e5", "unpack": "file"},
+                {"file": "02_neutrophil_0.465umPerPixel_512x512x5706_highSNR.tif", "size": 2993036080, "md5": "3f33cb2ed33fb40221bb1eb5691f7520", "sha256": "ea2863fce195f74be540b362d8a2f148b20c4c9f5c7c4cf2dd694aba0528d683", "unpack": "file"}]
+    },
+    {
+      "name": "deepcad-neutrophils-02", "tier": "full", "licence": "CC-BY-4.0", "use": "train",
+      "doi": "10.5281/zenodo.6296569", "creators": "Xinyang Li",
+      "title": "DeepCAD-RT dataset: mouse brain neutrophils (pair 02 only)",
+      "citation": "Li et al., \"Real-time denoising enables high-sensitivity fluorescence time-lapse imaging beyond the shot-noise limit\", Nature Biotechnology 41, 282-292 (2023)",
+      "content": "pair 02 of the record only: a two-photon time-lapse of motile neutrophils, 5,706 frames of 512x512, paired low/high SNR; ImageJ stacks, uint16, big-endian. The subset brick 40 uses within the disk budget; the same Zenodo record and files as deepcad-neutrophils",
+      "files": [{"file": "02_neutrophil_0.465umPerPixel_512x512x5706_lowSNR.tif", "size": 2993024664, "md5": "68a6a4282f82a0fbedd94d5c04133b77", "sha256": "0e5acb51c7251480aad69cfad0dbbba498f407b5f78363014e9a72c8c085c4e5", "unpack": "file"},
+                {"file": "02_neutrophil_0.465umPerPixel_512x512x5706_highSNR.tif", "size": 2993036080, "md5": "3f33cb2ed33fb40221bb1eb5691f7520", "sha256": "ea2863fce195f74be540b362d8a2f148b20c4c9f5c7c4cf2dd694aba0528d683", "unpack": "file"}]
     },
     {
       "name": "deepcad-zebrafish-ot", "tier": "full", "licence": "CC-BY-4.0", "use": "train",

@@ -784,6 +784,14 @@ gate_38() {   # scoreboard (brick 38, pre-registered in PATHWAY.md, commit f91af
   code=0
   dotnet "$CLI_DLL" fmd-eval --weights x.bin --predictions "$LOG_DIR" --root "$LOG_DIR" >/dev/null 2>&1 || code=$?
   [[ $code -eq 2 ]] || { echo ">> fmd-eval with both --weights and --predictions should fail with exit 2, got $code"; return 1; }
+  # noise-residual on a time-lapse and its reference (before brick 40): frames sampled, offset applied, borders cropped.
+  local s="$LOG_DIR/stackpair" out
+  dotnet "$CLI_DLL" synth --out "$s" --count 1 --size 48 --sequence 6 --seed 4 >/dev/null || return 1
+  out="$(dotnet "$CLI_DLL" noise-residual --stack "$s/noisy/seq_000.tif" --reference "$s/clean/seq_000.tif" --frames 4 --offset 1,1,0)" || return 1
+  grep -q "3 frames sampled evenly, reference offset dt 1, dx 1, dy 0, 3 pairs" <<< "$out" || { echo ">> noise-residual --stack didn't sample and offset as asked:"; echo "$out" | head -3; return 1; }
+  out="$(dotnet "$CLI_DLL" noise-residual --stack "$s/noisy/seq_000.tif" --reference "$s/clean/seq_000.tif" --frames 6)" || return 1
+  awk '$1 == "all" { exit !($3 > -0.1 && $3 < 0.1 && $4 > -0.1 && $4 < 0.1) }' <<< "$out" \
+    || { echo ">> independent synthetic noise against its own truth should correlate near 0:"; echo "$out" | grep "^all"; return 1; }
   # With the data and the runs: every score again, from the saved weights and outputs.
   local r=runs/scoreboard
   for b in "$FMD/test_mix/.complete" "$EXT/deepbacs-mreb/.complete" "$EXT/mdc25-tribolium-2d/.complete" "$EXT/biosr-ccps-2d/.complete" \
@@ -812,6 +820,13 @@ gate_38() {   # scoreboard (brick 38, pre-registered in PATHWAY.md, commit f91af
     echo ">> RESULTS.md block 'diag-unet-unrouted' differs from a fresh run:"; diff <(recorded_block diag-unet-unrouted) <(echo "$fresh") | head; return 1
   fi
   echo ">> the Tribolium diagnostic reproduces"
+  # Before brick 40: the DeepCAD-RT pairs' noise against their high-SNR movies.
+  local z="$EXT/deepcad-zebrafish-ot/01_ZebrafishOT_GCaMP6s_492x492x6955" n="$EXT/deepcad-neutrophils-02/02_neutrophil_0.465umPerPixel_512x512x5706"
+  [[ -f "$EXT/deepcad-zebrafish-ot/.complete" && -f "$EXT/deepcad-neutrophils-02/.complete" ]] \
+    || { echo "DeepCAD-RT residual reproduction skipped (needs deepcad-zebrafish-ot and deepcad-neutrophils-02 in data/ext)"; return 77; }
+  reproduces diag-residual-zebrafish noise-residual --stack "${z}_lowSNR.tif" --reference "${z}_highSNR.tif" --frames 24 || return 1
+  reproduces diag-residual-neutrophils noise-residual --stack "${n}_lowSNR.tif" --reference "${n}_highSNR.tif" --frames 24 || return 1
+  echo ">> the DeepCAD-RT residual blocks reproduce"
 }
 
 gate_39() {   # temporal (brick 39: Noise2Noise from neighbouring frames, the spatiotemporal blind spot)

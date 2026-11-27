@@ -707,7 +707,9 @@ CARE 2D is Q18's run (same script and protocol); everything else was run for thi
 - **Training time:** DORA 146–321 s per set, CAREamics 187–326 s, on the same 4-core CPU. DORA's longest is FMD (two
   networks), and it overlapped a test build on this shared machine, so it is if anything overstated.
 - **Not scored, as stated in advance:** the 2024 challenge sets (the organisers hold the references) and DeepCAD-RT (no
-  frame-aligned reference). **One deviation:** the pre-registration said the script would take Planaria and the other four
+  frame-aligned reference; **corrected after the run**: that reason was wrong, see
+  [the alignment check](#before-brick-40-are-deepcad-rts-high-snr-movies-frame-aligned-references), and both DeepCAD-RT pairs
+  here are aligned references). **One deviation:** the pre-registration said the script would take Planaria and the other four
   BioSR+ structures once downloaded; it doesn't yet, because each needs a split rule like Tribolium's and BioSR+ CCPs',
   which would have to be fixed in advance too. The first run's reading step failed on an awk syntax error (fixed in
   `tools/experiments/scoreboard_reading.awk`, which gate 38 also uses); no score was computed differently.
@@ -758,6 +760,59 @@ small to judge? Two measurements, both reproduced by gate 38:
   to the measured correlation (taller than it is wide) is a candidate quality pass, to be chosen on validation data.
   Every method gains less than 1 dB here: single 64 × 64 slices of very low-exposure 3D data are hard without context,
   which stage 3's neighbouring-slice input is meant to add.
+
+## Before brick 40: are DeepCAD-RT's high-SNR movies frame-aligned references?
+
+Measured before brick 40's pre-registration, to decide whether its motile time-lapses can be scored against a reference.
+**This corrects an earlier statement.** Brick 34's notes and brick 38's pre-registration said DeepCAD-RT's high-SNR movie
+"is not a frame-aligned reference", because blurred matched frames correlated barely more than frames 50 apart. That test
+was flawed: in these movies most of the signal is static anatomy, which correlates at any time lag, so it can't tell an
+aligned pair from a misaligned one.
+
+- **The sweep** (`tools/experiments/align_sweep.py`, run with the CAREamics venv's Python; not gate-reproduced, it takes
+  minutes per movie): blur both movies, then correlate low-SNR frames t with high-SNR frames t + Δt moved by (Δx, Δy), for
+  Δt ∈ −2…2 and Δx, Δy ∈ −5…5 px, on the shared interior only, in an early, a middle and a late block of 32 frames. With
+  `--dynamic 64` each pixel's mean over about 64 frames is subtracted first, so only what changes in time is compared.
+- **Both pairs are synchronised with no spatial offset.** On the time-varying signal, (Δt, Δx, Δy) = (0, 0, 0) is the best
+  or tied-best offset in every block, frames 50 apart correlate at about zero or below, and the best neighbouring
+  whole-pixel shift scores lower, so no sub-pixel offset is hiding. The raw test's Δt = −1 for the neutrophils is a tie
+  at the third decimal with Δt = 0, from the static background.
+
+<!-- align-zebrafish -->
+```text
+ block  best (dt,dx,dy)   corr   zero   t+50   2nd best shift   corr
+dynamic: each pixel's mean over ~64 frames around the block subtracted from both movies
+   100        (0, 0, 0)  0.248  0.248 -0.071        (0, 0, 1)  0.245
+  3477       (0, 2, -1)  0.026  0.025  0.001       (0, 1, -1)  0.026
+  6823        (0, 0, 0)  0.062  0.062 -0.001        (0, 1, 0)  0.062
+```
+<!-- /align-zebrafish -->
+
+<!-- align-neutrophils -->
+```text
+02_neutrophil_0.465umPerPixel_512x512x5706_lowSNR.tif: 5706 frames of 512x512, 8 frames per block, blur sigma 2.0
+ block  best (dt,dx,dy)   corr   zero   t+50   2nd best shift   corr
+   100       (-1, 0, 0)  0.919  0.919  0.871      (-1, -1, 0)  0.907
+  2853       (-1, 0, 0)  0.894  0.894  0.846      (-1, -1, 0)  0.882
+  5598        (0, 0, 0)  0.884  0.884  0.846       (0, -1, 0)  0.874
+ block  best (dt,dx,dy)   corr   zero   t+50   2nd best shift   corr
+dynamic: each pixel's mean over ~64 frames around the block subtracted from both movies
+   100        (0, 0, 0)  0.264  0.264 -0.070       (0, -1, 0)  0.254
+  2853        (0, 0, 0)  0.119  0.119 -0.061       (0, -1, 0)  0.114
+  5574        (0, 0, 0)  0.106  0.106 -0.030        (0, 0, 1)  0.101
+```
+<!-- /align-neutrophils -->
+
+- **Their noise is close to independent**, per the reference residual (blocks `diag-residual-zebrafish` and
+  `diag-residual-neutrophils` below, gate-reproduced with the data): about 0 along both axes in background, interiors and
+  edges, and the blind check calls none of 24 sampled frames correlated (both show a slight negative horizontal
+  correlation, −0.12 to −0.13 in the blind estimate, probably from the readout). So DORA's router will send these frames
+  to the U-Net, and the residual has no edge structure, as misalignment would leave.
+- **What this changes.** DeepCAD-RT can be scored against its high-SNR movies, pixel for pixel. Brick 38's reading is
+  unaffected (it counted the five sets it scored), but its "not scored" reason for DeepCAD-RT was wrong, and brick 40
+  can use both pairs as reference-scored time-lapses: the zebrafish (calcium transients, mostly still) and the neutrophils
+  (motile). Pair 02 of the neutrophil record was fetched as its own manifest entry (`deepcad-neutrophils-02`, 5.6 GiB,
+  SHA-256 pinned) to fit the disk.
 
 ## Systems S1 + S2 (brick 36): where the time goes, and 512-bit kernels
 
@@ -2200,3 +2255,30 @@ mean          17.78 / 0.333   17.82 / 0.342   17.80 / 0.332
 mean, unrounded: noisy 17.7844 dB, bilateral 17.8196 dB, method 17.7958 dB
 ```
 <!-- /diag-unet-unrouted -->
+
+Before brick 40: `dora-bio noise-residual --stack LOW.tif --reference HIGH.tif --frames 24` for the DeepCAD-RT zebrafish
+pair and neutrophil pair 02. Gate 38 re-runs them when the data is present.
+
+<!-- diag-residual-zebrafish -->
+```text
+01_ZebrafishOT_GCaMP6s_492x492x6955_lowSNR.tif, 24 frames sampled evenly, reference offset dt 0, dx 0, dy 0, 24 pairs: correlation of the noise residual (noisy − matched reference) / √reference with a neighbour
+region          pixels  right 1  down 1 right 2  down 2
+background     2033881   -0.071   0.029  -0.060   0.023
+interior        982315   -0.038   0.031  -0.045   0.017
+edges          1161936   -0.030   0.038  -0.075   0.016
+all            5809536   -0.060   0.024  -0.071   0.012
+blind check (noisy image only, threshold 0.40): 0 of 24 judged images called correlated (0 too small to judge); median estimate right 1 -0.119, down 1 -0.005
+```
+<!-- /diag-residual-zebrafish -->
+
+<!-- diag-residual-neutrophils -->
+```text
+02_neutrophil_0.465umPerPixel_512x512x5706_lowSNR.tif, 24 frames sampled evenly, reference offset dt 0, dx 0, dy 0, 24 pairs: correlation of the noise residual (noisy − matched reference) / √reference with a neighbour
+region          pixels  right 1  down 1 right 2  down 2
+background     2233553   -0.061   0.009   0.016   0.011
+interior        943097   -0.020   0.027   0.048   0.042
+edges          1258320    0.013   0.060   0.051   0.047
+all            6291456   -0.038   0.029   0.021   0.023
+blind check (noisy image only, threshold 0.40): 0 of 24 judged images called correlated (0 too small to judge); median estimate right 1 -0.133, down 1 -0.013
+```
+<!-- /diag-residual-neutrophils -->
