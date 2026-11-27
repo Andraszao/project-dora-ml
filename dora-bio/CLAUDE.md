@@ -92,8 +92,10 @@ FMD; by its reading brick 39 starts with Noise2Noise. A post-hoc diagnostic conf
 axis (so its routing is right). Brick 39 built Noise2Noise from neighbouring frames (single-frame input only) and the 3-frame
 spatiotemporal blind spot (`train --frames 3`). Brick 40 (Track A) compared them and a skip-centre Noise2Noise (built in it) on
 DeepCAD-RT's zebrafish and neutrophil movies: the pre-registered rule adopted skip-centre, but post-hoc readouts found it
-flickers frame to frame, so no time-lapse mode is a default (owner veto, disclosed; `seq-diagnose`). Next, in the owner's
-order: a docs fix, a wild-data check, then pilot readiness, before Track B (N2V2). Owner decisions there: GPU training is
+flickers frame to frame, so no time-lapse mode is a default (owner veto, disclosed; `seq-diagnose`). A wild-data check on
+uncurated public stacks followed (RESULTS.md, "Before brick 41"). Next, in the owner's order: pilot readiness (41a core
+and CLI correctness, 41b the Godot app as the pilot's face, 42 checking a result without ground truth plus a Fiji bridge,
+43 pre-pilot safety), a blind score and the pilot, then Track B (N2V2, 44–45). Owner decisions there: GPU training is
 an optional offline step, GPU inference is approved only as an opt-in forward path in the Godot app (S10; the CPU
 engine stays the reference and the CLI's engine), and the shipped model is trained only on synthetic and
 CC BY / CC0 data, with FMD kept for evaluation.
