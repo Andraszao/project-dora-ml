@@ -24,7 +24,7 @@ COMMON=(--data data/ext --steps 50 --batch 16 --patch 64 --seed 2026 --journey "
 for d in "${DATASETS[@]}"; do
   if [[ ! -f "$OUT/dora_n2v_$d.bin" ]]; then
     echo "=== DORA Noise2Void on $d"
-    "${CLI[@]}" train --ext "$d" "${COMMON[@]}" --mode n2v --epochs 30 --out "$OUT/dora_n2v_$d.bin" \
+    "${CLI[@]}" train --ext "$d" "${COMMON[@]}" --mode n2v --route off --epochs 30 --out "$OUT/dora_n2v_$d.bin" \
       --describe "$d training split, noisy images only: DORA Noise2Void, default recipe" > "$OUT/dora_n2v_$d.train.log"
     tail -1 "$OUT/dora_n2v_$d.train.log"
   fi

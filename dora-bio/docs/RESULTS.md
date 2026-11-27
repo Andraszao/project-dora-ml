@@ -625,8 +625,8 @@ noise check (P3's design 2) keep the gains and avoid the loss?
 | **Q19: U-Net (rule C) + P3's correlated network, routed** | **33.2439** | **34.45** | **32.86** | 31.76 | **26.80** | **34.42** | 19.12 | **26.780** | **0.96** |
 
 - **Not adopted, by one floor.** Every bar is met except CARE 2D's: 19.12 dB against the 19.20 floor (today's 19.30 −
-  0.1). <!-- q19-verdict: not-adopted --> **Nothing ships**; the routed pair stays an opt-in recipe (`train --subset`,
-  `--struct auto`, `denoise/fmd-eval/ext-eval --weights-correlated`).
+  0.1). <!-- q19-verdict: not-adopted --> By Q19's own rule nothing shipped. **Amended by Q20 (below):** the owner
+  dropped CARE 2D's floor after seeing this result, and the routed design became the Noise2Void default.
 - **Why CARE 2D fails, and how much that means.** All 22 of its training images and both test images are flagged as
   correlated (0.58), so CARE 2D is scored entirely by the structured-blind-spot network. Today's plain network leaves
   those images almost untouched (19.30 against 19.28 for the noisy input), while the structured one changes them and
@@ -638,6 +638,27 @@ noise check (P3's design 2) keep the gains and avoid the loss?
   training (33.75). Confocal +0.36 and two-photon +0.40 over P3's pair; widefield unchanged (the same network). On the
   public sets the U-Net's numbers are Q2's (no image there is called correlated except CARE 2D's), 0.22 dB behind
   CAREamics' Noise2Void on average, with the most faithful intensities of any self-supervised result (MreB slope 0.96).
+
+## Q20: CARE 2D reported without a floor (owner decision, after Q19)
+
+- **Decided by the owner on 2026-11-26, after Q19's results were known.** This is a post-hoc change to a gate, and it
+  is recorded as one: Q19's verdict above stays "not adopted" under its pre-registered rule.
+- **The decision:** CARE 2D stays in every table and in the public-set mean, but no longer has a per-set floor of its
+  own. **The reason**, from evidence recorded before Q19: its two test images' references don't match their inputs
+  (brick 32: the untouched image already has slope 0.75 and a 31% ratio error against its reference), and every method
+  scores 19.1–20.1 dB there (noisy input 19.28, bilateral filter 19.30, today's default 19.30). A 0.08 dB miss on
+  that set can't tell methods apart.
+- **Q19's rule, re-applied without that floor:** FMD 33.2439 ≥ 33.17 with every microscope type above its floor, public
+  mean 26.78 ≥ 26.70 (CARE 2D's 19.12 included), MreB slope 0.96 ≥ 0.90, MreB and nucleoid above theirs.
+  **Adopted.** <!-- q20-verdict: adopted -->
+- **What ships, as Q19 pre-registered it:** `train --mode n2v` routes by the noise check by default
+  (`RoutedNoise2Void`). Images it calls independent train the U-Net under Q2's rule C; images it calls correlated train
+  P3's dilated network with diamond-2 blind spots. A set of one kind gives one weights file; a mixed set gives two
+  (`w.bin` and `w.correlated.bin`), the second for `denoise --weights-correlated`. `--route off`, or any explicit recipe
+  option (`--arch`, `--select`, `--struct`, `--subset`, …), trains one network with Q2's single-network defaults, so
+  earlier experiment scripts mean what they meant. Gate 37 checks the default against this verdict.
+- **Not changed:** the Godot app's in-app adaptation still adapts the one loaded network; supervised training is
+  untouched. By Q19's pre-registration the lab pilot is now unblocked.
 
 ## Systems S1 + S2 (brick 36): where the time goes, and 512-bit kernels
 

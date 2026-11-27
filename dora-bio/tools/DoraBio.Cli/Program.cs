@@ -27,6 +27,9 @@ public static class Program
                    [--condition none|noise]  (noise: tell the network each frame's noise level, FiLM; quality pass Q13)
                    [--init WEIGHTS.bin]   (fine-tune existing weights instead of starting fresh)
                    [--mask-ratio 0.02]    (Noise2Void: fraction of pixels hidden per patch)
+                   [--route auto|off] [--out-correlated FILE.bin]  (Noise2Void default since Q20: route each image by the noise
+                    check to a U-Net (independent noise) or a structured-blind-spot network (correlated); a mixed set writes
+                    two files, the second for denoise --weights-correlated. Any recipe option below means --route off)
                    [--select auto|loss] [--patience 6] [--keep best|last] [--save-last FILE.bin]
                     (what picks the epoch: auto = validation PSNR when clean images exist, else the loss; loss = always the
                      validation loss, so Noise2Void never uses ground truth; patience 0 = never stop early; quality pass Q2)
@@ -231,6 +234,36 @@ public static class Program
                 var k => throw new ArgumentException($"Unknown --keep '{k}' (use best or last)."),
             },
         };
+
+        // Q20: with no recipe option, Noise2Void routes each training image by the noise check (RoutedNoise2Void).
+        string[] recipeOptions = ["arch", "features", "depth", "select", "patience", "keep", "struct", "footprint", "subset",
+                                  "init", "condition", "save-last", "vst"];
+        string route = o.String("route", n2vMode && !recipeOptions.Any(o.Has) ? DefaultN2vRoute : "off");
+        if (route == "auto")
+        {
+            if (!n2vMode) throw new ArgumentException("--route auto is for Noise2Void training.");
+            var verdicts = StructuredMasking.Diagnose(dataset);
+            ReportNoiseCheck(verdicts);
+            string routedDescription = o.StringOrNull("describe")
+                ?? $"{dataset.Count} images from '{o.StringOrNull("ext") ?? Path.GetFileName(Path.GetFullPath(o.Required("data")))}'";
+            Console.WriteLine($"🔀 routed Noise2Void (Q20): independent noise → U-Net under rule C, correlated noise → dilated network with " +
+                              $"structured blind spots; {config.MaxEpochs} epochs × {config.StepsPerEpoch} steps × batch {config.BatchSize} @ {config.PatchSize}px");
+            var routedClock = Stopwatch.StartNew();
+            var trained = RoutedNoise2Void.Train(dataset, config, o.Required("out"), routedDescription, o.StringOrNull("journey"),
+                (kind, report) => Console.WriteLine($"[{kind.ToString().ToLowerInvariant()}] {FormatEpoch(report)}"),
+                o.StringOrNull("out-correlated"), verdicts);
+            foreach (var t in trained)
+            {
+                var keptReport = t.Kind == NoiseKind.Independent ? t.Result.Last : t.Result.Best;
+                Console.WriteLine($"💾 {t.Kind.ToString().ToLowerInvariant()} noise: {t.Images} images, " +
+                                  $"{(t.Kind == NoiseKind.Independent ? "last" : "best")} epoch {keptReport?.Epoch} saved to {t.WeightsPath}");
+            }
+            if (trained.Count == 2)
+                Console.WriteLine($"   denoise with: --weights {trained[0].WeightsPath} --weights-correlated {trained[1].WeightsPath}");
+            Console.WriteLine($"✅ routed training done in {routedClock.Elapsed:mm\\:ss}");
+            return 0;
+        }
+        if (route != "off") throw new ArgumentException($"Unknown --route '{route}' (use auto or off).");
 
         DenoisingNet net;
         if (o.Has("init"))
@@ -822,6 +855,13 @@ public static class Program
     private static readonly (string Arch, string Select, int Patience, string Keep) DefaultN2v = ("dilated", "auto", 6, "best");
 
     /// <summary>
+    /// <c>train --mode n2v</c>'s default <c>--route</c> when no recipe option is given: "auto" (route each training image by
+    /// the noise check, <see cref="RoutedNoise2Void"/>) since Q20 adopted Q19's routed design; "off" trains one network with
+    /// <see cref="DefaultN2v"/>. Gate 37 checks that it follows the recorded Q20 verdict.
+    /// </summary>
+    private const string DefaultN2vRoute = "auto";
+
+    /// <summary>
     /// <c>ext-check</c>: for every external dataset that <c>tools/fetch_ext.sh</c> has downloaded, checks that the train
     /// and test splits hold the published numbers of images, that every noisy image has a clean partner of the same size,
     /// and that every file decodes. Also reports each set's brightness ratio, clean over noisy: the high-SNR images were
@@ -999,6 +1039,13 @@ public static class Program
         if (o.Has("default-condition"))
         {
             Console.WriteLine(DefaultCondition);
+            return 0;
+        }
+        if (o.Has("default-n2v-route"))
+        {
+            Console.WriteLine(DefaultN2vRoute == "auto"
+                ? "auto: independent → unet16 select=loss patience=0 keep=last; correlated → dilated24 struct=diamond-2 select=auto patience=6 keep=best"
+                : "off");
             return 0;
         }
         if (o.Has("default-n2v"))

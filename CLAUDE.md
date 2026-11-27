@@ -288,7 +288,8 @@ The code prints "Panel actual size" at startup, so check that line before relyin
   pre-registered quality passes (backlog Q1–Q17 at the end of PATHWAY.md).
 - **Real-data results:** `dora-bio/docs/RESULTS.md`. On FMD's 48 held-out images, supervised DORA scores 33.75 dB
   against 30.22 for a bilateral filter (34.73 with the U-Net, `--arch unet`; the dilated network stays the default). Plain Noise2Void fails on widefield, whose noise is correlated between
-  pixels; two Noise2Void networks routed by DORA's own noise check reach 32.97 dB without any ground truth.
+  pixels; two Noise2Void networks routed by DORA's own noise check reach 32.97 dB without any ground truth, and 33.24 dB
+  with the U-Net for independent noise (Q19). Since Q20 that routed design is `train --mode n2v`'s default.
 - **Rules, file map and gotchas:** `dora-bio/CLAUDE.md`. **Limitations:** `dora-bio/README.md`.
   The bundled sample and weights are **synthetic**. FMD data and FMD-trained weights are never committed.
   Every external dataset (licence, pins, whether it may train a shipped model) is in `dora-bio/tools/ext_manifest.json`;

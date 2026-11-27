@@ -31,13 +31,13 @@ run() {   # run <name> <description> <train args...>
 "${CLI[@]}" fmd-eval --weights godot/models/dora_bio_weights.bin --root data/fmd --levels raw > "$OUT/synthetic.eval.txt"
 echo "--- synthetic"; cat "$OUT/synthetic.eval.txt"
 
-run n2v_raw    "Noise2Void, raw frames only, 4 per FOV"                   --mode n2v        --fmd-frames 4 --fmd-levels raw
+run n2v_raw    "Noise2Void, raw frames only, 4 per FOV"                   --mode n2v --route off --fmd-frames 4 --fmd-levels raw
 run sup_raw    "supervised raw -> ground truth, 4 frames per FOV"         --mode supervised --fmd-frames 4 --fmd-levels raw
 # v1 idea 1: v1's geometric augmentation (±15° rotation, 0.85-1.15 scale, nearest neighbour) instead of lossless flips.
-run n2v_v1aug  "Noise2Void, raw frames, v1 rotate+scale augmentation"     --mode n2v        --fmd-frames 4 --fmd-levels raw --augment v1
+run n2v_v1aug  "Noise2Void, raw frames, v1 rotate+scale augmentation"     --mode n2v --route off --fmd-frames 4 --fmd-levels raw --augment v1
 run sup_v1aug  "supervised, raw frames, v1 rotate+scale augmentation"     --mode supervised --fmd-frames 4 --fmd-levels raw --augment v1
 # v1 idea 2: graded noise. FMD's 2/4/8/16-frame averages are real versions of v1's "progressive noise" training.
-run n2v_levels "Noise2Void, all 5 noise levels, 2 frames each per FOV"    --mode n2v        --fmd-frames 2 --fmd-levels raw,avg2,avg4,avg8,avg16
+run n2v_levels "Noise2Void, all 5 noise levels, 2 frames each per FOV"    --mode n2v --route off --fmd-frames 2 --fmd-levels raw,avg2,avg4,avg8,avg16
 run sup_levels "supervised, all 5 noise levels, 2 frames each per FOV"    --mode supervised --fmd-frames 2 --fmd-levels raw,avg2,avg4,avg8,avg16
 
 # Graded noise is meant to make a model that also works on cleaner inputs, so score the raw-only and all-level

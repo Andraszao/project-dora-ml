@@ -63,7 +63,7 @@ CHECKS=(
   "dataset manifest pinned, licence policy holds, ATTRIBUTIONS.md generated from it; TIFF/BigTIFF/MRC stacks read per axis (independent fixtures); downloaded stack datasets match their published counts"
   "quality pass Q2: the selection signal decides the epoch (loss never uses ground truth), keep-last and save-last; the recorded choice, verdict and shipped Noise2Void defaults follow the pre-registered rule; with data + runs/q2 the blocks reproduce"
   "512-bit kernels bit-identical to the reference (forced on, any CPU); bench --roofline reports peaks, every kernel shape and the stack-run split; the 512-bit speedup floor is in gate 24's budget"
-  "quality pass Q19: the threshold rule; the recorded threshold decision (validation only), correlated-network choice, verdict and Noise2Void defaults follow the pre-registered rule; with data + runs/q19 the blocks reproduce"
+  "quality pass Q19 + Q20: the threshold rule and routed training; the recorded threshold decision (validation only), correlated-network choice and Q19 verdict follow the pre-registered rule, Q20's re-application (no CARE 2D floor) decides the routed Noise2Void default; with data + runs/q19 the blocks reproduce"
 )
 LAST=$((${#NAMES[@]} - 1))
 LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dora-bricks.XXXXXX")"
@@ -668,12 +668,31 @@ gate_37() {   # q19-routed (quality pass Q19, pre-registered in PATHWAY.md, comm
   recorded="$(sed -n 's/.*<!-- q19-verdict: \([a-z-]*\) -->.*/\1/p' docs/RESULTS.md)"
   [[ "${expected%% *}" == "$recorded" ]] || { echo ">> Q19's rule gives '${expected%% *}' ($expected), but RESULTS.md records '$recorded'"; return 1; }
   echo ">> Q19: $expected; recorded verdict agrees"
+  # Q20 (owner decision, after Q19, disclosed): CARE 2D stays in the tables but loses its floor; Q19's rule re-applied.
+  local q20 q20_recorded route want_route
+  q20="$( { recorded_block q19-test-fmd | awk '$1 == "all," { print "fmd all", $10 } $1 ~ /^(Confocal|TwoPhoton|WideField)$/ { print "fmd", $1, $9 }'
+            for b in mreb nucleoid care2d; do recorded_block "q19-test-$b" | awk -v n="$b" '$1 == "mean" { print "set", n, $8 }'; done
+            recorded_block q19-fidelity-mreb | awk '$1 == "method" { print "slope", $2 }'; } | awk '
+    $1 == "fmd" { f[$2] = $3 } $1 == "set" { s[$2] = $3; mean += $3 / 3 } $1 == "slope" { slope = $2 }
+    END {
+      ok = f["all"] >= 33.17 - 1e-9 && f["Confocal"] >= 33.99 - 1e-9 && f["TwoPhoton"] >= 32.36 - 1e-9 && f["WideField"] >= 31.66 - 1e-9
+      ok = ok && mean >= 26.70 - 1e-9 && slope >= 0.90 - 1e-9 && s["mreb"] >= 25.73 - 1e-9 && s["nucleoid"] >= 33.61 - 1e-9
+      print ok ? "adopted" : "not-adopted"   # CARE 2D: reported in the mean, no floor of its own
+    }')"
+  q20_recorded="$(sed -n 's/.*<!-- q20-verdict: \([a-z-]*\) -->.*/\1/p' docs/RESULTS.md)"
+  [[ "$q20" == "$q20_recorded" ]] || { echo ">> Q19's rule without CARE 2D's floor gives '$q20', but RESULTS.md records Q20 as '$q20_recorded'"; return 1; }
   dotnet build tools/DoraBio.Cli -c Release >/dev/null || return 1
-  local defaults
-  defaults="$(dotnet "$CLI_DLL" info --default-n2v)"
-  if [[ "${expected%% *}" == not-adopted ]]; then
-    [[ "$defaults" == "dilated select=auto patience=6 keep=best" ]] \
-      || { echo ">> Q19 wasn't adopted, but train --mode n2v defaults changed to '$defaults'"; return 1; }
+  route="$(dotnet "$CLI_DLL" info --default-n2v-route)"
+  want_route="off"
+  [[ "$q20" == adopted ]] && want_route="auto: independent → unet16 select=loss patience=0 keep=last; correlated → dilated24 struct=diamond-2 select=auto patience=6 keep=best"
+  [[ "$route" == "$want_route" ]] || { echo ">> Q20 is '$q20', so train --mode n2v should route '$want_route', not '$route'"; return 1; }
+  echo ">> Q20: $q20; train --mode n2v routes: ${route%%:*}"
+  # The routed default runs end to end from the CLI (a synthetic set: one kind of noise, one network).
+  local t="$LOG_DIR/routed"
+  dotnet "$CLI_DLL" synth --out "$t/data" --count 3 --size 96 --seed 7 >/dev/null || return 1
+  dotnet "$CLI_DLL" train --data "$t/data" --out "$t/w.bin" --mode n2v --epochs 1 --steps 2 --batch 2 --patch 32 >/dev/null || return 1
+  if [[ "$q20" == adopted ]]; then
+    dotnet "$CLI_DLL" info --weights "$t/w.bin" | grep -q "routed (Q20)" || { echo ">> train --mode n2v didn't train the routed recipe"; return 1; }
   fi
   local d
   for d in deepbacs-mreb deepbacs-nucleoid zerocost-care2d; do
@@ -793,6 +812,8 @@ MUTATIONS=(
   '36|src/DoraBio.Core/Nn/ConvLayer.Wide.cs|        int t0 = 2 * d * gw + 2 * d, t1 = 2 * d * gw + d,|        int t0 = 2 * d * gw + d, t1 = 2 * d * gw + 2 * d,'
   '37|src/DoraBio.Core/NoiseDiagnostics.cs|double mid = 0.5 * (independent.Max() + correlated.Min());|double mid = independent.Max();'
   '37|docs/RESULTS.md|<!-- q19-verdict: not-adopted -->|<!-- q19-verdict: adopted -->'
+  '37|src/DoraBio.Core/Training/RoutedNoise2Void.cs|(verdicts[i] == true ? correlated : independent)|(verdicts[i] != false ? correlated : independent)'
+  '37|docs/RESULTS.md|<!-- q20-verdict: adopted -->|<!-- q20-verdict: not-adopted -->'
 )
 
 self_test() {

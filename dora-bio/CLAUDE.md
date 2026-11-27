@@ -26,7 +26,7 @@ src/DoraBio.Core/              ALL ML/IO code. net8.0. No Godot, no NuGet depend
   IO/        TiffCodec (classic TIFF + BigTIFF), TiffStack (page-by-page reader and writer), ImageStack (+StackLayout: planes
              by axis from ImageJ/tifffile metadata), MrcReader, PngDecoder, ImageLoader, WeightsFile, Crc32
   Training/  Trainer (+BatchStepper), ValidationSet, ProgressiveTargets, TrainingJob, JourneyLog,
-             OnlineAdapter, TrainerConfig
+             OnlineAdapter, TrainerConfig, StructuredMasking, RoutedNoise2Void (the default Noise2Void recipe since Q20)
   Metrics.cs, TiledInference.cs, BilateralBaseline.cs, FmdBenchmark.cs (held-out FMD scores, noise correlation),
   BatchDenoising.cs (FrameDenoiser: the one per-frame pipeline; stacks and folders streamed frame by frame),
   NoiseDiagnostics.cs (is the noise pixel-independent? from the noisy image alone),
@@ -72,7 +72,9 @@ training learns pixel-correlated noise, which the masked loss can't see; next ar
 with routing). Brick 36 (S1 + S2) measured the roofline (every kernel compute-bound; inference 97% of a stack run) and
 added bit-identical 512-bit kernels (1.3–1.6× on AVX-512 CPUs). Brick 37 (Q19) routed images by the noise check to the
 U-Net (independent noise) or P3's structured network (correlated): 33.24 dB on FMD without ground truth, every FMD floor
-met, but not adopted because CARE 2D's per-set floor missed by 0.08 dB (Q20 asks the owner how to treat CARE 2D). Owner decisions there: GPU training is
+met, but not adopted because CARE 2D's per-set floor missed by 0.08 dB. Q20 (owner decision, after Q19, disclosed)
+dropped that floor and adopted the design: `train --mode n2v` now routes by default (`RoutedNoise2Void`). Next is 38
+(the self-supervised scoreboard). Owner decisions there: GPU training is
 an optional offline step, GPU inference is approved only as an opt-in forward path in the Godot app (S10; the CPU
 engine stays the reference and the CLI's engine), and the shipped model is trained only on synthetic and
 CC BY / CC0 data, with FMD kept for evaluation.
@@ -123,7 +125,7 @@ before anything is built on top.** `./bricks.sh` runs the gates in order and sto
 | 34 | ext-data-2 (SOTA stage 1) | `tools/ext_manifest.json`, `tools/ext_data.py`, `ATTRIBUTIONS.md`, BigTIFF in `IO/TiffCodec.cs`, `IO/MrcReader.cs`, `IO/ImageStack.cs` (`StackLayout`), `Data/ExtStacks.cs`, CLI `stack-check`, `stack-info` | `ext_data.py check` (schema, pins, licence policy) and `attributions --check`; `Brick=34-ext-data-2`: ImageJ/tifffile/BigTIFF/MRC fixtures from independent writers read plane by plane at the right position; contradictory metadata is an error; pairs by pattern + substitution; registries = manifest; with data: every download matches its pins and `stack-check` finds the published counts |
 | 35 | q2-n2v-stop (quality pass, SOTA stage 1) | `TrainerConfig.Selection` (`ValidationSignal`), `KeepLastEpoch`, `TrainingResult.LastParameters`, `TrainingJobOptions.LastWeightsPath`, CLI `train --select/--patience/--keep/--save-last`, `info --default-n2v`, `fmd-eval --precise`, `tools/experiments/q2_stop.sh` | `Brick=35-q2-n2v-stop`: the loss signal picks the lowest-loss epoch where PSNR would pick another; patience 0 runs the whole budget; best or last weights kept and the last always reported; the recorded choice, verdict (on unrounded FMD scores) and `train --mode n2v` defaults follow the pre-registered rule; with data + runs/q2 the blocks reproduce |
 | 36 | roofline-wide (systems S1 + S2) | `Roofline.cs`, CLI `bench --roofline`, `Nn/ConvLayer.Wide.cs` (512-bit forward and input-gradient kernels, `DORA_WIDE_KERNELS=0` turns them off), unrolled taps in `ConvLayer.Blocked.cs`, `PerformanceBench` (interleaved `blocked-256` timings), `tools/ci/perf_budget.json` (`wide_speedups`) | `Brick=36-roofline-wide`: the 512-bit kernels, forced on (any CPU), equal the reference on 200 shapes and whole networks; `bench --roofline` reports peaks, kernels and the stack split; gate 24 checks the 512-bit speedup floor on AVX-512 machines |
-| 37 | q19-routed (quality pass, SOTA stage 1) | `NoiseDiagnostics.ChooseThreshold`, CLI `fmd-diagnose --validation-seed/--choose-threshold`, `ext-eval`/`fidelity --weights-correlated`, `tools/experiments/q19_routed.sh` | `Brick=37-q19-routed`: the threshold rule (keep, gap midpoint, fewest misroutes); the recorded threshold decision (validation only) equals the shipped threshold, the correlated-network choice and the verdict follow the pre-registered rule, the Noise2Void defaults are unchanged; with data + runs/q19 the blocks reproduce |
+| 37 | q19-routed (quality pass, SOTA stage 1; + Q20) | `NoiseDiagnostics.ChooseThreshold`, CLI `fmd-diagnose --validation-seed/--choose-threshold`, `ext-eval`/`fidelity --weights-correlated`, `tools/experiments/q19_routed.sh`; Q20: `Training/RoutedNoise2Void.cs`, CLI `train --route auto|off --out-correlated`, `info --default-n2v-route` | `Brick=37-q19-routed`: the threshold rule; routed training splits by verdict and trains one network per kind; the recorded threshold decision (validation only) equals the shipped threshold, the correlated-network choice and Q19's verdict follow the pre-registered rule, and Q20's re-application (no CARE 2D floor) decides `train --mode n2v`'s routed default, which runs end to end from the CLI; with data + runs/q19 the blocks reproduce |
 
 Gates 11–15 and 21 need the dataset (the reproductions in gates 15 and 21 also need the weights from `tools/experiments/`) (`tools/fetch_fmd.sh`, about 9 GB into the gitignored `data/fmd/`). Without it, their
 data-dependent part reports SKIPPED (exit code 77) while the pins, unit tests and RESULTS.md checks still run. CI has
@@ -214,7 +216,11 @@ cd godot && dotnet build && godot --headless --path . --import \
 8. **Validation is held out by FOV** (`ImagePair.GroupId`). Frames of one field of view never straddle the split.
 9. **Journey log lifecycle:** a session opens only when training starts. Every epoch is appended and saved.
    The session ends as `completed` or `failed: …`. Inference-only launches write nothing.
-10. **Structured blind spots and variance stabilization are opt-in** (`--struct auto`, `--vst`): on FMD the first
+10. **Noise2Void routes by default since Q20** (`RoutedNoise2Void`): the noise check sends images with independent noise
+    to the U-Net under rule C and images with correlated noise to the dilated network with diamond-2 structured blind
+    spots. That is the only place structured blind spots are on by default; gate 37 checks it against the recorded
+    verdicts. `--route off` or any explicit recipe option trains one network with Q2's defaults (gate 35).
+    **In single-network training, structured blind spots and variance stabilization are opt-in** (`--struct auto`, `--vst`): on FMD the first
     wins on noisy input and loses on clean input (and one network trained on mixed data loses on the independent
     images), and the second lost overall (docs/RESULTS.md, P3). Don't make either a default without new held-out
     evidence. Choose footprints and other settings on validation data, never on test_mix. Noise conditioning
