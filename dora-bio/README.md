@@ -17,9 +17,9 @@ All numbers come from this repo, run on a 4-core cloud VM with no GPU.
 
 | Check | Result |
 |---|---|
-| Core unit tests (`dotnet test`) | 522 passing in ~6 s, including finite-difference gradient checks for both architectures (mutation-tested) |
+| Core unit tests (`dotnet test`) | 527 passing in ~6 s, including finite-difference gradient checks for both architectures (mutation-tested) |
 | Brick gates (`./bricks.sh`) | all 42 green (gates 11–15, 21, 25, 27, 29, 30–35, 37, 38 and 40 with the FMD data, benchmark downloads and experiment weights present); documentation of every public member is enforced by the build |
-| Gates can fail (`./bricks.sh --self-test`) | one planted bug per gate 0–7 and 11–41 (two for gates 0, 28, 29, 31, 32, 33, 35 and 36, three for 34 and 39, four for 37 and 38, six for 40, twelve for 41), all 73 caught (after a clean control copy passes) |
+| Gates can fail (`./bricks.sh --self-test`) | one planted bug per gate 0–7 and 11–41 (two for gates 0, 5, 28, 29, 31, 32, 33, 35 and 36, three for 34 and 39, four for 37 and 38, six for 40, fifteen for 41), all 77 caught (after a clean control copy passes) |
 | CI (GitHub Actions) | all gates incl. headless Godot, on PRs into `main`, pushes to `main` and manual runs (docs-only changes skipped): [run #1](https://github.com/Andraszao/project-dora-ml/actions/runs/45617118232) green in 150 s of runner time, 0 billable minutes (public repo) |
 | Codecs vs. independent encoders | TIFF/PNG fixtures written by Pillow, ImageMagick and libtiff decode exactly |
 | Tiled vs. whole-image inference | identical (≤1e-5) for ragged tiles, tiles smaller than the receptive field, etc. |
@@ -86,7 +86,15 @@ dora-bio eval    --weights runs/w.bin --data data/heldout
 dora-bio denoise --weights godot/models/dora_bio_weights.bin --in my_image.tif --out clean.tif --baseline bilateral.tif
 dora-bio denoise --weights godot/models/dora_bio_weights.bin --in my_stack.tif --out clean_stack.tif   # every page
 dora-bio denoise --weights godot/models/dora_bio_weights.bin --in my_folder/ --out denoised/          # every image
+dora-bio denoise --weights godot/models/dora_bio_weights.bin --in my_image.tif --out clean.tif --report report.html
 ```
+
+`--report` writes one self-contained HTML page per run: the residual (raw − denoised) to look at before measuring,
+its statistics, the input's hash, storage and pixel size, and the model's provenance and content hash. A denoised
+TIFF keeps the input's ImageJ header and pixel size, and its Software tag names the DORA build and model that made it.
+
+**Without .NET installed.** `tools/ci/publish_smoke.sh linux-x64` (or `win-x64`, `osx-arm64`) publishes the CLI as
+one self-contained executable, about 64 MB, and runs it end to end; CI does this on all three systems.
 
 **Your own data.** Use TIFF (8/16/32-bit) or PNG. A training folder can be:
 - `noisy/` with optional `clean/`, matched by file name. Supervised training if every image has a clean match, otherwise Noise2Void.

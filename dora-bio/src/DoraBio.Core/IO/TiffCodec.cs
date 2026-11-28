@@ -275,6 +275,15 @@ public static class TiffCodec
     internal static string? Software(Stream stream, bool littleEndian, bool big, long ifd) =>
         new TiffReader(stream, littleEndian, big).Text(ifd, TagSoftware);
 
+    /// <summary>How the page whose IFD is at <paramref name="ifd"/> stores its pixels (tags 258, 339, 277, 259, 317, with TIFF's defaults).</summary>
+    internal static TiffPageFormat PageFormat(Stream stream, bool littleEndian, bool big, long ifd)
+    {
+        var r = new TiffReader(stream, littleEndian, big);
+        return new TiffPageFormat((int)r.Tag(ifd, TagBitsPerSample).FirstOrDefault(1u), r.Tag(ifd, TagSampleFormat).FirstOrDefault(1u),
+            (int)r.Tag(ifd, TagSamplesPerPixel).FirstOrDefault(1u), r.Tag(ifd, TagCompression).FirstOrDefault(CompressionNone),
+            r.Tag(ifd, TagPredictor).FirstOrDefault(1u));
+    }
+
     /// <summary>The ImageDescription tag (270) of the page whose IFD is at <paramref name="ifd"/>, or null.</summary>
     internal static string? Description(Stream stream, bool littleEndian, bool big, long ifd) =>
         new TiffReader(stream, littleEndian, big).Text(ifd, TagImageDescription);
@@ -395,8 +404,19 @@ public static class TiffCodec
     /// </summary>
     internal static string UnsupportedCompression(uint compression)
     {
-        string? name = compression switch
+        string? name = CompressionName(compression);
+        return $"TIFF compression {compression}{(name is null ? "" : $" ({name})")} is not supported. Save an uncompressed copy, e.g. in " +
+               "Python: tifffile.imwrite(dst, tifffile.imread(src)), and denoise that; for a stack, add --axes TYX (a time-lapse) or " +
+               "--axes ZYX (a volume), since the copy has no axis labels.";
+    }
+
+    /// <summary>A TIFF compression code's name: the ones DORA decodes and the common ones it refuses; null for others.</summary>
+    internal static string? CompressionName(uint compression) => compression switch
         {
+            CompressionNone => "uncompressed",
+            CompressionLzw => "LZW",
+            CompressionDeflate or CompressionAdobeDeflate => "Deflate",
+            CompressionPackBits => "PackBits",
             2 or 3 or 4 => "CCITT fax",
             6 or 7 => "JPEG",
             33003 or 33005 or 34712 => "JPEG 2000",
@@ -408,10 +428,6 @@ public static class TiffCodec
             50002 => "JPEG XL",
             _ => null,
         };
-        return $"TIFF compression {compression}{(name is null ? "" : $" ({name})")} is not supported. Save an uncompressed copy, e.g. in " +
-               "Python: tifffile.imwrite(dst, tifffile.imread(src)), and denoise that; for a stack, add --axes TYX (a time-lapse) or " +
-               "--axes ZYX (a volume), since the copy has no axis labels.";
-    }
 
     /// <summary>The stored (still compressed) bytes of each strip of a page, in order: for tests of the decompressors.</summary>
     internal static List<byte[]> StoredStrips(byte[] file, int page)

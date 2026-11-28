@@ -54,6 +54,12 @@ public sealed record DenoiseRequest
 
     /// <summary>Tile core size for tiled inference.</summary>
     public int TileCore { get; init; } = TiledInference.DefaultTileCore;
+
+    /// <summary>
+    /// Optional: write a self-contained HTML report here (<see cref="DenoiseReport"/>): what was done, with which model,
+    /// and the residual to look at before trusting the output. One image or stack only, not a folder.
+    /// </summary>
+    public string? Report { get; init; }
 }
 
 /// <summary>What a <see cref="Pipeline.Denoise"/> run did.</summary>

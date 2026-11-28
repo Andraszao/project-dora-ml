@@ -36,6 +36,8 @@ public static class Pipeline
     public static DenoiseOutcome Denoise(DenoiseRequest request, Action<string>? log = null, CancellationToken cancellation = default)
     {
         void Log(string line) => log?.Invoke(line);
+        if (request.Report is not null && Directory.Exists(request.Input))
+            throw new ArgumentException("--report describes one image or stack; for a folder, denoise each file with its own --report.");
         var main = request.Model ?? (request.Weights is { } w ? LoadedModel.Load(w) : throw new ArgumentException("--weights is required."));
         var correlated = request.CorrelatedModel ?? (request.CorrelatedWeights is { } c ? LoadedModel.Load(c) : null);
         if (correlated is not null) Log($"🧬 correlated-noise model: {correlated.Info.Provenance}");
@@ -71,6 +73,7 @@ public static class Pipeline
             }
             Log($"✨ denoised {plan.Count} files, {pages} pages in {clock.Elapsed.TotalSeconds:0.00}s → {output}");
             Log(PeakMemoryLine());
+            Log(ManagedMemoryLine());
             return new DenoiseOutcome(plan.Count, pages, routedTotal, clock.Elapsed.TotalSeconds, notices);
         }
 
@@ -92,7 +95,17 @@ public static class Pipeline
                 string model = r.UsedCorrelatedModel ? " (correlated-noise model)" : "";
                 Log($"   page {page + 1}/{total}: {raw.Width}×{raw.Height}, noise σ {r.SigmaBefore:0.0000} → {r.SigmaAfter:0.0000}{model}");
             };
-        BatchDenoising.DenoiseFile(denoiser, input, output, baseline, report, cancellation, request.Axes, Notice);
+        // The report pools the residual over every plane as it streams past, and pictures the middle plane.
+        var residual = request.Report is null ? null : new ResidualCheck();
+        byte[]? picture = null;
+        int picturePlane = total / 2;
+        BatchDenoising.PageDone onPage = residual is null ? report : (page, raw, r) =>
+        {
+            residual.Add(raw, r.Output);
+            if (page == picturePlane) picture = ResidualCheck.Picture(raw, r.Output);
+            report(page, raw, r);
+        };
+        BatchDenoising.DenoiseFile(denoiser, input, output, baseline, onPage, cancellation, request.Axes, Notice);
         double seconds = clock.Elapsed.TotalSeconds;
         if (total > 1)
         {
@@ -100,8 +113,38 @@ public static class Pipeline
                 (baseline is null ? "" : $", baseline → {baseline}"));
             if (correlated is not null) Log($"   {routedPages} of {total} pages used the correlated-noise model");
             Log(PeakMemoryLine());
+            Log(ManagedMemoryLine());
+        }
+        if (request.Report is { } reportPath && residual is not null)
+        {
+            WriteReport(reportPath, request, main, correlated, total, routedPages, seconds, notices, residual, picture, picturePlane);
+            Log($"📝 report → {reportPath}");
         }
         return new DenoiseOutcome(1, total, routedPages, seconds, notices);
+    }
+
+    /// <summary>Gathers what <see cref="DenoiseReport"/> states: the input as DORA read it, the output as written, the models.</summary>
+    private static void WriteReport(string path, DenoiseRequest request, LoadedModel main, LoadedModel? correlated, int planes, int routed,
+        double seconds, List<string> notices, ResidualCheck residual, byte[]? picture, int picturePlane)
+    {
+        var head = new byte[16];
+        int read;
+        using (var probe = File.OpenRead(request.Input)) read = probe.ReadAtLeast(head, head.Length, throwOnEndOfStream: false);
+        bool png = PngDecoder.HasPngSignature(head.AsSpan(0, read));
+        using var stack = BatchDenoising.OpenAsStack(request.Input, request.Axes);
+        string? software;
+        using (var written = TiffStackReader.Open(request.Output)) software = written.Software;
+        using var self = Process.GetCurrentProcess();
+        DenoiseReport.Write(path, new DenoiseReportData
+        {
+            Input = request.Input, Output = request.Output, Baseline = request.Baseline,
+            Format = png ? "PNG" : stack.Format, Size = (stack.Width, stack.Height), Layout = stack.Layout, DeclaredAxes = request.Axes,
+            Storage = png ? null : stack.Storage, PixelSize = png ? null : stack.PixelSize, Software = software,
+            DescriptionCarried = png ? "none (a PNG input)" : stack.DescriptionCarried,
+            Model = main, CorrelatedModel = correlated, CorrelatedPlanes = routed, Planes = planes, TileCore = request.TileCore,
+            Vst = request.Vst, Seconds = seconds, PeakMemory = self.PeakWorkingSet64, Notices = notices, Residual = residual,
+            Picture = picture, PicturePlane = picturePlane,
+        });
     }
 
     /// <summary>The process's peak resident memory so far (the OS high-water mark), as stack and folder runs report it.</summary>
@@ -109,6 +152,24 @@ public static class Pipeline
     {
         using var self = Process.GetCurrentProcess();
         return $"   peak memory: {self.PeakWorkingSet64 / (1024.0 * 1024.0):0} MB";
+    }
+
+    /// <summary>
+    /// What the .NET collector holds at the end of a run, next to <see cref="PeakMemoryLine"/>'s OS figure (brick 41): the
+    /// bytes allocated and not yet collected (<see cref="GC.GetTotalMemory"/> without a collection), the memory the
+    /// collector has committed, and what survives a full collection (the run's real live data). A peak far above the
+    /// live figure is garbage the collector hadn't reclaimed yet; <c>DOTNET_GCHeapHardLimit</c> caps it. The full
+    /// collection costs a moment, once, at the end.
+    /// </summary>
+    public static string ManagedMemoryLine()
+    {
+        const double mb = 1024.0 * 1024.0;
+        long allocated = GC.GetTotalMemory(false);
+        var info = GC.GetGCMemoryInfo();
+        long live = GC.GetTotalMemory(true);
+        return $"   managed heap: {live / mb:0} MB live after a full collection ({allocated / mb:0} MB allocated before it), " +
+               $"{info.TotalCommittedBytes / mb:0} MB committed ({(System.Runtime.GCSettings.IsServerGC ? "Server" : "Workstation")} GC" +
+               (info.TotalAvailableMemoryBytes < long.MaxValue / 2 ? $", limit {info.TotalAvailableMemoryBytes / mb:0} MB)" : ")");
     }
 
     /// <summary>
@@ -206,6 +267,8 @@ public static class Pipeline
             };
             dataset = DatasetLoader.LoadDirectory(Required(r.Data, "data"), fmd, r.Vst ? VarianceStabilization.Stabilize : null);
         }
+        // Loading a big folder takes a while: a cancel that came meanwhile (the app quitting) stops here, before training.
+        cancellation.ThrowIfCancellationRequested();
         var mode = timeLapse ? (neighbourPairs ? TrainingMode.Noise2Noise : skipCentre ? TrainingMode.SkipCentre : TrainingMode.Noise2Void)
             : (r.Mode ?? (dataset.All(d => d.HasClean) ? "supervised" : "n2v")) switch
             {
@@ -260,6 +323,7 @@ public static class Pipeline
             if (validation is not null) throw new ArgumentException("--validation-range trains one network: add --route off (and the recipe you want).");
             var verdicts = StructuredMasking.Diagnose(dataset);
             ReportNoiseCheck(verdicts, Log);
+            cancellation.ThrowIfCancellationRequested();
             string routedDescription = r.Describe ?? $"{dataset.Count} images from '{source}'";
             Log($"🔀 routed Noise2Void (Q20): independent noise → U-Net under rule C, correlated noise → dilated network with " +
                 $"structured blind spots; {config.MaxEpochs} epochs × {config.StepsPerEpoch} steps × batch {config.BatchSize} @ {config.PatchSize}px");
@@ -278,6 +342,8 @@ public static class Pipeline
             if (models.Count == 2)
                 Log($"   denoise with: --weights {models[0].WeightsPath} --weights-correlated {models[1].WeightsPath}");
             Log($"✅ routed training done in {(int)routedClock.Elapsed.TotalMinutes:00}:{routedClock.Elapsed.Seconds:00}");
+            Log(PeakMemoryLine());
+            Log(ManagedMemoryLine());
             return models;
         }
         if (route != "off") throw new ArgumentException($"Unknown --route '{route}' (use auto or off).");
@@ -379,6 +445,8 @@ public static class Pipeline
 
         // Total minutes, so a run past an hour doesn't wrap (mm:ss alone would print 05:00 for 1 h 5 min).
         Log($"✅ stopped: {result.StopReason} after {result.History.Count} epochs in {(int)clock.Elapsed.TotalMinutes:00}:{clock.Elapsed.Seconds:00}");
+        Log(PeakMemoryLine());
+        Log(ManagedMemoryLine());
         var model = new TrainedModel(null, r.Out, dataset.Count, result, config.KeepLastEpoch);
         if (model.Kept is { } kept)
         {

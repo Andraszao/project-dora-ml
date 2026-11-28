@@ -186,6 +186,9 @@ internal sealed class BatchStepper
         _pool = new WorkspacePool(net);
     }
 
+    /// <summary>Workspaces this stepper's pool has created (at most one per core over a whole run; for tests).</summary>
+    internal int WorkspacesCreated => _pool.Created;
+
     /// <summary>Returns the batch loss: mean squared error over masked pixels.</summary>
     public double Step(PatchSampler sampler, AdamOptimizer optimizer)
     {
@@ -201,7 +204,7 @@ internal sealed class BatchStepper
         // Each sample writes only its own gradient buffer, so the parallel loop needs no locks. Summing the
         // buffers afterwards in sample order (not completion order) keeps runs bit-for-bit reproducible.
 
-        Parallel.For(0, _batch.Count, () => _pool.Rent(), (i, _, ws) =>
+        Parallel.For(0, _batch.Count, WorkspacePool.OnePerCore(), () => _pool.Rent(), (i, _, ws) =>
         {
             Array.Clear(_sampleGradients[i]);
             _sampleLoss[i] = _net.AccumulateGradients(_batch.Input(i), _batch.Target(i), _batch.Mask(i),

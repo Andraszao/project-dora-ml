@@ -16,8 +16,25 @@ internal sealed class WorkspacePool
     /// <param name="net">The network whose architecture the workspaces are sized for.</param>
     public WorkspacePool(DenoisingNet net) => _net = net;
 
+    private int _created;
+
+    /// <summary>Workspaces this pool has created so far (each one stays in the pool): at most one per worker that ever ran.</summary>
+    public int Created => Volatile.Read(ref _created);
+
     /// <summary>Takes a free workspace, or creates one if none is free. Thread-safe.</summary>
-    public DenoisingNet.Workspace Rent() => _free.TryTake(out var ws) ? ws : _net.CreateWorkspace();
+    public DenoisingNet.Workspace Rent()
+    {
+        if (_free.TryTake(out var ws)) return ws;
+        Interlocked.Increment(ref _created);
+        return _net.CreateWorkspace();
+    }
+
+    /// <summary>
+    /// The options for a loop that rents from a pool: at most one worker per core. Without the cap the thread pool adds
+    /// workers over a long run, and each one rents (and the pool then keeps) another workspace of tens of MB.
+    /// </summary>
+    public static ParallelOptions OnePerCore(CancellationToken cancellation = default) =>
+        new() { CancellationToken = cancellation, MaxDegreeOfParallelism = Environment.ProcessorCount };
 
     /// <summary>Gives a workspace back for reuse. Thread-safe.</summary>
     public void Return(DenoisingNet.Workspace workspace) => _free.Add(workspace);

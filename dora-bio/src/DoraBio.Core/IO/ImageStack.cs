@@ -290,6 +290,41 @@ public sealed class ImageStack : IDisposable
         Resolution = _tiff?.Resolution,
     };
 
+    /// <summary>The first page's storage (bit depth, sample format, compression, predictor), for a TIFF; null for MRC.</summary>
+    public TiffPageFormat? Storage => _tiff?.PageFormat(0);
+
+    /// <summary>The first page's resolution tags, for a TIFF that has them.</summary>
+    public TiffResolution? Resolution => _tiff?.Resolution;
+
+    /// <summary>
+    /// The first page's pixel size in words, e.g. "0.65 × 0.65 um per pixel", or null when the file records none
+    /// (tifffile's default 1 × 1 with no unit counts as none). TIFF stores pixels per unit; ImageJ writes unit 1 (none)
+    /// and names its unit in the description ("unit=um").
+    /// </summary>
+    public string? PixelSize
+    {
+        get
+        {
+            if (Resolution is not { X: > 0, Y: > 0 } r || (r.Unit == 1 && r.X == 1 && r.Y == 1)) return null;
+            string? named = Layout.Source == StackMetadata.ImageJ
+                ? _tiff?.Description?.Split('\n').FirstOrDefault(l => l.StartsWith("unit=", StringComparison.Ordinal))?[5..].Trim()
+                : null;
+            string unit = r.Unit switch { 2 => "inch", 3 => "cm", _ => string.IsNullOrEmpty(named) ? "units (no unit recorded)" : named };
+            return string.Create(CultureInfo.InvariantCulture, $"{1 / r.X:G4} × {1 / r.Y:G4} {unit} per pixel");
+        }
+    }
+
+    /// <summary>What a denoised copy does with this stack's ImageDescription (<see cref="OutputTags"/>), in words, for the report.</summary>
+    public string DescriptionCarried => Layout.Source switch
+    {
+        StackMetadata.ImageJ => "the ImageJ header, verbatim",
+        StackMetadata.Tifffile => TifffileHeaderFor(_tiff?.Description, Width, Height) is null
+            ? "none: the tifffile header's shape doesn't describe the single-sample float32 copy"
+            : "the tifffile header (shape and axes only)",
+        _ => (DeclaredHeader(Layout, Width, Height) is null ? "none" : "the declared axes, as a tifffile header") +
+             (Layout.Source == StackMetadata.OmeXml ? " (the OME-XML isn't copied: it states the input's pixel type)" : ""),
+    };
+
     /// <summary>
     /// tifffile's JSON header for planes whose axes were declared (any letter but I, the unlabelled axis), e.g.
     /// {"shape": [4, 64, 96], "axes": "ZYX"}; null when nothing was declared, so an unlabelled input stays unlabelled

@@ -67,7 +67,7 @@ CHECKS=(
   "scoreboard: derived 2D sets keep a patch or cell in one validation group, FMD export + outside outputs scored with FMD's protocol; the recorded reading follows the pre-registered rule and PATHWAY.md's next brick follows it; noise-residual separates one-axis noise correlation from misalignment; with data + runs every score and the Tribolium diagnostic reproduce"
   "Noise2Noise from neighbouring frames and the 3-frame spatiotemporal blind spot: gradients, centre-frame residual, reflected (never clamped) endpoints, exact tiling, blind spots in the centre frame only, streaming window; both modes train and denoise from the CLI, and the leaks are refused"
   "Track A: skip-centre Noise2Noise never sees frame t (indices, sampler, validation, inference), neighbours'-mean residual, gradients, exact tiling, format 5, streaming; per-frame CARE scoring with dynamic/steady masks inside a standalone block; the post-hoc readouts see flashes, smears and flicker; the recorded reading follows the pre-registered rule, the shipped default follows it or a recorded veto; with data + runs/timelapse the spot check and readouts reproduce"
-  "pilot readiness (41a): stacks follow their axes (neighbours along T with C and Z fixed, Z-stacks refused for time-lapse modes, unlabelled planes taken as T with a notice), every page read and an ImageJ stack over 4 GB refused, routing decided once per stack and never for a handful of images, unknown options refused; one entry point (app = CLI); LZW read, other codecs and unlabelled OME-XML stacks refused by name; outputs keep their ImageJ header and pixel size and name their DORA in Software"
+  "pilot readiness (41a): stacks follow their axes (neighbours along T with C and Z fixed, Z-stacks refused for time-lapse modes, unlabelled planes taken as T with a notice), every page read and an ImageJ stack over 4 GB refused, routing decided once per stack and never for a handful of images, unknown options refused; one entry point (app = CLI); LZW read, other codecs and unlabelled OME-XML stacks refused by name; outputs keep their ImageJ header and pixel size and name their DORA in Software; denoise --report writes one self-contained page"
 )
 LAST=$((${#NAMES[@]} - 1))
 LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dora-bricks.XXXXXX")"
@@ -1023,7 +1023,12 @@ gate_41() {   # pilot-core (brick 41a: pilot readiness, core and CLI)
   else
     echo "independent-reader metadata check skipped (Pillow not installed; CI installs it); unit tests cover the tags"
   fi
-  echo ">> stacks by their axes, every plane read, the refusals work from the CLI, a model's hash is its content, and outputs keep their metadata"
+  # denoise --report: one self-contained page (the picture embedded, nothing fetched) that names the model it used.
+  dotnet "$CLI_DLL" denoise --weights "$t/w.bin" --in "$fx/imagej_calibrated_t3.tif" --out "$t/rep.tif" --report "$t/report.html" >/dev/null || return 1
+  grep -q 'src="data:image/png;base64,' "$t/report.html" || { echo ">> the report should embed its picture"; return 1; }
+  ! grep -qE '(src|href)="[^d#]|<script|<link' "$t/report.html" || { echo ">> the report must not fetch anything"; return 1; }
+  grep -qF "$h1" "$t/report.html" || { echo ">> the report should name its model's content hash ($h1)"; return 1; }
+  echo ">> stacks by their axes, every plane read, the refusals work from the CLI, a model's hash is its content, outputs keep their metadata, and --report writes one self-contained page"
 }
 
 # recorded_block <marker>: the contents of the ```text block between <!-- marker --> and <!-- /marker --> in RESULTS.md.
@@ -1055,6 +1060,7 @@ MUTATIONS=(
   '3|src/DoraBio.Core/IO/PngDecoder.cs|3 => (a + b) >> 1,|3 => (a + b + 1) >> 1,'
   '4|src/DoraBio.Core/TiledInference.cs|margin = RoundUp(net.Config.ReceptiveRadius, align);|margin = RoundUp(net.Config.ReceptiveRadius, align) - 1;'
   '5|src/DoraBio.Core/Training/Trainer.cs|old * cfg.LearningRateDecay|old / cfg.LearningRateDecay'
+  '5|src/DoraBio.Core/Training/ValidationSet.cs|        var pool = _pool!;|        var pool = new WorkspacePool(net);'
   '6|godot/samples/synthetic_cells.tif||<DELETE-FILE>'
   $'7|godot/scripts/DoraBioBridge.cs|    /// <summary>True while a denoise, adapt or training job runs. Only one job runs at a time.</summary>\n|'
   '11|tools/fetch_fmd.sh|d7a14d3be17368dbfe24a5cfe8ed0d40d403d7902d70fe914d04303e4aa8f2f6"|"'
@@ -1136,6 +1142,9 @@ MUTATIONS=(
   '41|src/DoraBio.Core/IO/ImageStack.cs|            if (root.EnumerateObject().All(p => p.Name is "shape" or "axes")) return description;|            return description;'
   '41|src/DoraBio.Core/IO/TiffStack.cs|_tags?.Resolution is { } resolution ? new TiffPageTags { Resolution = resolution } : null;|null;'
   '41|src/DoraBio.Core/IO/ImageStack.cs|axes = layout.Axes + "YX" });|axes = "I" + "YX" });'
+  '41|src/DoraBio.Core/ResidualCheck.cs|= Byte(0.5 + (raw.Pixels[i] - denoised.Pixels[i]) / (2 * bound));|= Byte((raw.Pixels[i] - denoised.Pixels[i]) / (2 * bound));'
+  '41|src/DoraBio.Core/ResidualCheck.cs|double bound = Math.Max(Normalization.Quantile(magnitude, 0.99), 1e-12);|double bound = Math.Max(magnitude[^1], 1e-12);'
+  '41|src/DoraBio.Core/ResidualCheck.cs|public double NetChange => _raw == 0 ? 0 : _r / _raw;|public double NetChange => _raw == 0 ? 0 : -_r / _raw;'
 )
 
 self_test() {
@@ -1223,7 +1232,12 @@ for i in $(seq "$FIRST" "$UPTO"); do
     SUMMARY+=("$i ${NAMES[$i]}: SKIPPED (not verified)")
   else
     printf "FAIL  (%ss, exit %s%s)\n" "$took" "$code" "$( ((code > 128)) && echo ", killed by signal $((code - 128))" )"
-    echo "──── last 40 lines of brick $i log ────"
+    # Keep the whole log (the run's logs are deleted on exit) and name the failed tests, which a long stack trace
+    # can push out of the last 40 lines: an intermittent failure must leave its evidence behind.
+    kept="${TMPDIR:-/tmp}/dora-bricks-failed-$i-$(date +%Y%m%d-%H%M%S).log"
+    cp "$log" "$kept"
+    grep -E '^ +Failed [A-Za-z]' "$log" | head -20 || true
+    echo "──── last 40 lines of brick $i log (all of it: $kept) ────"
     tail -40 "$log"
     echo "───────────────────────────────────────"
     echo "Stopped at brick $i. Fix it before laying anything on top."

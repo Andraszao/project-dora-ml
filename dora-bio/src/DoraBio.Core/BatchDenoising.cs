@@ -372,7 +372,7 @@ public static class BatchDenoising
     /// metadata against the pages); a PNG (always one frame) is decoded and re-wrapped as a one-page in-memory TIFF, which
     /// stores its values exactly as float32.
     /// </summary>
-    private static ImageStack OpenAsStack(string path, string? axes)
+    internal static ImageStack OpenAsStack(string path, string? axes)
     {
         var head = new byte[1024];   // an MRC header is 1024 bytes
         int read;

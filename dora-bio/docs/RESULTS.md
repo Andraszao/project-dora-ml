@@ -1123,6 +1123,28 @@ still refused, now with "TIFF compression 50000 (Zstandard) is not supported", t
 `--axes` its copy needs (`ExtStacks` pins that text, so `stack-check` fails if the refusal changes). LZW is decoded. A
 denoised copy keeps an ImageJ header and the pixel size, and says in its Software tag which DORA build and model made it.
 
+*Note added 2026-11-28 (brick 41): the memory and intermittent-test follow-ups.* Measured on the same 4-core container,
+peak resident memory (VmHWM) sampled every 0.5 s as above, plus the collector's own figures at the end of each run.
+
+- **Training memory, reproduced and fixed.** The egg chamber's exact command (the stack file with `--frame-range 0-163`;
+  today with `--axes TYX`, since brick 41 no longer takes Z planes as frames) peaked at **2656 MB**, with 3160 MB committed
+  by the collector at the end. The same 164 planes read as a folder peaked at 708 MB (780 MB with Server GC, so idle
+  collector headroom wasn't the cause). The cause: `ValidationSet.Evaluate` made a new workspace pool every epoch, and
+  neither it nor the training step capped its parallel loop, so the thread pool added workers that each rented another
+  workspace. With 64 px validation patches (whole held-out frames, the stack path) every epoch's workspaces were
+  large-object garbage. Fixed: one pool per run and at most one worker per core (`WorkspacePool.OnePerCore`); a brick 5
+  test bounds the workspaces and a planted bug proves it. After the fix: **193 MB** (stack path) and **183 MB** (folder),
+  the same 3 minutes, and bit-identical weights. Before it, a 512 MB heap cap (`DOTNET_GCHeapHardLimit`) had already run
+  the folder path to the same weights at 463 MB, and 256 MB ran out of memory in the U-Net's workspaces.
+- **Denoising memory is collector headroom.** BBBC039's 200-image folder peaked at 1080 MB, but only 287 MB survived a
+  full collection at the end, the same 287 MB as after 20 images (one U-Net inference workspace per core): not a leak.
+  Under a 512 MB cap it peaked at 442 MB, in the same time, with byte-identical outputs. A laptop that needs less can set
+  `DOTNET_GCHeapHardLimit`; DORA's defaults are unchanged. Every run that prints a peak now prints the managed heap too.
+- **The intermittent test wasn't reproduced:** 50 full-suite runs, none failed (15 plain, then 35 cycling through tiered
+  compilation off, quick JIT for loops off, PGO off, Server GC, a Debug build, and every core busy). The two weak-reference
+  tests already track frames through a non-inlined helper and collect from the caller. A failing gate now keeps its whole
+  log and names the failed tests, and `tools/ci/test_loop.sh` repeats the hunt with TRX logs kept.
+
 ## Systems S1 + S2 (brick 36): where the time goes, and 512-bit kernels
 
 Measured with `dora-bio bench --roofline` (and `dora-bio bench` for whole-model timings) on the 4-vCPU cloud container

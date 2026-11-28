@@ -27,6 +27,26 @@ public readonly record struct TiffResolution(uint XNumerator, uint XDenominator,
 }
 
 /// <summary>
+/// How a page's pixels are stored (brick 41, for <c>denoise --report</c>): the tags a reader decodes them by.
+/// </summary>
+/// <param name="BitsPerSample">BitsPerSample (258): 8, 16 or 32.</param>
+/// <param name="SampleFormat">SampleFormat (339): 1 unsigned integer, 2 signed integer, 3 floating point.</param>
+/// <param name="SamplesPerPixel">SamplesPerPixel (277): 1 for gray, 3 or 4 for RGB(A) (DORA reads their luminance).</param>
+/// <param name="Compression">Compression (259): 1 none, 5 LZW, 8 or 32946 Deflate, 32773 PackBits.</param>
+/// <param name="Predictor">Predictor (317): 1 none, 2 horizontal differencing.</param>
+public sealed record TiffPageFormat(int BitsPerSample, uint SampleFormat, int SamplesPerPixel, uint Compression, uint Predictor)
+{
+    /// <summary>E.g. "16-bit unsigned integer, LZW with the horizontal predictor".</summary>
+    public override string ToString()
+    {
+        string kind = SampleFormat switch { 2 => "signed integer", 3 => "floating point", _ => "unsigned integer" };
+        string samples = SamplesPerPixel == 1 ? "" : $", {SamplesPerPixel} samples per pixel";
+        string predictor = Predictor == 2 ? " with the horizontal predictor" : "";
+        return $"{BitsPerSample}-bit {kind}{samples}, {TiffCodec.CompressionName(Compression)}{predictor}";
+    }
+}
+
+/// <summary>
 /// The tags a written page carries besides its pixels (brick 41): what an output keeps of its input, and what says
 /// which DORA made it. The description and software go on the first page, the resolution on every page.
 /// </summary>

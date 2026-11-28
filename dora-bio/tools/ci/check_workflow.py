@@ -8,7 +8,8 @@ These are not a full GitHub Actions linter. The real proof is a green run on Git
 properties DORA relies on:
   core:  follows the CI spend policy (runs on PRs into main, pushes to main and manual dispatch only; never for
          docs-only changes; superseded runs cancelled), runs the *full* ./bricks.sh (which includes the gate
-         self-test), has read-only permissions and a timeout.
+         self-test), has read-only permissions and a timeout; and (brick 41) builds the single-file CLI on Linux,
+         Windows and macOS and runs it there (job publish-smoke, tools/ci/publish_smoke.sh), after the gates.
   godot: the headless-Godot job pins the same Godot version as the Godot.NET.Sdk in godot/DoraBio.Godot.csproj,
          verifies the download against a pinned SHA-512, and makes gate 8 mandatory (REQUIRE_GODOT=1), so CI
          can never report a skipped Godot test as success.
@@ -71,6 +72,25 @@ def check_core(doc, problems):
         problems.append("job 'gates' must run the full './bricks.sh' (no brick limit)")
     if job.get("defaults", {}).get("run", {}).get("working-directory") != "dora-bio":
         problems.append("job 'gates' must run in working-directory dora-bio")
+
+    publish = doc.get("jobs", {}).get("publish-smoke")
+    if not publish:
+        problems.append("missing job 'publish-smoke' (the single-file CLI built and run on Linux, Windows and macOS)")
+        return
+    if publish.get("needs") != "gates":
+        problems.append("job 'publish-smoke' must need 'gates' (no point publishing a red core)")
+    if "timeout-minutes" not in publish:
+        problems.append("job 'publish-smoke' needs timeout-minutes")
+    runners = [str(entry.get("os", "")) for entry in publish.get("strategy", {}).get("matrix", {}).get("include", [])]
+    for system in ("ubuntu-", "windows-", "macos-"):
+        if not any(r.startswith(system) for r in runners):
+            problems.append(f"job 'publish-smoke' must run on a {system.rstrip('-')} runner")
+    if publish.get("runs-on") != "${{ matrix.os }}":
+        problems.append("job 'publish-smoke' must run on each matrix runner (runs-on: ${{ matrix.os }})")
+    if "tools/ci/publish_smoke.sh" not in run_lines(publish):
+        problems.append("job 'publish-smoke' must run tools/ci/publish_smoke.sh")
+    if publish.get("defaults", {}).get("run", {}).get("shell") != "bash":
+        problems.append("job 'publish-smoke' must use bash on every runner (defaults.run.shell: bash)")
 
 
 def check_godot(doc, csproj_path, problems):

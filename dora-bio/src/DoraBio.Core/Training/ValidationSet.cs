@@ -129,15 +129,25 @@ internal sealed class ValidationSet
         return changed / Math.Max(1, centres);
     }
 
+    private WorkspacePool? _pool;
+    private DenoisingNet? _poolNet;
+
+    /// <summary>Workspaces the validation pool has created (at most one per core over a whole run; for tests).</summary>
+    internal int WorkspacesCreated => _pool?.Created ?? 0;
+
     /// <summary>Scores the network on every patch in parallel. Read-only with respect to the network.</summary>
     public ValidationScore Evaluate(DenoisingNet net)
     {
-        var pool = new WorkspacePool(net);
+        // One pool for the whole run, not one per epoch (brick 41, found measuring the wild-data egg chamber): each
+        // epoch's fresh workspaces became garbage of large-object arrays (64 px patches), which the collector reclaims only
+        // in gen 2 and never compacts, and the process climbed to 2.7 GB resident training on a 10 MB volume.
+        if (!ReferenceEquals(_poolNet, net)) (_pool, _poolNet) = (new WorkspacePool(net), net);
+        var pool = _pool!;
         var losses = new double[_patches.Count];
         var mses = new double[_patches.Count];
         var ssims = new double[_patches.Count];
 
-        Parallel.For(0, _patches.Count, () => pool.Rent(), (i, _, ws) =>
+        Parallel.For(0, _patches.Count, WorkspacePool.OnePerCore(), () => pool.Rent(), (i, _, ws) =>
         {
             var p = _patches[i];
             var output = new float[p.Noisy.Length];

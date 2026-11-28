@@ -214,4 +214,24 @@ public class TrainingTests
         Assert.All(flat, p => Assert.False(p.HasClean));
         Directory.Delete(dir, recursive: true);
     }
+
+    [Fact]
+    public void TrainingKeepsAtMostOneWorkspacePerCoreForTheWholeRun()
+    {
+        // Brick 41 measured training on a 10 MB volume peaking at 2.7 GB resident: a new validation pool every epoch, and
+        // loops that let the thread pool add workers, each renting a workspace of tens of MB. Over many epochs and steps,
+        // each pool now holds at most one workspace per core (and the weights are bit for bit what they were).
+        var net = DenoisingNet.Create(NetConfig.UNet(8, 2), seed: 1);
+        var images = SyntheticFluorescence.GenerateDataset(4, 64, seed: 3).Select(p => p with { Clean = null }).ToList();
+        var config = new TrainerConfig { Mode = TrainingMode.Noise2Void, PatchSize = 32, BatchSize = 32, ValidationPatches = 64, Seed = 1 };
+        var validation = new ValidationSet(images, config);
+        for (int epoch = 0; epoch <= Environment.ProcessorCount; epoch++) validation.Evaluate(net);   // a pool per epoch would exceed the bound
+        Assert.InRange(validation.WorkspacesCreated, 1, Environment.ProcessorCount);
+
+        var sampler = new PatchSampler(images, config.PatchSize, config.Mode, config.MaskRatio, new Random(1), config.Augmentation);
+        var optimizer = new AdamOptimizer(net.ParameterCount, config.LearningRate);
+        var stepper = new BatchStepper(net, config.BatchSize, config.PatchSize);
+        for (int step = 0; step < 60; step++) stepper.Step(sampler, optimizer);
+        Assert.InRange(stepper.WorkspacesCreated, 1, Environment.ProcessorCount);
+    }
 }

@@ -64,6 +64,8 @@ public static class Program
                    [--vst]  (for models trained with --vst)
                    [--axes TYX|ZYX|TZCYX…]  (the stack's axes when its metadata is missing or wrong; a time-lapse model
                     steps along T with every other axis fixed, refuses a Z-stack, and takes unlabelled planes as T)
+                   [--report REPORT.html]  (one self-contained page: input, model, settings, and the residual to look at
+                    before measuring; one image or stack, not a folder)
                    Output is float32 TIFF in the input's original intensity units, one page per input page, in order.
           eval     --weights WEIGHTS.bin --data DIR
                    Per-image PSNR/SSIM of noisy, bilateral and DORA against clean (needs clean images).
@@ -306,6 +308,7 @@ public static class Program
             Axes = o.StringOrNull("axes"),
             Vst = o.Has("vst"),
             TileCore = o.Int("tile", TiledInference.DefaultTileCore),
+            Report = o.StringOrNull("report"),
         }, Console.WriteLine);
         return 0;
     }
@@ -1192,7 +1195,7 @@ public static class Program
         "fmd-levels", "footprint", "frame-block", "frame-range", "frames", "height", "in", "init", "journey",
         "json", "keep", "label", "labels", "level", "levels", "lr", "mask-ratio", "mode", "noise-threshold",
         "offset", "only", "out", "out-correlated", "patch", "patience", "peak", "per-frame", "per-image",
-        "precise", "predictions", "quick", "reference", "roofline", "root", "route", "save-last", "seed",
+        "precise", "predictions", "quick", "reference", "report", "roofline", "root", "route", "save-last", "seed",
         "select", "sequence", "sigma-scale", "size", "split", "stack", "steps", "struct", "subset", "tile",
         "validation-range", "validation-seed", "vst", "weights", "weights-clean", "weights-correlated", "width",
         };

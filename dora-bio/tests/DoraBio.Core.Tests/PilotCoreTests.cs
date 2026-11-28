@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using DoraBio.Core.Data;
 using DoraBio.Core.IO;
 using DoraBio.Core.Nn;
@@ -400,5 +401,173 @@ public class PilotCoreTests
         Assert.Equal("{\"shape\":[2,4,5]}", ImageStack.TifffileHeaderFor("{\"shape\": [2, 4, 5], \"exposure\": 0.1}", 5, 4));
         Assert.Null(ImageStack.TifffileHeaderFor("{\"shape\": [4, 5, 3], \"axes\": \"YXS\"}", 5, 4));
         Assert.Null(ImageStack.TifffileHeaderFor("{\"shape\": [2, 8, 8]}", 5, 4));
+    }
+
+    [Fact]
+    public void TheResidualCheckTellsRemovedNoiseFromRemovedStructure()
+    {
+        var frame = SyntheticFluorescence.Generate(96, 96, seed: 21);
+        // A perfect denoiser leaves the noise itself: zero-mean, unrelated to the output and between neighbours.
+        var perfect = new ResidualCheck();
+        perfect.Add(frame.Noisy, frame.Clean);
+        Assert.InRange(perfect.ResidualOutputCorrelation, -0.1, 0.1);
+        Assert.InRange(perfect.LagX, -0.1, 0.1);
+        Assert.InRange(perfect.LagY, -0.1, 0.1);
+        Assert.InRange(perfect.NetChange, -0.01, 0.01);
+        Assert.True(perfect.RmsChange > 0);
+
+        // One that also takes away a fifth of the signal: the residual carries structure, and the output is darker.
+        var shrunk = new GrayImage(96, 96);
+        for (int i = 0; i < shrunk.Length; i++) shrunk.Pixels[i] = 0.8f * frame.Clean.Pixels[i];
+        var lossy = new ResidualCheck();
+        lossy.Add(frame.Noisy, shrunk);
+        // (How far above 0 depends on the noise: here 0.2 of the signal's spread against the photon noise.)
+        Assert.True(lossy.ResidualOutputCorrelation > perfect.ResidualOutputCorrelation + 0.15, $"correlation {lossy.ResidualOutputCorrelation}");
+        Assert.True(lossy.LagX > perfect.LagX + 0.05 && lossy.LagY > perfect.LagY + 0.05, $"neighbour correlation {lossy.LagX}, {lossy.LagY}");
+        Assert.InRange(lossy.NetChange, 0.15, 0.25);
+
+        // Nothing removed: nothing changed.
+        var none = new ResidualCheck();
+        none.Add(frame.Noisy, frame.Noisy);
+        Assert.Equal((0.0, 0.0), (none.NetChange, none.RmsChange));
+        Assert.Throws<ArgumentException>(() => none.Add(frame.Noisy, new GrayImage(95, 96)));
+    }
+
+    [Fact]
+    public void TheReportPictureCentresTheResidualOnMidGrayAndClipsItAtThe99thPercentile()
+    {
+        // 200 pixels: residual 0 in the top half, ±1 alternating in the bottom half, and one hot pixel of +1000. The
+        // 99th percentile of |residual| is 1, so ±1 spans the whole gray range; the hot pixel only saturates itself.
+        const int w = 20, h = 10, gap = 4;
+        var raw = new GrayImage(w, h);
+        var denoised = new GrayImage(w, h);
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++)
+            {
+                int i = y * w + x;
+                denoised.Pixels[i] = 100 + (i % 7);
+                raw.Pixels[i] = denoised.Pixels[i] + (y < h / 2 ? 0 : (x % 2 == 0 ? 1 : -1));
+            }
+        raw.Pixels[0] += 1000;
+        var png = PngDecoder.Decode(ResidualCheck.Picture(raw, denoised));
+        Assert.Equal((3 * w + 2 * gap, h), (png.Width, png.Height));
+        float Residual(int x, int y) => png.Pixels[y * png.Width + 2 * (w + gap) + x];
+        Assert.Equal(128, Residual(5, 2));     // zero is mid-gray (127.5 rounds to even)
+        Assert.Equal(255, Residual(4, 7));     // +1: DORA removed brightness here
+        Assert.Equal(0, Residual(5, 7));       // −1: DORA added brightness here
+        Assert.Equal(255, Residual(0, 0));     // the hot pixel, clipped
+        Assert.Equal(255, png.Pixels[w]);      // the gap between panels is white
+    }
+
+    [Fact]
+    public void ADenoiseReportIsOneSelfContainedPageAboutTheRun()
+    {
+        string dir = TestUtil.TempDirectory();
+        try
+        {
+            // A real-world name with markup characters in it: escaped in the page, never markup.
+            string input = Path.Combine(dir, "WT_GFP&RFP_#2.tif"), output = Path.Combine(dir, "out.tif"), report = Path.Combine(dir, "r.html");
+            File.Copy(TestUtil.Fixture("imagej_calibrated_t3.tif"), input);
+            var net = DenoisingNet.Create(new NetConfig(4, [1, 1]), seed: 3);
+            var model = new LoadedModel(net, new ModelInfo(net.Config, "2.0.0-bio", "a test model <not real>", DateTime.UnixEpoch));
+            var lines = new List<string>();
+            Pipeline.Denoise(new DenoiseRequest { Input = input, Output = output, Model = model, Report = report, TileCore = 16 }, lines.Add);
+            Assert.Contains(lines, l => l.StartsWith("📝 report → ", StringComparison.Ordinal));
+            string html = File.ReadAllText(report);
+
+            // Self-contained: the picture is embedded, and nothing is fetched (no external source, link or script).
+            Assert.Contains("data:image/png;base64,", html);
+            Assert.DoesNotMatch("(src|href)=\"(?!data:)", html);
+            Assert.DoesNotContain("<script", html);
+            Assert.DoesNotContain("<link", html);
+            // What was done, to what, with what.
+            Assert.Contains(Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(input))).ToLowerInvariant(), html);
+            Assert.Contains("16-bit unsigned integer, uncompressed", html);
+            Assert.Contains("T=3", html);
+            Assert.Contains(System.Net.WebUtility.HtmlEncode("0.65 × 0.65 um per pixel"), html);
+            Assert.Contains("the ImageJ header, verbatim", html);
+            Assert.Contains(WeightsFile.ContentHash(net), html);
+            Assert.Contains(System.Net.WebUtility.HtmlEncode($"DORA {Pipeline.Version}; denoised single-frame"), html);
+            Assert.Contains("a test model &lt;not real&gt;", html);   // text from the files is escaped, never markup
+            Assert.Contains("WT_GFP&amp;RFP_#2.tif", html);
+            Assert.DoesNotContain("GFP&RFP", html);
+
+            // Numbers don't follow the machine's locale (a comma would be a decimal point in some labs' reports).
+            var culture = System.Globalization.CultureInfo.CurrentCulture;
+            try
+            {
+                System.Globalization.CultureInfo.CurrentCulture = new System.Globalization.CultureInfo("de-DE");
+                Pipeline.Denoise(new DenoiseRequest { Input = input, Output = output, Model = model, Report = report, TileCore = 16 });
+            }
+            finally
+            {
+                System.Globalization.CultureInfo.CurrentCulture = culture;
+            }
+            string german = File.ReadAllText(report);
+            Assert.Matches(@"3 planes in \d+\.\d s", german);
+            Assert.Matches(@"x [+-]\d\.\d{3}, y [+-]\d\.\d{3}", german);
+
+            // A folder is refused before any work: one report describes one image or stack.
+            Assert.Throws<ArgumentException>(() => Pipeline.Denoise(new DenoiseRequest
+            {
+                Input = dir, Output = Path.Combine(dir, "folder_out"), Model = model, Report = Path.Combine(dir, "x.html"),
+            }));
+            Assert.False(Directory.Exists(Path.Combine(dir, "folder_out")));
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void CancellingStopsTrainingWithinAStepAndDenoisingWithinATile()
+    {
+        // The app waits a few seconds for its job when it quits (DoraBioBridge._ExitTree): that only works if a cancel
+        // lands within a step or a tile, not at the end of an epoch or a frame. An epoch of a million steps (hours) and a
+        // 2048² frame through the U-Net (seconds) are each cancelled mid-flight and must stop promptly.
+        var images = SyntheticFluorescence.GenerateDataset(4, 64, seed: 5).Select(p => p with { Clean = null }).ToList();
+        string dir = TestUtil.TempDirectory();
+        try
+        {
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            using (var cancel = new CancellationTokenSource(TimeSpan.FromMilliseconds(500)))
+            {
+                var trained = Pipeline.Train(new TrainRequest
+                {
+                    Dataset = images, DatasetName = "test", Out = Path.Combine(dir, "w.bin"), Route = "off", Arch = "dilated",
+                    Epochs = 1, Steps = 1_000_000, Batch = 2, Patch = 32,
+                }, cancellation: cancel.Token);
+                Assert.Equal("cancelled", Assert.Single(trained).Result.StopReason);
+            }
+            Assert.True(clock.Elapsed < TimeSpan.FromSeconds(30), $"training took {clock.Elapsed.TotalSeconds:0.0} s to stop");
+
+            // Cancelled before training starts (while the data loads): nothing is trained.
+            using (var already = new CancellationTokenSource())
+            {
+                already.Cancel();
+                Assert.ThrowsAny<OperationCanceledException>(() => Pipeline.Train(new TrainRequest
+                {
+                    Dataset = images, DatasetName = "test", Out = Path.Combine(dir, "never.bin"), Epochs = 1, Steps = 1, Batch = 2, Patch = 32,
+                }, cancellation: already.Token));
+                Assert.False(File.Exists(Path.Combine(dir, "never.bin")));
+            }
+
+            string big = Path.Combine(dir, "big.tif");
+            File.WriteAllBytes(big, TiffCodec.Encode(TestUtil.RandomImage(2048, 2048, 7), TiffSampleType.Float32));
+            var unet = DenoisingNet.Create(NetConfig.UNet(16, 2), seed: 1);
+            var model = new LoadedModel(unet, new ModelInfo(unet.Config, "2.0.0-bio", "test", DateTime.UnixEpoch));
+            clock.Restart();
+            using (var cancel = new CancellationTokenSource(TimeSpan.FromMilliseconds(300)))
+                Assert.ThrowsAny<OperationCanceledException>(() => Pipeline.Denoise(new DenoiseRequest
+                {
+                    Input = big, Output = Path.Combine(dir, "big_out.tif"), Model = model, TileCore = 64,
+                }, cancellation: cancel.Token));
+            Assert.True(clock.Elapsed < TimeSpan.FromSeconds(5), $"denoising took {clock.Elapsed.TotalSeconds:0.0} s to stop");
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
     }
 }

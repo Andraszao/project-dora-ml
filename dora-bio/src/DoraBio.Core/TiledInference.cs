@@ -104,7 +104,7 @@ public static class TiledInference
         int maxWindowW = Math.Min(w, tileCore + 2 * margin), maxWindowH = Math.Min(h, tileCore + 2 * margin);
         // At most one task per core: Parallel.For would otherwise let the thread pool add workers over a long run,
         // and each new worker rents (and the pool then keeps) another workspace of tens of MB.
-        var options = new ParallelOptions { CancellationToken = cancellation, MaxDegreeOfParallelism = Environment.ProcessorCount };
+        var options = WorkspacePool.OnePerCore(cancellation);
         Parallel.For(0, tiles.Count, options, () =>
         {
             var workspace = pool.Rent();

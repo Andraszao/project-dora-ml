@@ -68,6 +68,15 @@ public sealed class TiffStackReader : IDisposable
     /// <summary>The first page's Software tag (305), or null: for a DORA output, the version, model and mode that made it.</summary>
     public string? Software => _pages.Count == 0 ? null : TiffCodec.Software(_stream, _littleEndian, _big, _pages[0]);
 
+    /// <summary>How a page stores its pixels: bit depth, sample format, samples per pixel, compression and predictor.</summary>
+    /// <exception cref="ArgumentOutOfRangeException">No such page.</exception>
+    public TiffPageFormat PageFormat(int page)
+    {
+        if ((uint)page >= (uint)_pages.Count)
+            throw new ArgumentOutOfRangeException(nameof(page), $"TIFF has only {_pages.Count} page(s).");
+        return TiffCodec.PageFormat(_stream, _littleEndian, _big, _pages[page]);
+    }
+
     /// <summary>A page's width and height, from its tags (nothing is decoded).</summary>
     /// <exception cref="ArgumentOutOfRangeException">No such page.</exception>
     public (int Width, int Height) PageSize(int page)
