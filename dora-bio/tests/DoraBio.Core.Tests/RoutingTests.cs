@@ -86,7 +86,7 @@ public class RoutingTests
         var images = raw.Select(p => p.Normalize().Pair).ToList();
         string dir = TestUtil.TempDirectory(), outPath = Path.Combine(dir, "w.bin");
         var config = new TrainerConfig { MaxEpochs = 1, StepsPerEpoch = 1, BatchSize = 2, PatchSize = 32, ValidationPatches = 2, Seed = 3 };
-        var trained = RoutedNoise2Void.Train(images, config, outPath, "test data");
+        var trained = RoutedNoise2Void.Train(images, config, outPath, "test data", minimumImages: 1);   // 2 + 2: below the default minimum
         Assert.Equal([NoiseKind.Independent, NoiseKind.Correlated], trained.Select(t => t.Kind));
         Assert.Equal([2, 2], trained.Select(t => t.Images));
         var (unet, unetInfo) = WeightsFile.Load(outPath);

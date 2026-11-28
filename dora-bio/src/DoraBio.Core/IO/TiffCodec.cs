@@ -109,19 +109,26 @@ public static class TiffCodec
     /// <param name="pages">The images, first page first (at least one).</param>
     /// <param name="sampleType">Storage format for every page.</param>
     /// <param name="deflate">Compress each page's strip with zlib/Deflate.</param>
+    /// <param name="description">Optional ImageDescription for the first page (e.g. an ImageJ header), or null for none.</param>
     /// <returns>The complete file contents.</returns>
     /// <exception cref="ArgumentException">No pages, or the file would exceed TIFF's 4 GB offset limit.</exception>
-    public static byte[] EncodeStack(IReadOnlyList<GrayImage> pages, TiffSampleType sampleType = TiffSampleType.UInt16, bool deflate = false)
+    public static byte[] EncodeStack(IReadOnlyList<GrayImage> pages, TiffSampleType sampleType = TiffSampleType.UInt16, bool deflate = false,
+        string? description = null)
     {
         if (pages.Count == 0) throw new ArgumentException("A TIFF needs at least one page.", nameof(pages));
         using var file = new MemoryStream();
-        using (var writer = new TiffStackWriter(file, sampleType, deflate, leaveOpen: true))
+        using (var writer = new TiffStackWriter(file, sampleType, deflate, leaveOpen: true, description: description))
             foreach (var page in pages) writer.Append(page);
         return file.ToArray();
     }
 
-    /// <summary>One page's pixel strip and its IFD (next-IFD offset 0), with the strip to be written at <paramref name="stripOffset"/>.</summary>
-    internal static (byte[] Strip, byte[] Ifd) EncodePage(GrayImage image, TiffSampleType sampleType, bool deflate, uint stripOffset)
+    /// <summary>
+    /// One page's pixel strip and its IFD (next-IFD offset 0), with the strip to be written at <paramref name="stripOffset"/>.
+    /// With a <paramref name="descriptionLength"/> (bytes, NUL included), the IFD also points at an ImageDescription (tag 270,
+    /// ASCII) placed right after the strip and its word-alignment pad: <c>DescriptionOffset</c> says where to write it.
+    /// </summary>
+    internal static (byte[] Strip, byte[] Ifd, uint DescriptionOffset) EncodePage(GrayImage image, TiffSampleType sampleType, bool deflate,
+        uint stripOffset, uint descriptionLength = 0)
     {
         int bytesPerSample = sampleType switch { TiffSampleType.UInt8 => 1, TiffSampleType.UInt16 => 2, _ => 4 };
         var pixelBytes = new byte[image.Length * bytesPerSample];
@@ -143,19 +150,25 @@ public static class TiffCodec
         }
 
         byte[] strip = deflate ? Deflate(pixelBytes) : pixelBytes;
-        var entries = new (ushort Tag, ushort Type, uint Value)[]
+        uint descriptionOffset = descriptionLength == 0 ? 0 : (uint)((stripOffset + (long)strip.Length + 1) / 2 * 2);
+        var list = new List<(ushort Tag, ushort Type, uint Count, uint Value)>
         {
-            (TagImageWidth, 4, (uint)image.Width),
-            (TagImageLength, 4, (uint)image.Height),
-            (TagBitsPerSample, 3, (uint)(bytesPerSample * 8)),
-            (TagCompression, 3, deflate ? CompressionDeflate : CompressionNone),
-            (TagPhotometric, 3, 1),                  // BlackIsZero
-            (TagStripOffsets, 4, stripOffset),
-            (TagSamplesPerPixel, 3, 1),
-            (TagRowsPerStrip, 4, (uint)image.Height),
-            (TagStripByteCounts, 4, (uint)strip.Length),
-            (TagSampleFormat, 3, sampleType == TiffSampleType.Float32 ? 3u : 1u),
+            (TagImageWidth, 4, 1, (uint)image.Width),
+            (TagImageLength, 4, 1, (uint)image.Height),
+            (TagBitsPerSample, 3, 1, (uint)(bytesPerSample * 8)),
+            (TagCompression, 3, 1, deflate ? CompressionDeflate : CompressionNone),
+            (TagPhotometric, 3, 1, 1),               // BlackIsZero
         };
+        if (descriptionLength > 0) list.Add((TagImageDescription, 2, descriptionLength, descriptionOffset));   // tags stay in ascending order
+        list.AddRange(
+        [
+            (TagStripOffsets, 4, 1, stripOffset),
+            (TagSamplesPerPixel, 3, 1, 1),
+            (TagRowsPerStrip, 4, 1, (uint)image.Height),
+            (TagStripByteCounts, 4, 1, (uint)strip.Length),
+            (TagSampleFormat, 3, 1, sampleType == TiffSampleType.Float32 ? 3u : 1u),
+        ]);
+        var entries = list.ToArray();
 
         var ifd = new byte[2 + entries.Length * 12 + 4];
         BinaryPrimitives.WriteUInt16LittleEndian(ifd, (ushort)entries.Length);
@@ -164,11 +177,11 @@ public static class TiffCodec
             var span = ifd.AsSpan(2 + e * 12, 12);
             BinaryPrimitives.WriteUInt16LittleEndian(span, entries[e].Tag);
             BinaryPrimitives.WriteUInt16LittleEndian(span[2..], entries[e].Type);
-            BinaryPrimitives.WriteUInt32LittleEndian(span[4..], 1);
+            BinaryPrimitives.WriteUInt32LittleEndian(span[4..], entries[e].Count);
             if (entries[e].Type == 3) BinaryPrimitives.WriteUInt16LittleEndian(span[8..], (ushort)entries[e].Value);
             else BinaryPrimitives.WriteUInt32LittleEndian(span[8..], entries[e].Value);
         }
-        return (strip, ifd);   // next-IFD offset: 0 until EncodeStack patches it
+        return (strip, ifd, descriptionOffset);   // next-IFD offset: 0 until EncodeStack patches it
     }
 
     /// <summary>Validates the header and returns a reader for its byte order and variant, plus the first IFD's offset.</summary>

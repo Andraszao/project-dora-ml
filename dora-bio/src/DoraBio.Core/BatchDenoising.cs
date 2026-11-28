@@ -90,7 +90,10 @@ public sealed class FrameDenoiser
     /// <param name="withBaseline">Also run the bilateral filter.</param>
     /// <param name="cancellation">Stops between tiles.</param>
     /// <exception cref="ArgumentException">The model and the number of frames given don't match.</exception>
-    public FrameResult Denoise(GrayImage raw, IReadOnlyList<GrayImage>? context, bool withBaseline = false, CancellationToken cancellation = default)
+    /// <param name="correlated">The routing decision when a caller makes it once for a whole stack (brick 41); null to run the
+    /// noise check on this frame.</param>
+    public FrameResult Denoise(GrayImage raw, IReadOnlyList<GrayImage>? context, bool withBaseline = false, CancellationToken cancellation = default,
+        bool? correlated = null)
     {
         int needed = Net.Config.WindowFrames - 1;
         if ((context?.Count ?? 0) != needed)
@@ -101,8 +104,8 @@ public sealed class FrameDenoiser
                     : $"This model takes {Net.Config.InputFrames} frames: denoise a time-lapse stack, so each frame comes with its neighbours.");
         var map = Normalization.FromPercentiles(raw.Pixels);
         var input = Normalization.Apply(raw, map);
-        bool correlated = CorrelatedNet is not null && LooksCorrelated(raw);
-        var (net, pool) = correlated ? (CorrelatedNet!, _correlatedPool!) : (Net, _pool);
+        bool routeCorrelated = CorrelatedNet is not null && (correlated ?? LooksCorrelated(raw));
+        var (net, pool) = routeCorrelated ? (CorrelatedNet!, _correlatedPool!) : (Net, _pool);
 
         GrayImage output, denoised;
         NoiseModel? model = null;
@@ -136,7 +139,7 @@ public sealed class FrameDenoiser
             baselineSigma = Metrics.EstimateNoiseSigma(filtered);
             baseline = Normalization.Invert(filtered, map);
         }
-        return new FrameResult(output, baseline, correlated, model,
+        return new FrameResult(output, baseline, routeCorrelated, model,
             Metrics.EstimateNoiseSigma(input), Metrics.EstimateNoiseSigma(denoised), baselineSigma);
     }
 
@@ -156,34 +159,80 @@ public static class BatchDenoising
     /// <summary>Called after each page: its index, the raw frame read from disk, and the result written out.</summary>
     public delegate void PageDone(int page, GrayImage raw, FrameResult result);
 
-    /// <summary>Denoises every page of <paramref name="input"/> into <paramref name="output"/>, in order.</summary>
+    /// <summary>
+    /// Denoises every page of an open TIFF reader into <paramref name="output"/>, in order: the same path as the
+    /// <see cref="ImageStack"/> overload, with the stack's axes read from the TIFF's own metadata.
+    /// </summary>
     /// <param name="denoiser">The per-frame pipeline.</param>
-    /// <param name="input">The stack (a single-page TIFF is a one-page stack).</param>
+    /// <param name="input">The stack (a single-page TIFF is a one-page stack). The caller still owns and disposes it.</param>
     /// <param name="output">Receives one denoised page per input page.</param>
     /// <param name="baseline">Optional: receives the bilateral baseline of each page.</param>
     /// <param name="onPage">Optional progress callback.</param>
     /// <param name="cancellation">Checked before each page and between tiles.</param>
     /// <returns>The number of pages denoised.</returns>
     public static int DenoiseStack(FrameDenoiser denoiser, TiffStackReader input, TiffStackWriter output, TiffStackWriter? baseline = null,
-        PageDone? onPage = null, CancellationToken cancellation = default)
+        PageDone? onPage = null, CancellationToken cancellation = default) =>
+        // Not disposed here: disposing the wrapper would dispose the caller's reader.
+        DenoiseStack(denoiser, ImageStack.FromTiff(input), output, baseline, onPage, null, cancellation);
+
+    /// <summary>
+    /// Denoises every plane of <paramref name="input"/> into <paramref name="output"/>, in storage order, so the output
+    /// has the input's page order. A multi-frame model gets each plane's neighbours along the stack's time axis with every
+    /// other axis held fixed (<see cref="TimeAxis"/>); <paramref name="onNotice"/> receives the notice when unlabelled
+    /// planes are taken as frames.
+    /// </summary>
+    /// <param name="denoiser">The per-frame pipeline.</param>
+    /// <param name="input">The stack, with its axes (from the file, or declared when opened).</param>
+    /// <param name="output">Receives one denoised page per plane.</param>
+    /// <param name="baseline">Optional: receives the bilateral baseline of each plane.</param>
+    /// <param name="onPage">Optional progress callback.</param>
+    /// <param name="onNotice">Optional: called with notices (unlabelled axes taken as T).</param>
+    /// <param name="cancellation">Checked before each plane and between tiles.</param>
+    /// <returns>The number of planes denoised.</returns>
+    /// <exception cref="ArgumentException">A multi-frame model on a stack with no time axis (a Z-stack, a single plane, …).</exception>
+    public static int DenoiseStack(FrameDenoiser denoiser, ImageStack input, TiffStackWriter output, TiffStackWriter? baseline = null,
+        PageDone? onPage = null, Action<string>? onNotice = null, CancellationToken cancellation = default)
     {
-        if (denoiser.Net.Config.WindowFrames > 1) return DenoiseWindowed(denoiser, input, output, baseline, onPage, cancellation);
+        bool? correlated = StackVerdict(denoiser, input, onNotice);
+        if (denoiser.Net.Config.WindowFrames > 1) return DenoiseWindowed(denoiser, input, output, baseline, onPage, onNotice, cancellation, correlated);
         long allocatedAtLastCollection = GC.GetTotalAllocatedBytes();
-        for (int p = 0; p < input.PageCount; p++)
+        for (int p = 0; p < input.PlaneCount; p++)
         {
             cancellation.ThrowIfCancellationRequested();
-            var raw = input.ReadPage(p);
-            var result = denoiser.Denoise(raw, baseline is not null, cancellation);
+            var raw = input.ReadPlane(p);
+            var result = denoiser.Denoise(raw, null, baseline is not null, cancellation, correlated);
             output.Append(result.Output);
             baseline?.Append(result.Baseline!);
             onPage?.Invoke(p, raw, result);
-
             CollectIfDue(ref allocatedAtLastCollection);
         }
-        return input.PageCount;
+        return input.PlaneCount;
     }
 
-    /// <summary>Page garbage allowed to build up between the full collections <see cref="DenoiseStack"/> requests.</summary>
+    /// <summary>Planes of a stack the routing decision samples, evenly spread (all of them in a shorter stack).</summary>
+    public const int RoutingSamples = 9;
+
+    /// <summary>
+    /// One routing decision for a whole stack (brick 41), when there is a second model to route to: the noise check on up to
+    /// <see cref="RoutingSamples"/> evenly spread planes, and the majority wins (a tie stays with the main model). Every plane
+    /// then goes to the same model, so a time-lapse can't switch networks, and with them its intensity response, from one
+    /// frame to the next. A single image is still decided on its own (the same check on its one plane). Null without a second model.
+    /// </summary>
+    private static bool? StackVerdict(FrameDenoiser denoiser, ImageStack input, Action<string>? onNotice)
+    {
+        if (denoiser.CorrelatedNet is null) return null;
+        int n = input.PlaneCount, samples = Math.Min(RoutingSamples, n);
+        int flagged = 0;
+        for (int k = 0; k < samples; k++)
+            if (FrameDenoiser.LooksCorrelated(input.ReadPlane(samples == 1 ? 0 : (int)((long)k * (n - 1) / (samples - 1))))) flagged++;
+        bool correlated = 2 * flagged > samples;
+        if (n > 1)
+            onNotice?.Invoke($"noise check on {samples} of {n} planes: {flagged} look correlated, so every plane uses the " +
+                             (correlated ? "correlated-noise model" : "main model"));
+        return correlated;
+    }
+
+    /// <summary>Page garbage allowed to build up between the full collections <c>DenoiseStack</c> requests.</summary>
     private const long CollectEveryBytes = 64L << 20;
 
     /// <summary>
@@ -200,43 +249,36 @@ public static class BatchDenoising
     }
 
     /// <summary>
-    /// A multi-frame model on a stack (brick 39): page t is denoised with its neighbours (<see cref="Sequences.FrameIndices"/>,
-    /// reflected at both ends), so frame t is written once t + 1 has been read. Only the model's window of pages is kept:
-    /// nothing older than t − k (k = window / 2) outlives the step that reads t + k. A skip-centre model (brick 40) streams
-    /// with the same 3-frame window (<see cref="NetConfig.WindowFrames"/>); only its input leaves frame t out.
+    /// A multi-frame model on a stack (bricks 39–41): plane p is denoised with its neighbours along the stack's time axis,
+    /// every other axis held fixed and the series reflected at its ends (<see cref="TimeAxis.NeighbourPages"/>), and written in
+    /// storage order, so a hyperstack keeps its page order. Each neighbour is read again from the file when it's needed
+    /// (planes are random access), so nothing beyond the plane and its two neighbours is held, whatever the number of
+    /// channels or slices between consecutive frames (rule 14). A skip-centre model (brick 40) uses the same neighbours; only
+    /// its input leaves the plane itself out.
     /// </summary>
-    private static int DenoiseWindowed(FrameDenoiser denoiser, TiffStackReader input, TiffStackWriter output, TiffStackWriter? baseline,
-        PageDone? onPage, CancellationToken cancellation)
+    private static int DenoiseWindowed(FrameDenoiser denoiser, ImageStack input, TiffStackWriter output, TiffStackWriter? baseline,
+        PageDone? onPage, Action<string>? onNotice, CancellationToken cancellation, bool? correlated = null)
     {
-        int frames = denoiser.Net.Config.WindowFrames, k = frames / 2, count = input.PageCount;
-        if (count < Sequences.MinimumFrames(frames))
-            throw new ArgumentException((denoiser.Net.Config.SkipsCentre ? "This skip-centre model denoises a frame from its two neighbours"
-                : $"This model takes {frames} frames") + $"; the stack has {count} page(s), too few to give each frame neighbours.");
-        var window = new Dictionary<int, GrayImage>();
-        GrayImage Page(int i)
-        {
-            if (!window.TryGetValue(i, out var page)) window[i] = page = input.ReadPage(i);
-            return page;
-        }
+        var time = TimeAxis.Resolve(input.Layout);
+        if (time.Notice is { } notice) onNotice?.Invoke(notice);
         long allocatedAtLastCollection = GC.GetTotalAllocatedBytes();
-        for (int t = 0; t < count; t++)
+        for (int p = 0; p < input.PlaneCount; p++)
         {
             cancellation.ThrowIfCancellationRequested();
-            foreach (int old in window.Keys.Where(i => i < t - k).ToList()) window.Remove(old);   // older than the window
-            var indices = Sequences.FrameIndices(t, count, frames);
-            var raw = Page(t);
-            var context = indices.Where((_, j) => j != k).Select(Page).ToArray();
-            var result = denoiser.Denoise(raw, context, baseline is not null, cancellation);
+            var raw = input.ReadPlane(p);
+            var context = TimeAxis.NeighbourPages(input.Layout, time.Axis, p).Select(input.ReadPlane).ToArray();
+            var result = denoiser.Denoise(raw, context, baseline is not null, cancellation, correlated);
             output.Append(result.Output);
             baseline?.Append(result.Baseline!);
-            onPage?.Invoke(t, raw, result);
+            onPage?.Invoke(p, raw, result);
             CollectIfDue(ref allocatedAtLastCollection);
         }
-        return count;
+        return input.PlaneCount;
     }
 
     /// <summary>
-    /// Denoises one image file (TIFF, single page or stack, or PNG) into a float32 TIFF with the same number of pages.
+    /// Denoises one image file (TIFF or BigTIFF, single page or stack; MRC; or PNG) into a float32 TIFF with one page per
+    /// plane, in the input's page order. The stack's axes come from its metadata, or from <paramref name="axes"/>.
     /// </summary>
     /// <param name="denoiser">The per-frame pipeline.</param>
     /// <param name="inputPath">The image to denoise.</param>
@@ -244,40 +286,48 @@ public static class BatchDenoising
     /// <param name="baselinePath">Optional: where to write the bilateral baseline.</param>
     /// <param name="onPage">Optional progress callback.</param>
     /// <param name="cancellation">Checked before each page and between tiles.</param>
+    /// <param name="axes">Declared axes ending in YX (e.g. "TYX"), or null to use the file's own labels.</param>
+    /// <param name="onNotice">Optional: called with notices (unlabelled axes taken as T).</param>
     /// <returns>The number of pages denoised.</returns>
-    /// <exception cref="ArgumentException">An output path is the input path.</exception>
+    /// <exception cref="ArgumentException">An output path is the input path, or a multi-frame model meets a stack without a time axis.</exception>
+    /// <exception cref="NotSupportedException">A file DORA deliberately doesn't read, e.g. an ImageJ stack over 4 GB with one page directory.</exception>
     public static int DenoiseFile(FrameDenoiser denoiser, string inputPath, string outputPath, string? baselinePath = null,
-        PageDone? onPage = null, CancellationToken cancellation = default)
+        PageDone? onPage = null, CancellationToken cancellation = default, string? axes = null, Action<string>? onNotice = null)
     {
         string inputFull = Path.GetFullPath(inputPath);
         foreach (var target in new[] { outputPath, baselinePath })
             if (target is not null && Path.GetFullPath(target) == inputFull)
                 throw new ArgumentException($"{target}: the output would overwrite the input.");
 
-        using var reader = OpenAsStack(inputPath);
+        using var stack = OpenAsStack(inputPath, axes);
         using var output = TiffStackWriter.Create(outputPath, TiffSampleType.Float32);
         using var baseline = baselinePath is null ? null : TiffStackWriter.Create(baselinePath, TiffSampleType.Float32);
-        return DenoiseStack(denoiser, reader, output, baseline, onPage, cancellation);
-    }
-
-    /// <summary>Number of frames in an image file: its page count for a TIFF, 1 for a PNG. Reads only the page directories.</summary>
-    public static int CountPages(string path)
-    {
-        using var reader = OpenAsStack(path);
-        return reader.PageCount;
+        return DenoiseStack(denoiser, stack, output, baseline, onPage, onNotice, cancellation);
     }
 
     /// <summary>
-    /// Opens any supported image as a stack: TIFFs stream page by page; a PNG (always one frame) is decoded and
-    /// re-wrapped as a one-page in-memory TIFF, which stores its values exactly as float32.
+    /// Number of planes in an image file: every plane of a TIFF or MRC stack (checked against its metadata, so an ImageJ
+    /// stack over 4 GB that stores one page directory is refused rather than counted as one), 1 for a PNG.
     /// </summary>
-    private static TiffStackReader OpenAsStack(string path)
+    public static int CountPages(string path)
     {
-        Span<byte> head = stackalloc byte[4];
-        using (var probe = File.OpenRead(path)) head = head[..probe.ReadAtLeast(head, head.Length, throwOnEndOfStream: false)];
-        if (TiffCodec.HasTiffSignature(head)) return TiffStackReader.Open(path);
+        using var stack = OpenAsStack(path, null);
+        return stack.PlaneCount;
+    }
+
+    /// <summary>
+    /// Opens any supported image as a stack with its axes: TIFF and MRC through <see cref="ImageStack"/> (which checks the
+    /// metadata against the pages); a PNG (always one frame) is decoded and re-wrapped as a one-page in-memory TIFF, which
+    /// stores its values exactly as float32.
+    /// </summary>
+    private static ImageStack OpenAsStack(string path, string? axes)
+    {
+        var head = new byte[1024];   // an MRC header is 1024 bytes
+        int read;
+        using (var probe = File.OpenRead(path)) read = probe.ReadAtLeast(head, head.Length, throwOnEndOfStream: false);
+        if (TiffCodec.HasTiffSignature(head.AsSpan(0, read)) || MrcReader.LooksLikeMrc(head.AsSpan(0, read))) return ImageStack.Open(path, axes);
         var frame = ImageLoader.Load(path);   // PNG, or a clear NotSupportedException
-        return new TiffStackReader(new MemoryStream(TiffCodec.Encode(frame, TiffSampleType.Float32)));
+        return ImageStack.FromTiff(new TiffStackReader(new MemoryStream(TiffCodec.Encode(frame, TiffSampleType.Float32))), axes);
     }
 
     /// <summary>

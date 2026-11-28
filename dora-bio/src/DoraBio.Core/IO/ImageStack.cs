@@ -195,6 +195,8 @@ public sealed class ImageStack : IDisposable
     /// <exception cref="NotSupportedException">A TIFF/MRC variant DORA deliberately doesn't read.</exception>
     public static ImageStack Open(string path, string? axes = null)
     {
+        if (axes is not null && !axes.EndsWith("YX", StringComparison.Ordinal))
+            throw new ArgumentException($"--axes '{axes}' must end in YX, e.g. TYX, ZYX or TZCYX.");
         var head = new byte[1024];
         int read;
         using (var probe = File.OpenRead(path)) read = probe.ReadAtLeast(head, head.Length, throwOnEndOfStream: false);
@@ -230,6 +232,20 @@ public sealed class ImageStack : IDisposable
             }
         }
         throw new InvalidDataException($"{Path.GetFileName(path)}: not a TIFF or MRC stack.");
+    }
+
+    /// <summary>
+    /// Wraps an open TIFF reader (it is disposed with the stack), its layout read from its own metadata as in
+    /// <see cref="Open"/>, or declared by <paramref name="axes"/>.
+    /// </summary>
+    /// <exception cref="InvalidDataException">The metadata contradicts itself, the page count or the declaration.</exception>
+    /// <exception cref="NotSupportedException">An ImageJ stack over 4 GB that stores one page directory.</exception>
+    public static ImageStack FromTiff(TiffStackReader tiff, string? axes = null)
+    {
+        var layout = StackLayout.FromTiff(tiff.Description, tiff.PageCount);
+        if (axes is not null) layout = layout.Declare(axes);
+        var (w, h) = tiff.PageSize(0);
+        return new ImageStack(tiff, null, layout, w, h, tiff.IsBigTiff ? "BigTIFF" : "TIFF");
     }
 
     /// <summary>The planes' axes and shape.</summary>

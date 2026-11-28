@@ -93,6 +93,7 @@ public sealed class TiffStackWriter : IDisposable
     private readonly Stream _stream;
     private readonly TiffSampleType _sampleType;
     private readonly bool _deflate, _leaveOpen;
+    private readonly byte[]? _description;   // the first page's ImageDescription, NUL-terminated, or null
     private long _pointerAt = 4;   // where the offset of the next IFD goes: the header for page 0, then each IFD's tail
 
     /// <summary>Starts a TIFF on an empty stream: writes the 8-byte little-endian header.</summary>
@@ -100,9 +101,15 @@ public sealed class TiffStackWriter : IDisposable
     /// <param name="sampleType">Storage format for every page.</param>
     /// <param name="deflate">Compress each page's strip with zlib/Deflate.</param>
     /// <param name="leaveOpen">Leave the stream open when the writer is disposed.</param>
+    /// <param name="description">
+    /// Optional ImageDescription for the first page, where ImageJ and tifffile record a stack's shape (brick 41: a denoised
+    /// hyperstack keeps its input's header, so it reopens with the same channels, slices and frames). Written as Latin-1.
+    /// </param>
     /// <exception cref="ArgumentException">The stream can't write or seek, or isn't empty.</exception>
-    public TiffStackWriter(Stream stream, TiffSampleType sampleType = TiffSampleType.UInt16, bool deflate = false, bool leaveOpen = false)
+    public TiffStackWriter(Stream stream, TiffSampleType sampleType = TiffSampleType.UInt16, bool deflate = false, bool leaveOpen = false,
+        string? description = null)
     {
+        _description = description is null ? null : [.. System.Text.Encoding.Latin1.GetBytes(description), 0];
         if (!stream.CanWrite || !stream.CanSeek) throw new ArgumentException("A TIFF stream must be writable and seekable.", nameof(stream));
         if (stream.Length != 0) throw new ArgumentException("A TIFF must be written to an empty stream (its offsets are absolute).", nameof(stream));
         (_stream, _sampleType, _deflate, _leaveOpen) = (stream, sampleType, deflate, leaveOpen);
@@ -113,8 +120,10 @@ public sealed class TiffStackWriter : IDisposable
     }
 
     /// <summary>Creates (or overwrites) a TIFF file to write pages into.</summary>
-    public static TiffStackWriter Create(string path, TiffSampleType sampleType = TiffSampleType.UInt16, bool deflate = false) =>
-        new(new FileStream(path, FileMode.Create, FileAccess.ReadWrite, FileShare.None, bufferSize: 1 << 16), sampleType, deflate);
+    public static TiffStackWriter Create(string path, TiffSampleType sampleType = TiffSampleType.UInt16, bool deflate = false,
+        string? description = null) =>
+        new(new FileStream(path, FileMode.Create, FileAccess.ReadWrite, FileShare.None, bufferSize: 1 << 16), sampleType, deflate,
+            description: description);
 
     /// <summary>Pages written so far. A writer disposed before its first page leaves a header-only file, which no reader accepts.</summary>
     public int PageCount { get; private set; }
@@ -125,10 +134,17 @@ public sealed class TiffStackWriter : IDisposable
     {
         long stripAt = _stream.Length;
         if (stripAt > uint.MaxValue) throw new ArgumentException("Stack is too large for a TIFF (4 GB).", nameof(page));
-        var (strip, ifd) = TiffCodec.EncodePage(page, _sampleType, _deflate, (uint)stripAt);
+        byte[]? description = PageCount == 0 ? _description : null;
+        var (strip, ifd, descriptionAt) = TiffCodec.EncodePage(page, _sampleType, _deflate, (uint)stripAt, (uint)(description?.Length ?? 0));
         _stream.Position = stripAt;
         _stream.Write(strip);
-        if (_stream.Length % 2 == 1) _stream.WriteByte(0);   // IFDs start on a word boundary
+        if (_stream.Length % 2 == 1) _stream.WriteByte(0);   // IFDs (and the description) start on a word boundary
+        if (description is not null)
+        {
+            if (_stream.Length != descriptionAt) throw new InvalidOperationException("TIFF description offset mismatch.");
+            _stream.Write(description);
+            if (_stream.Length % 2 == 1) _stream.WriteByte(0);
+        }
         long ifdOffset = _stream.Length;
         if (ifdOffset + ifd.Length > uint.MaxValue) throw new ArgumentException("Stack is too large for a TIFF (4 GB).", nameof(page));
         _stream.Write(ifd);

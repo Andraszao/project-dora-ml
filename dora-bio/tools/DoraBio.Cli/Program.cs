@@ -48,6 +48,8 @@ public static class Program
                      the output is their mean minus the network's correction)
                     [--frame-block 32]  (frames per validation group, so one long time-lapse still splits by time)
                     [--frame-range A-B]  (train on frames A..B of one stack, a standalone sequence; also for single frames)
+                    [--axes TYX|TZCYX…]  (the stack's axes if its metadata is missing or wrong: each channel and slice is
+                     its own time series, a Z-stack is refused, and unlabelled planes are taken as frames)
                     [--validation-range C-D]  (validate on frames C..D of the same stack instead of splitting by blocks:
                      one patch source per interior frame, the same frames and positions for every mode; with Noise2Void
                      it needs --route off)
@@ -60,7 +62,9 @@ public static class Program
                     --out and --baseline are then folders, and every image in it is denoised. Frames stream one at a time)
                    [--weights-correlated W2.bin]  (used instead if the image's noise check says correlated)
                    [--vst]  (for models trained with --vst)
-                   Output is float32 TIFF in the input's original intensity units.
+                   [--axes TYX|ZYX|TZCYX…]  (the stack's axes when its metadata is missing or wrong; a time-lapse model
+                    steps along T with every other axis fixed, refuses a Z-stack, and takes unlabelled planes as T)
+                   Output is float32 TIFF in the input's original intensity units, one page per input page, in order.
           eval     --weights WEIGHTS.bin --data DIR
                    Per-image PSNR/SSIM of noisy, bilateral and DORA against clean (needs clean images).
           info     --weights WEIGHTS.bin   |   info --default-arch   (prints dilated or unet)
@@ -144,6 +148,7 @@ public static class Program
         try
         {
             var options = Options.Parse(args.Skip(1));
+            options.RejectUnknown();
             return args[0] switch
             {
                 "synth" => Synth(options),
@@ -275,12 +280,18 @@ public static class Program
             if (!neighbourPairs && !skipCentre && modeOption is not (null or "n2v" or "noise2void"))
                 throw new ArgumentException("--frames 3 is the spatiotemporal blind spot, a Noise2Void mode (--mode n2v).");
             var sequenceMode = neighbourPairs ? TrainingMode.Noise2Noise : skipCentre ? TrainingMode.SkipCentre : TrainingMode.Noise2Void;
-            dataset = Sequences.Load(o.Required("data"), sequenceMode, frames, o.Int("frame-block", Sequences.DefaultBlockSize), frameRange);
+            string? axes = o.StringOrNull("axes");
+            dataset = Sequences.Load(o.Required("data"), sequenceMode, frames, o.Int("frame-block", Sequences.DefaultBlockSize), frameRange,
+                axes, notice => Console.WriteLine($"🧭 {notice}"));
             if (validationRange is { } range)
             {
                 string stack = o.Required("data");
-                validation = Sequences.ValidationFrames(Sequences.ReadPlanes(stack, range), sequenceMode, frames,
-                    Path.GetFileNameWithoutExtension(stack), range.First);
+                validation = [];
+                foreach (var (label, planes, _) in Sequences.ReadSeries(stack, null, axes, range, null))
+                {
+                    string name = Path.GetFileNameWithoutExtension(stack);
+                    validation.AddRange(Sequences.ValidationFrames(planes, sequenceMode, frames, label.Length == 0 ? name : $"{name}[{label}]", range.First));
+                }
                 Console.WriteLine($"🧪 validation: frames {range} of {Path.GetFileName(stack)}, {validation.Count} interior frames as patch sources");
             }
         }
@@ -357,7 +368,7 @@ public static class Program
             var routedClock = Stopwatch.StartNew();
             var trained = RoutedNoise2Void.Train(dataset, config, o.Required("out"), routedDescription, o.StringOrNull("journey"),
                 (kind, report) => Console.WriteLine($"[{kind.ToString().ToLowerInvariant()}] {FormatEpoch(report)}"),
-                o.StringOrNull("out-correlated"), verdicts);
+                o.StringOrNull("out-correlated"), verdicts, onNotice: notice => Console.WriteLine($"🔀 {notice}"));
             foreach (var t in trained)
             {
                 var keptReport = t.Kind == NoiseKind.Independent ? t.Result.Last : t.Result.Best;
@@ -493,7 +504,8 @@ public static class Program
         var denoiser = new FrameDenoiser(net, correlatedNet, o.Has("vst"), o.Int("tile", TiledInference.DefaultTileCore));
         Console.WriteLine($"🧬 model: {info.Provenance}");
         string input = o.Required("in"), output = o.Required("out");
-        string? baseline = o.StringOrNull("baseline");
+        string? baseline = o.StringOrNull("baseline"), axes = o.StringOrNull("axes");
+        void Notice(string notice) => Console.WriteLine($"🧭 {notice}");
 
         var clock = Stopwatch.StartNew();
         if (Directory.Exists(input))
@@ -506,7 +518,8 @@ public static class Program
             {
                 string? baselineTarget = baseline is null ? null : Path.Combine(baseline, Path.GetFileName(target));
                 int correlated = 0;
-                int n = BatchDenoising.DenoiseFile(denoiser, file, target, baselineTarget, (_, _, r) => correlated += r.UsedCorrelatedModel ? 1 : 0);
+                int n = BatchDenoising.DenoiseFile(denoiser, file, target, baselineTarget, (_, _, r) => correlated += r.UsedCorrelatedModel ? 1 : 0,
+                    axes: axes, onNotice: Notice);
                 pages += n;
                 string routed = correlatedNet is null ? "" : $", {correlated} by the correlated-noise model";
                 Console.WriteLine($"   {Path.GetFileName(file)} → {target} ({n} page{(n == 1 ? "" : "s")}{routed})");
@@ -533,7 +546,7 @@ public static class Program
                 string model = r.UsedCorrelatedModel ? " (correlated-noise model)" : "";
                 Console.WriteLine($"   page {page + 1}/{total}: {raw.Width}×{raw.Height}, noise σ {r.SigmaBefore:0.0000} → {r.SigmaAfter:0.0000}{model}");
             };
-        BatchDenoising.DenoiseFile(denoiser, input, output, baseline, report);
+        BatchDenoising.DenoiseFile(denoiser, input, output, baseline, report, axes: axes, onNotice: Notice);
         if (total > 1)
         {
             double seconds = clock.Elapsed.TotalSeconds;
@@ -879,7 +892,23 @@ public static class Program
     /// <summary><c>diagnose</c>: the noise check for one image, from the noisy image alone.</summary>
     private static int Diagnose(Options o)
     {
-        var image = ImageLoader.Load(o.Required("in"));
+        var planes = DatasetLoader.Planes(o.Required("in"));
+        if (planes.Count > 1)
+        {
+            // A stack: every plane is checked (brick 41; page 0 alone used to stand in for the whole file).
+            var flagged = new List<int>();
+            int judged = 0;
+            for (int k = 0; k < planes.Count; k++)
+            {
+                try { if (NoiseDiagnostics.Diagnose(planes[k]).Correlated) flagged.Add(k); judged++; }
+                catch (ArgumentException) { }   // too few flat tiles to judge
+            }
+            Console.WriteLine($"{Path.GetFileName(o.Required("in"))}: {planes.Count} planes of {planes[0].Width}×{planes[0].Height}; " +
+                              $"{judged} judged, {flagged.Count} with noise correlated between pixels" +
+                              (flagged.Count == 0 ? "" : $" (planes {string.Join(", ", flagged.Take(20))}{(flagged.Count > 20 ? ", …" : "")})"));
+            return 0;
+        }
+        var image = planes[0];
         var d = NoiseDiagnostics.Diagnose(image);
         Console.WriteLine($"{Path.GetFileName(o.Required("in"))}: {image.Width}×{image.Height}, median over {d.TilesUsed} flat {NoiseDiagnostics.TileSize}px tiles");
         Console.WriteLine($"noise correlation: right 1 {d.Right1:0.000}  down 1 {d.Down1:0.000}  diagonal {d.Diagonal1:0.000}  right 2 {d.Right2:0.000}  down 2 {d.Down2:0.000}");
@@ -1454,6 +1483,48 @@ public static class Program
                 o._values[key] = hasValue ? tokens[++i] : "true";
             }
             return o;
+        }
+
+        /// <summary>
+        /// Every option some command reads (brick 41): anything else is refused before any work starts, so a typo such as
+        /// <c>--epoch 60</c> can't silently run with the default instead. Gate 6 checks the list against the names this
+        /// file actually reads.
+        /// </summary>
+        public static readonly IReadOnlySet<string> Known = new HashSet<string>(StringComparer.Ordinal)
+        {
+        "arch", "augment", "axes", "baseline", "batch", "choose-threshold", "condition", "count", "data",
+        "dataset", "default-arch", "default-condition", "default-n2v", "default-n2v-route", "default-timelapse",
+        "depth", "describe", "drift", "epochs", "ext", "features", "fmd", "fmd-categories", "fmd-frames",
+        "fmd-levels", "footprint", "frame-block", "frame-range", "frames", "height", "in", "init", "journey",
+        "json", "keep", "label", "labels", "level", "levels", "lr", "mask-ratio", "mode", "noise-threshold",
+        "offset", "only", "out", "out-correlated", "patch", "patience", "peak", "per-frame", "per-image",
+        "precise", "predictions", "quick", "reference", "roofline", "root", "route", "save-last", "seed",
+        "select", "sequence", "sigma-scale", "size", "split", "stack", "steps", "struct", "subset", "tile",
+        "validation-range", "validation-seed", "vst", "weights", "weights-clean", "weights-correlated", "width",
+        };
+
+        /// <summary>Throws if an option isn't one any command reads, naming the closest known one.</summary>
+        public void RejectUnknown()
+        {
+            foreach (string key in _values.Keys)
+            {
+                if (Known.Contains(key)) continue;
+                string? closest = Known.MinBy(k => Distance(k, key));
+                string hint = closest is not null && Distance(closest, key) <= 2 ? $" Did you mean --{closest}?" : "";
+                throw new ArgumentException($"Unknown option --{key}.{hint} (dora-bio help lists them.)");
+            }
+        }
+
+        /// <summary>Levenshtein distance, for the "did you mean" hint.</summary>
+        private static int Distance(string a, string b)
+        {
+            var d = new int[a.Length + 1, b.Length + 1];
+            for (int i = 0; i <= a.Length; i++) d[i, 0] = i;
+            for (int j = 0; j <= b.Length; j++) d[0, j] = j;
+            for (int i = 1; i <= a.Length; i++)
+                for (int j = 1; j <= b.Length; j++)
+                    d[i, j] = Math.Min(Math.Min(d[i - 1, j] + 1, d[i, j - 1] + 1), d[i - 1, j - 1] + (a[i - 1] == b[j - 1] ? 0 : 1));
+            return d[a.Length, b.Length];
         }
 
         public bool Has(string key) => _values.ContainsKey(key);

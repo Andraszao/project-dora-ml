@@ -46,6 +46,7 @@ internal static class Bricks
     public const string Scoreboard = "38-scoreboard";          // the self-supervised scoreboard: DORA vs CAREamics N2V/N2V2
     public const string Temporal = "39-temporal";              // Noise2Noise from neighbouring frames, spatiotemporal blind spot
     public const string TimeLapseModes = "40-timelapse-modes";  // Track A: skip-centre Noise2Noise, the time-lapse modes on real data
+    public const string PilotCore = "41-pilot-core";           // pilot readiness: stacks by their axes, nothing silently dropped
 }
 
 [Trait(Bricks.Trait, Bricks.Scaffold)]
@@ -55,7 +56,7 @@ public class BrickWiringTests
         [Bricks.Scaffold, Bricks.Nn, Bricks.Data, Bricks.IO, Bricks.Inference, Bricks.Training, Bricks.Fmd, Bricks.FmdEval,
          Bricks.NoiseDiagnostic, Bricks.StructuredMask, Bricks.Vst, Bricks.Calibration,
          Bricks.PoolUpsample, Bricks.UNet, Bricks.UNetTiling, Bricks.ArchEval,
-         Bricks.Bench, Bricks.BlockedConv, Bricks.PerfBudget, Bricks.TiffStackWrite, Bricks.NoiseRouting, Bricks.CliBatch, Bricks.NoiseConditioning, Bricks.ExtData, Bricks.ExtBench, Bricks.QuantFidelity, Bricks.SelfSupervisedRecipe, Bricks.ExtData2, Bricks.NoiseStop, Bricks.WideKernels, Bricks.Routing, Bricks.Scoreboard, Bricks.Temporal, Bricks.TimeLapseModes];
+         Bricks.Bench, Bricks.BlockedConv, Bricks.PerfBudget, Bricks.TiffStackWrite, Bricks.NoiseRouting, Bricks.CliBatch, Bricks.NoiseConditioning, Bricks.ExtData, Bricks.ExtBench, Bricks.QuantFidelity, Bricks.SelfSupervisedRecipe, Bricks.ExtData2, Bricks.NoiseStop, Bricks.WideKernels, Bricks.Routing, Bricks.Scoreboard, Bricks.Temporal, Bricks.TimeLapseModes, Bricks.PilotCore];
 
     /// <summary>An untagged test would silently run in no gate, so treat a missing or unknown brick as a build error.</summary>
     [Xunit.Fact]

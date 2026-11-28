@@ -156,7 +156,10 @@ public static class Sequences
     /// <param name="range">
     /// Only these frames of a single stack file, as a standalone sequence (brick 40's training block); null for every frame.
     /// </param>
-    public static List<ImagePair> Load(string path, TrainingMode mode, int inputFrames, int blockSize = DefaultBlockSize, FrameRange? range = null)
+    /// <param name="axes">The stack's axes when its metadata is missing or wrong (e.g. "TYX"), or null for the file's own.</param>
+    /// <param name="onNotice">Optional: called with notices (unlabelled planes taken as frames).</param>
+    public static List<ImagePair> Load(string path, TrainingMode mode, int inputFrames, int blockSize = DefaultBlockSize, FrameRange? range = null,
+        string? axes = null, Action<string>? onNotice = null)
     {
         if (range is not null && !File.Exists(path)) throw new ArgumentException($"A frame range needs a single stack file; {path} isn't one.");
         if (mode == TrainingMode.Noise2Noise && inputFrames != 1)
@@ -180,19 +183,55 @@ public static class Sequences
         else throw new FileNotFoundException($"{path}: no such file or folder.");
 
         var result = new List<ImagePair>();
+        var notices = new HashSet<string>();
         foreach (var (noisy, clean) in stacks)
         {
             string name = Path.GetFileNameWithoutExtension(noisy);
-            var frames = range is { } r ? ReadPlanes(noisy, r) : ReadPlanes(noisy);
-            var truth = clean is null ? null : ReadPlanes(clean);
-            result.AddRange(mode switch
+            // One sequence per time series: a hyperstack's channels and slices are never each other's frames (brick 41).
+            foreach (var (label, frames, truth) in ReadSeries(noisy, clean, axes, range, n => { if (notices.Add(n)) onNotice?.Invoke(n); }))
             {
-                TrainingMode.Noise2Noise => NeighbourPairs(frames, name, blockSize),
-                TrainingMode.SkipCentre => SkipCentre(frames, name, truth, blockSize),
-                _ => Spatiotemporal(frames, inputFrames, name, truth, blockSize),
-            });
+                string series = label.Length == 0 ? name : $"{name}[{label}]";
+                result.AddRange(mode switch
+                {
+                    TrainingMode.Noise2Noise => NeighbourPairs(frames, series, blockSize),
+                    TrainingMode.SkipCentre => SkipCentre(frames, series, truth, blockSize),
+                    _ => Spatiotemporal(frames, inputFrames, series, truth, blockSize),
+                });
+            }
         }
         return result;
+    }
+
+    /// <summary>
+    /// A stack's time series (<see cref="TimeAxis.Series"/>), each read as frames in time order, restricted to
+    /// <paramref name="range"/> of the time axis if given, with the matching frames of an optional ground-truth stack.
+    /// </summary>
+    /// <param name="noisy">The stack file.</param>
+    /// <param name="clean">An optional ground-truth stack of the same layout, or null.</param>
+    /// <param name="axes">Declared axes, or null for the file's own.</param>
+    /// <param name="range">Frames of the time axis to read, or null for all.</param>
+    /// <param name="onNotice">Called with the notice when unlabelled planes are taken as frames.</param>
+    /// <exception cref="ArgumentException">No time axis, or the range runs past a series.</exception>
+    public static IEnumerable<(string Label, List<GrayImage> Frames, List<GrayImage>? Truth)> ReadSeries(string noisy, string? clean, string? axes,
+        FrameRange? range, Action<string>? onNotice)
+    {
+        using var stack = ImageStack.Open(noisy, axes);
+        using var truthStack = clean is null ? null : ImageStack.Open(clean, axes);
+        if (truthStack is not null && truthStack.Layout.FullAxes != stack.Layout.FullAxes)
+            throw new ArgumentException($"{clean}'s axes ({truthStack.Layout}) differ from {noisy}'s ({stack.Layout}).");
+        var time = TimeAxis.Resolve(stack.Layout);
+        if (time.Notice is { } notice) onNotice?.Invoke(notice);
+        foreach (var (label, pages) in TimeAxis.Series(stack.Layout, time.Axis))
+        {
+            var chosen = pages;
+            if (range is { } r)
+            {
+                if (r.Last >= pages.Length)
+                    throw new ArgumentOutOfRangeException(nameof(range), $"{noisy} has {pages.Length} frames per series; frames {r} run past them.");
+                chosen = pages[r.First..(r.Last + 1)];
+            }
+            yield return (label, chosen.Select(stack.ReadPlane).ToList(), truthStack is null ? null : chosen.Select(truthStack.ReadPlane).ToList());
+        }
     }
 
     /// <summary>Every plane of a stack file, in file order.</summary>

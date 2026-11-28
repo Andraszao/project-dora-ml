@@ -24,7 +24,7 @@ export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_SKIP_FIRST_TIME_EXPE
 
 NAMES=(scaffold nn data io inference training cli godot-build godot-smoke ci-core ci-godot fmd-fetch fmd-loader fmd-eval
        n2v-diagnostic structured-mask vst calibration pool-upsample unet unet-tiling arch-eval
-       bench blocked-conv perf-budget q1-recipe tiff-stack-write q10-routing cli-batch q13-conditioning ext-data q18-ext-bench quant-fidelity q12-n2v-recipe ext-data-2 q2-n2v-stop roofline-wide q19-routed scoreboard temporal timelapse-modes)
+       bench blocked-conv perf-budget q1-recipe tiff-stack-write q10-routing cli-batch q13-conditioning ext-data q18-ext-bench quant-fidelity q12-n2v-recipe ext-data-2 q2-n2v-stop roofline-wide q19-routed scoreboard temporal timelapse-modes pilot-core)
 CHECKS=(
   "solution builds (warnings are errors, missing XML docs included); every test class belongs to exactly one brick"
   "ConvLayer/DenoisingNet/Adam/Simd: finite-difference gradient checks, optimizer behavior"
@@ -67,6 +67,7 @@ CHECKS=(
   "scoreboard: derived 2D sets keep a patch or cell in one validation group, FMD export + outside outputs scored with FMD's protocol; the recorded reading follows the pre-registered rule and PATHWAY.md's next brick follows it; noise-residual separates one-axis noise correlation from misalignment; with data + runs every score and the Tribolium diagnostic reproduce"
   "Noise2Noise from neighbouring frames and the 3-frame spatiotemporal blind spot: gradients, centre-frame residual, reflected (never clamped) endpoints, exact tiling, blind spots in the centre frame only, streaming window; both modes train and denoise from the CLI, and the leaks are refused"
   "Track A: skip-centre Noise2Noise never sees frame t (indices, sampler, validation, inference), neighbours'-mean residual, gradients, exact tiling, format 5, streaming; per-frame CARE scoring with dynamic/steady masks inside a standalone block; the post-hoc readouts see flashes, smears and flicker; the recorded reading follows the pre-registered rule, the shipped default follows it or a recorded veto; with data + runs/timelapse the spot check and readouts reproduce"
+  "pilot readiness (41a): stacks follow their axes (neighbours along T with C and Z fixed, Z-stacks refused for time-lapse modes, unlabelled planes taken as T with a notice), every page read and an ImageJ stack over 4 GB refused, routing decided once per stack and never for a handful of images, unknown options refused"
 )
 LAST=$((${#NAMES[@]} - 1))
 LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dora-bricks.XXXXXX")"
@@ -108,6 +109,13 @@ gate_6() (   # subshell body: `set -e` aborts only this gate, never the runner
   $cli eval --weights "$t/w.bin" --data "$t/data"
   test -s "$t/out.tif" && test -s "$t/base.tif"
   grep -q '"Status": "completed"' "$t/journey.json"
+  # Unknown options are refused before any work (brick 41), and the list of known ones is exactly what the CLI reads.
+  local code=0; $cli train --data "$t/data" --out "$t/x.bin" --epoch 1 >/dev/null 2>&1 || code=$?
+  [[ $code -eq 2 ]] || { echo ">> an unknown option (--epoch) must be refused with exit 2, got $code"; return 1; }
+  local read known
+  read="$(sed '/IReadOnlySet<string> Known = /,/^        };/d' tools/DoraBio.Cli/Program.cs | grep -oE 'o\.(Int|String|StringOrNull|Has|Required|Double)\("[a-z0-9-]+"' | sed -E 's/.*\("([a-z0-9-]+)"/\1/' | sort -u)"
+  known="$(sed -n '/IReadOnlySet<string> Known = /,/^        };/p' tools/DoraBio.Cli/Program.cs | grep -oE '"[a-z0-9-]+"' | tr -d '"' | sort -u)"
+  [[ "$read" == "$known" ]] || { echo ">> Options.Known differs from the options the CLI reads:"; diff <(echo "$known") <(echo "$read"); return 1; }
   # The committed artifacts must still load and run.
   $cli info --weights godot/models/dora_bio_weights.bin | grep -q "SYNTHETIC"
   $cli denoise --weights godot/models/dora_bio_weights.bin --in godot/samples/synthetic_cells.tif --out "$t/sample.tif"
@@ -953,6 +961,31 @@ gate_40() {   # timelapse-modes (brick 40, Track A, pre-registered in PATHWAY.md
   done
 }
 
+gate_41() {   # pilot-core (brick 41a: pilot readiness, core and CLI)
+  test_gate 41-pilot-core || return 1
+  dotnet build tools/DoraBio.Cli -c Release >/dev/null || return 1
+  local t="$LOG_DIR/pilot" out code hyper=tests/DoraBio.Core.Tests/Fixtures/imagej_tzc.tif
+  # 96 px frames: one stack is one group, so the split is spatial and its validation strip must be 16 rows or more.
+  dotnet "$CLI_DLL" synth --out "$t/seq" --count 1 --size 96 --sequence 5 --seed 2 >/dev/null || return 1
+  # Folder training reads every plane of a stack (it used to read page 0 only): 5 images from one 5-frame stack.
+  out="$(dotnet "$CLI_DLL" train --data "$t/seq/noisy" --mode n2v --route off --out "$t/w.bin" --epochs 1 --steps 1 --batch 2 --patch 32)" || return 1
+  grep -q "📚 5 images" <<< "$out" || { echo ">> folder training should see the stack's 5 planes:"; grep "📚" <<< "$out"; return 1; }
+  out="$(dotnet "$CLI_DLL" diagnose --in "$t/seq/noisy/seq_000.tif")" || return 1
+  grep -q "5 planes of 96×96" <<< "$out" || { echo ">> diagnose should check every plane of a stack:"; echo "$out"; return 1; }
+  # A 3-frame model on an unlabelled stack: frames assumed, with the notice; on an ImageJ hyperstack: page for page.
+  dotnet "$CLI_DLL" train --data "$t/seq/noisy/seq_000.tif" --frames 3 --route off --out "$t/st.bin" --epochs 1 --steps 1 --batch 2 --patch 32 >/dev/null || return 1
+  out="$(dotnet "$CLI_DLL" denoise --weights "$t/st.bin" --in "$t/seq/noisy/seq_000.tif" --out "$t/st.tif")" || return 1
+  grep -q "axes unlabelled: planes treated as T" <<< "$out" || { echo ">> no notice for an unlabelled stack:"; echo "$out" | head -3; return 1; }
+  dotnet "$CLI_DLL" denoise --weights "$t/st.bin" --in "$hyper" --out "$t/hyper.tif" >/dev/null || return 1
+  dotnet "$CLI_DLL" stack-info --in "$t/hyper.tif" | grep -q "(12 planes" || { echo ">> the denoised hyperstack should keep its 12 pages"; return 1; }
+  # A declaration that contradicts the file's labels, and a typo'd option, are refused (exit 2) before any work.
+  code=0; dotnet "$CLI_DLL" denoise --weights "$t/st.bin" --in "$hyper" --out "$t/x.tif" --axes ZYX >/dev/null 2>&1 || code=$?
+  [[ $code -eq 2 ]] || { echo ">> --axes ZYX on a TZC hyperstack must be refused: exit 2, got $code"; return 1; }
+  code=0; dotnet "$CLI_DLL" denoise --weights "$t/st.bin" --in "$hyper" --out "$t/x.tif" --axis TYX >/dev/null 2>&1 || code=$?
+  [[ $code -eq 2 ]] || { echo ">> a misspelt option (--axis) must be refused: exit 2, got $code"; return 1; }
+  echo ">> stacks by their axes, every plane read, and the refusals work from the CLI"
+}
+
 # recorded_block <marker>: the contents of the ```text block between <!-- marker --> and <!-- /marker --> in RESULTS.md.
 recorded_block() { sed -n "/<!-- $1 -->/,/<!-- \/$1 -->/p" docs/RESULTS.md | sed '1,2d;$d' | sed '$d'; }
 
@@ -1001,8 +1034,8 @@ MUTATIONS=(
   '25|docs/RESULTS.md|<!-- q1-verdict: not-adopted -->|<!-- q1-verdict: adopted -->'
   '26|src/DoraBio.Core/IO/TiffStack.cs|_pointerAt = ifdOffset + ifd.Length - 4;|_pointerAt = 4;'
   '27|docs/RESULTS.md|<!-- q10-verdict: not-adopted -->|<!-- q10-verdict: adopted -->'
-  '28|src/DoraBio.Core/BatchDenoising.cs|var result = denoiser.Denoise(raw, baseline is not null, cancellation);
-            output.Append(result.Output);|var result = denoiser.Denoise(raw, baseline is not null, cancellation);
+  '28|src/DoraBio.Core/BatchDenoising.cs|var result = denoiser.Denoise(raw, null, baseline is not null, cancellation, correlated);
+            output.Append(result.Output);|var result = denoiser.Denoise(raw, null, baseline is not null, cancellation, correlated);
             output.Append(raw);'
   '28|src/DoraBio.Core/BatchDenoising.cs|        GC.Collect();|'
   '29|src/DoraBio.Core/Nn/DenoisingNet.Film.cs|gradients[FilmW1 + i] += dHidden[i] * ws.Condition;|gradients[FilmW1 + i] += dHidden[i];'
@@ -1030,7 +1063,19 @@ MUTATIONS=(
   '38|docs/RESULTS.md|<!-- sb-next-brick: noise2noise -->|<!-- sb-next-brick: n2v2 -->'
   '39|src/DoraBio.Core/Data/Sequences.cs|            if (i < 0) i = -i;|            if (i < 0) i = 0;'
   '39|src/DoraBio.Core/Nn/DenoisingNet.cs|if (!Config.SkipsCentre) return input.Slice(Config.CenterFrame * plane, plane);|if (!Config.SkipsCentre) return input.Slice(0, plane);'
-  $'39|src/DoraBio.Core/BatchDenoising.cs|            foreach (int old in window.Keys.Where(i => i < t - k).ToList()) window.Remove(old);   // older than the window\n|'
+  '39|src/DoraBio.Core/BatchDenoising.cs|        long allocatedAtLastCollection = GC.GetTotalAllocatedBytes();
+        for (int p = 0; p < input.PlaneCount; p++)
+        {
+            cancellation.ThrowIfCancellationRequested();
+            var raw = input.ReadPlane(p);
+            var context = TimeAxis.NeighbourPages(input.Layout, time.Axis, p).Select(input.ReadPlane).ToArray();|        long allocatedAtLastCollection = GC.GetTotalAllocatedBytes();
+        var cache = new Dictionary<int, GrayImage>();
+        GrayImage Plane(int i) => cache.TryGetValue(i, out var hit) ? hit : cache[i] = input.ReadPlane(i);
+        for (int p = 0; p < input.PlaneCount; p++)
+        {
+            cancellation.ThrowIfCancellationRequested();
+            var raw = Plane(p);
+            var context = TimeAxis.NeighbourPages(input.Layout, time.Axis, p).Select(Plane).ToArray();'
   '38|src/DoraBio.Core/NoiseResidual.cs|private static readonly (int Dx, int Dy)[] Offsets = [(1, 0), (0, 1), (2, 0), (0, 2)];|private static readonly (int Dx, int Dy)[] Offsets = [(0, 1), (1, 0), (2, 0), (0, 2)];'
   '40|src/DoraBio.Core/Data/PatchSampler.cs|            // The frame is the target only: nothing of it goes into the input.|            _noisyPatch.CopyTo(input);'
   '40|src/DoraBio.Core/Nn/DenoisingNet.cs|for (int i = 0; i < plane; i++) mean[i] = 0.5f * (before[i] + after[i]);|for (int i = 0; i < plane; i++) mean[i] = after[i];'
@@ -1038,6 +1083,10 @@ MUTATIONS=(
   '40|src/DoraBio.Core/Data/Sequences.cs|        return [window[0], window[2]];|        return [window[0], window[1]];'
   '40|docs/RESULTS.md|<!-- tl-adopted: skip-centre -->|<!-- tl-adopted: n2n -->'
   '40|docs/RESULTS.md|<!-- tl-default: none -->|<!-- tl-default: skip-centre -->'
+  '41|src/DoraBio.Core/Data/TimeAxis.cs|        for (int k = layout.Axes.Length - 1; k > a; k--) stride *= layout.Shape[k];
+        int n = layout.Shape[a], t = page / stride % n;|        int n = layout.Shape[a], t = page / stride % n;'
+  '41|src/DoraBio.Core/Data/DatasetLoader.cs|        if (!stackFormat) return [ImageLoader.Load(file)];|        return [ImageLoader.Load(file)];'
+  '41|src/DoraBio.Core/BatchDenoising.cs|        bool correlated = 2 * flagged > samples;|        bool correlated = flagged > 0;'
 )
 
 self_test() {

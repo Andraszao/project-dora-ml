@@ -67,10 +67,38 @@ public static class RoutedNoise2Void
     public static string CorrelatedPath(string outPath) =>
         Path.Combine(Path.GetDirectoryName(outPath) ?? "", Path.GetFileNameWithoutExtension(outPath) + ".correlated" + Path.GetExtension(outPath));
 
+    /// <summary>Fewest images a kind needs to get a network of its own (brick 41); see <see cref="MinimumShare"/>.</summary>
+    public const int MinimumImages = 3;
+
+    /// <summary>Smallest share of the set a kind needs to get a network of its own (brick 41).</summary>
+    public const double MinimumShare = 0.05;
+
+    /// <summary>
+    /// Folds a kind with too few images into the other (brick 41): a network trained on one or two images, or on a few
+    /// percent of a set, learns those images rather than their kind of noise, and one odd frame of a stack shouldn't get a
+    /// network of its own. A kind needs at least <paramref name="minimumImages"/> images and <see cref="MinimumShare"/> of
+    /// the set; otherwise its images join the majority, and the returned note says so (null when nothing moved).
+    /// </summary>
+    public static (List<ImagePair> Independent, List<ImagePair> Correlated, string? Note) Coherent(
+        List<ImagePair> independent, List<ImagePair> correlated, int minimumImages = MinimumImages)
+    {
+        if (independent.Count == 0 || correlated.Count == 0) return (independent, correlated, null);
+        int total = independent.Count + correlated.Count;
+        int needed = Math.Max(minimumImages, (int)Math.Ceiling(MinimumShare * total));
+        bool fewCorrelated = correlated.Count < needed && correlated.Count <= independent.Count;
+        bool fewIndependent = !fewCorrelated && independent.Count < needed;
+        if (fewCorrelated)
+            return ([.. independent, .. correlated], [], $"{correlated.Count} of {total} images look correlated, too few for a network of their own (needs {needed}); they train with the rest");
+        if (fewIndependent)
+            return ([], [.. correlated, .. independent], $"{independent.Count} of {total} images look independent, too few for a network of their own (needs {needed}); they train with the rest");
+        return (independent, correlated, null);
+    }
+
     /// <summary>
     /// Trains the routed recipe: one network per kind of image present. A set of one kind gives one network at
     /// <paramref name="outPath"/>; a mixed set gives the independent-image network at <paramref name="outPath"/> and the
-    /// correlated-image one at <paramref name="correlatedPath"/> (default <see cref="CorrelatedPath"/>).
+    /// correlated-image one at <paramref name="correlatedPath"/> (default <see cref="CorrelatedPath"/>). A kind with too
+    /// few images joins the other (<see cref="Coherent"/>).
     /// </summary>
     /// <param name="images">Normalized training images.</param>
     /// <param name="baseConfig">Budget, batch, patch, learning rate, masking and seed shared by both networks.</param>
@@ -80,14 +108,19 @@ public static class RoutedNoise2Void
     /// <param name="onEpoch">Called after every epoch with the kind being trained.</param>
     /// <param name="correlatedPath">Path for the correlated-image network of a mixed set.</param>
     /// <param name="verdicts">Noise-check verdicts if already computed.</param>
+    /// <param name="minimumImages">Fewest images a kind needs for its own network (<see cref="Coherent"/>).</param>
+    /// <param name="onNotice">Optional: called when a kind is folded into the other.</param>
     /// <exception cref="ArgumentException">No images.</exception>
     public static List<RoutedNetwork> Train(IReadOnlyList<ImagePair> images, TrainerConfig baseConfig, string outPath, string description,
-        string? journalPath = null, Action<NoiseKind, EpochReport>? onEpoch = null, string? correlatedPath = null, IReadOnlyList<bool?>? verdicts = null)
+        string? journalPath = null, Action<NoiseKind, EpochReport>? onEpoch = null, string? correlatedPath = null, IReadOnlyList<bool?>? verdicts = null,
+        int minimumImages = MinimumImages, Action<string>? onNotice = null)
     {
         if (images.Count == 0) throw new ArgumentException("No training images.", nameof(images));
         int frames = images[0].FrameCount;   // 3 for a time-lapse trained with the spatiotemporal blind spot
         verdicts ??= StructuredMasking.Diagnose(images);
-        var (independent, correlated) = Split(images, verdicts);
+        var (split, correlatedSplit) = Split(images, verdicts);
+        var (independent, correlated, note) = Coherent(split, correlatedSplit, minimumImages);
+        if (note is not null) onNotice?.Invoke(note);
         bool mixed = independent.Count > 0 && correlated.Count > 0;
         var trained = new List<RoutedNetwork>();
         foreach (var (recipe, part) in new[] { (Independent(baseConfig, frames), independent), (Correlated(baseConfig, frames), correlated) })
