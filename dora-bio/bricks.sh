@@ -1160,7 +1160,7 @@ self_test() {
   local gates=() g
   for m in "${MUTATIONS[@]}"; do g="${m%%|*}"; [[ -n "${seen[$g]:-}" ]] || { seen[$g]=1; gates+=("$g"); }; done
   for g in "${gates[@]}"; do
-    if (cd "$root/control" && ./bricks.sh --only "$g" 2>&1 | grep -q "▶ brick $g .*FAIL"); then
+    if (cd "$root/control" && DORA_KEEP_FAILED_LOGS=0 ./bricks.sh --only "$g" 2>&1 | grep -q "▶ brick $g .*FAIL"); then
       echo "control (no mutation): gate $g is red in a scratch copy; mutation results would be meaningless"
       rm -rf "$root"
       return 1
@@ -1193,7 +1193,7 @@ PY
     fi
 
     local out
-    out="$(cd "$copy" && ./bricks.sh --only "$gate" 2>&1)"
+    out="$(cd "$copy" && DORA_KEEP_FAILED_LOGS=0 ./bricks.sh --only "$gate" 2>&1)"
     if echo "$out" | grep -q "▶ brick $gate .*FAIL"; then
       echo "mutation $n (gate $gate, $file): caught"
     else
@@ -1233,11 +1233,15 @@ for i in $(seq "$FIRST" "$UPTO"); do
   else
     printf "FAIL  (%ss, exit %s%s)\n" "$took" "$code" "$( ((code > 128)) && echo ", killed by signal $((code - 128))" )"
     # Keep the whole log (the run's logs are deleted on exit) and name the failed tests, which a long stack trace
-    # can push out of the last 40 lines: an intermittent failure must leave its evidence behind.
-    kept="${TMPDIR:-/tmp}/dora-bricks-failed-$i-$(date +%Y%m%d-%H%M%S).log"
-    cp "$log" "$kept"
+    # can push out of the last 40 lines: an intermittent failure must leave its evidence behind. Not in the
+    # self-test's scratch copies, where failing is the point (DORA_KEEP_FAILED_LOGS=0): they'd leave one per bug.
+    where=""
+    if [[ "${DORA_KEEP_FAILED_LOGS:-1}" != 0 ]]; then
+      kept="${TMPDIR:-/tmp}/dora-bricks-failed-$i-$(date +%Y%m%d-%H%M%S).log"
+      cp "$log" "$kept" && where=" (all of it: $kept)"
+    fi
     grep -E '^ +Failed [A-Za-z]' "$log" | head -20 || true
-    echo "──── last 40 lines of brick $i log (all of it: $kept) ────"
+    echo "──── last 40 lines of brick $i log$where ────"
     tail -40 "$log"
     echo "───────────────────────────────────────"
     echo "Stopped at brick $i. Fix it before laying anything on top."
