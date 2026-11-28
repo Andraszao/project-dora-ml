@@ -1,0 +1,15 @@
+<Project Sdk="Godot.NET.Sdk/4.5.1">
+  <!--
+    The Godot-side assembly. Keep it thin: only DoraBioBridge.cs (UI ↔ core marshaling) lives here.
+    All ML code is in DoraBio.Core, which has no Godot dependency and is tested with plain `dotnet test`.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <RootNamespace>DoraBio.GodotBridge</RootNamespace>
+    <AssemblyName>DoraBio.Godot</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../src/DoraBio.Core/DoraBio.Core.csproj" />
+  </ItemGroup>
+</Project>

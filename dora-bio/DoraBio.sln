@@ -1,0 +1,45 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{FF7E17B0-97A1-4145-AAA6-9D710BB9AFDC}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DoraBio.Core", "src\DoraBio.Core\DoraBio.Core.csproj", "{83197C78-2FEA-4241-9AA3-4945884C8B17}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{A2187055-89A4-4EC4-9BC1-66E496EF5336}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DoraBio.Core.Tests", "tests\DoraBio.Core.Tests\DoraBio.Core.Tests.csproj", "{14542CC0-3953-4DC3-B1D6-9ADBC127B1AD}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tools", "tools", "{6B78782B-C0E6-484E-B3EB-BE25197C66EE}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DoraBio.Cli", "tools\DoraBio.Cli\DoraBio.Cli.csproj", "{3CB93ED1-5705-467A-9588-F16B514D01FD}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{83197C78-2FEA-4241-9AA3-4945884C8B17}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{83197C78-2FEA-4241-9AA3-4945884C8B17}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{83197C78-2FEA-4241-9AA3-4945884C8B17}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{83197C78-2FEA-4241-9AA3-4945884C8B17}.Release|Any CPU.Build.0 = Release|Any CPU
+		{14542CC0-3953-4DC3-B1D6-9ADBC127B1AD}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{14542CC0-3953-4DC3-B1D6-9ADBC127B1AD}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{14542CC0-3953-4DC3-B1D6-9ADBC127B1AD}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{14542CC0-3953-4DC3-B1D6-9ADBC127B1AD}.Release|Any CPU.Build.0 = Release|Any CPU
+		{3CB93ED1-5705-467A-9588-F16B514D01FD}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{3CB93ED1-5705-467A-9588-F16B514D01FD}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{3CB93ED1-5705-467A-9588-F16B514D01FD}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{3CB93ED1-5705-467A-9588-F16B514D01FD}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{83197C78-2FEA-4241-9AA3-4945884C8B17} = {FF7E17B0-97A1-4145-AAA6-9D710BB9AFDC}
+		{14542CC0-3953-4DC3-B1D6-9ADBC127B1AD} = {A2187055-89A4-4EC4-9BC1-66E496EF5336}
+		{3CB93ED1-5705-467A-9588-F16B514D01FD} = {6B78782B-C0E6-484E-B3EB-BE25197C66EE}
+	EndGlobalSection
+EndGlobal

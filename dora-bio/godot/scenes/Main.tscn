@@ -1,0 +1,253 @@
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="Script" path="res://scripts/MicroscopyViewport.gd" id="1_ui"]
+[ext_resource type="Script" path="res://scripts/DoraBioBridge.cs" id="2_bridge"]
+
+[node name="Main" type="Control" node_paths=PackedStringArray("bridge", "raw_view", "baseline_view", "dora_view", "raw_caption", "baseline_caption", "dora_caption", "model_label", "status_label", "log_view", "load_sample_button", "open_button", "denoise_button", "adapt_button", "adapt_steps", "train_synthetic_button", "train_folder_button", "epochs_box", "cancel_button", "save_button", "gamma_slider", "file_dialog", "folder_dialog")]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("1_ui")
+bridge = NodePath("DoraBioBridge")
+raw_view = NodePath("Margin/Layout/Panels/RawPanel/RawView")
+baseline_view = NodePath("Margin/Layout/Panels/BaselinePanel/BaselineView")
+dora_view = NodePath("Margin/Layout/Panels/DoraPanel/DoraView")
+raw_caption = NodePath("Margin/Layout/Panels/RawPanel/RawCaption")
+baseline_caption = NodePath("Margin/Layout/Panels/BaselinePanel/BaselineCaption")
+dora_caption = NodePath("Margin/Layout/Panels/DoraPanel/DoraCaption")
+model_label = NodePath("Margin/Layout/Header/ModelLabel")
+status_label = NodePath("Margin/Layout/DisplayRow/StatusLabel")
+log_view = NodePath("Margin/Layout/LogView")
+load_sample_button = NodePath("Margin/Layout/Toolbar/LoadSampleButton")
+open_button = NodePath("Margin/Layout/Toolbar/OpenButton")
+denoise_button = NodePath("Margin/Layout/Toolbar/DenoiseButton")
+adapt_button = NodePath("Margin/Layout/Toolbar/AdaptButton")
+adapt_steps = NodePath("Margin/Layout/Toolbar/AdaptSteps")
+train_synthetic_button = NodePath("Margin/Layout/Toolbar/TrainSyntheticButton")
+train_folder_button = NodePath("Margin/Layout/Toolbar/TrainFolderButton")
+epochs_box = NodePath("Margin/Layout/Toolbar/Epochs")
+cancel_button = NodePath("Margin/Layout/Toolbar/CancelButton")
+save_button = NodePath("Margin/Layout/Toolbar/SaveButton")
+gamma_slider = NodePath("Margin/Layout/DisplayRow/GammaSlider")
+file_dialog = NodePath("FileDialog")
+folder_dialog = NodePath("FolderDialog")
+
+[node name="Background" type="ColorRect" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+color = Color(0.07, 0.08, 0.1, 1)
+
+[node name="DoraBioBridge" type="Node" parent="."]
+script = ExtResource("2_bridge")
+
+[node name="Margin" type="MarginContainer" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+theme_override_constants/margin_left = 16
+theme_override_constants/margin_top = 12
+theme_override_constants/margin_right = 16
+theme_override_constants/margin_bottom = 12
+
+[node name="Layout" type="VBoxContainer" parent="Margin"]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="Header" type="HBoxContainer" parent="Margin/Layout"]
+layout_mode = 2
+
+[node name="Title" type="Label" parent="Margin/Layout/Header"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 22
+text = "PROJECT: DORA v2 · bio"
+
+[node name="ModelLabel" type="Label" parent="Margin/Layout/Header"]
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_colors/font_color = Color(0.65, 0.7, 0.78, 1)
+text = "loading model"
+horizontal_alignment = 2
+vertical_alignment = 1
+text_overrun_behavior = 3
+
+[node name="Subtitle" type="Label" parent="Margin/Layout"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.65, 0.7, 0.78, 1)
+text = "Self-supervised fluorescence denoising. Raw vs. classical filter vs. DORA, on one shared 32-bit display window."
+
+[node name="Panels" type="HBoxContainer" parent="Margin/Layout"]
+layout_mode = 2
+size_flags_vertical = 3
+theme_override_constants/separation = 10
+
+[node name="RawPanel" type="VBoxContainer" parent="Margin/Layout/Panels"]
+layout_mode = 2
+size_flags_horizontal = 3
+
+[node name="RawCaption" type="Label" parent="Margin/Layout/Panels/RawPanel"]
+layout_mode = 2
+text = "Raw"
+text_overrun_behavior = 3
+
+[node name="RawView" type="TextureRect" parent="Margin/Layout/Panels/RawPanel"]
+texture_filter = 1
+custom_minimum_size = Vector2(240, 240)
+layout_mode = 2
+size_flags_vertical = 3
+expand_mode = 1
+stretch_mode = 5
+
+[node name="BaselinePanel" type="VBoxContainer" parent="Margin/Layout/Panels"]
+layout_mode = 2
+size_flags_horizontal = 3
+
+[node name="BaselineCaption" type="Label" parent="Margin/Layout/Panels/BaselinePanel"]
+layout_mode = 2
+text = "Bilateral baseline"
+text_overrun_behavior = 3
+
+[node name="BaselineView" type="TextureRect" parent="Margin/Layout/Panels/BaselinePanel"]
+texture_filter = 1
+custom_minimum_size = Vector2(240, 240)
+layout_mode = 2
+size_flags_vertical = 3
+expand_mode = 1
+stretch_mode = 5
+
+[node name="DoraPanel" type="VBoxContainer" parent="Margin/Layout/Panels"]
+layout_mode = 2
+size_flags_horizontal = 3
+
+[node name="DoraCaption" type="Label" parent="Margin/Layout/Panels/DoraPanel"]
+layout_mode = 2
+text = "DORA"
+text_overrun_behavior = 3
+
+[node name="DoraView" type="TextureRect" parent="Margin/Layout/Panels/DoraPanel"]
+texture_filter = 1
+custom_minimum_size = Vector2(240, 240)
+layout_mode = 2
+size_flags_vertical = 3
+expand_mode = 1
+stretch_mode = 5
+
+[node name="Toolbar" type="HBoxContainer" parent="Margin/Layout"]
+layout_mode = 2
+
+[node name="LoadSampleButton" type="Button" parent="Margin/Layout/Toolbar"]
+layout_mode = 2
+text = "Load sample"
+
+[node name="OpenButton" type="Button" parent="Margin/Layout/Toolbar"]
+layout_mode = 2
+text = "Open image…"
+
+[node name="Sep1" type="VSeparator" parent="Margin/Layout/Toolbar"]
+layout_mode = 2
+
+[node name="DenoiseButton" type="Button" parent="Margin/Layout/Toolbar"]
+layout_mode = 2
+text = "Denoise"
+
+[node name="AdaptButton" type="Button" parent="Margin/Layout/Toolbar"]
+layout_mode = 2
+tooltip_text = "Self-supervised Noise2Void fine-tuning on the loaded image. No ground truth needed."
+text = "Adapt to sample"
+
+[node name="AdaptSteps" type="SpinBox" parent="Margin/Layout/Toolbar"]
+custom_minimum_size = Vector2(120, 0)
+layout_mode = 2
+min_value = 1.0
+max_value = 500.0
+value = 20.0
+suffix = "steps"
+alignment = 2
+
+[node name="Sep2" type="VSeparator" parent="Margin/Layout/Toolbar"]
+layout_mode = 2
+
+[node name="TrainSyntheticButton" type="Button" parent="Margin/Layout/Toolbar"]
+layout_mode = 2
+tooltip_text = "Fine-tune on synthetic fluorescence data generated in memory."
+text = "Train (synthetic)"
+
+[node name="TrainFolderButton" type="Button" parent="Margin/Layout/Toolbar"]
+layout_mode = 2
+tooltip_text = "Folder layouts: noisy/ + clean/, FMD raw/ + gt/, or flat TIFF/PNG files (Noise2Void)."
+text = "Train on folder…"
+
+[node name="Epochs" type="SpinBox" parent="Margin/Layout/Toolbar"]
+custom_minimum_size = Vector2(120, 0)
+layout_mode = 2
+min_value = 1.0
+max_value = 200.0
+value = 5.0
+suffix = "epochs"
+alignment = 2
+
+[node name="Spacer" type="Control" parent="Margin/Layout/Toolbar"]
+layout_mode = 2
+size_flags_horizontal = 3
+
+[node name="CancelButton" type="Button" parent="Margin/Layout/Toolbar"]
+layout_mode = 2
+text = "Cancel"
+
+[node name="SaveButton" type="Button" parent="Margin/Layout/Toolbar"]
+layout_mode = 2
+tooltip_text = "Write current weights (including online adaptation) to user://dora_bio_weights.bin"
+text = "Save weights"
+
+[node name="DisplayRow" type="HBoxContainer" parent="Margin/Layout"]
+layout_mode = 2
+
+[node name="GammaLabel" type="Label" parent="Margin/Layout/DisplayRow"]
+layout_mode = 2
+text = "Display gamma"
+
+[node name="GammaSlider" type="HSlider" parent="Margin/Layout/DisplayRow"]
+custom_minimum_size = Vector2(200, 0)
+layout_mode = 2
+size_flags_vertical = 4
+min_value = 0.2
+max_value = 3.0
+step = 0.05
+value = 1.0
+
+[node name="StatusLabel" type="Label" parent="Margin/Layout/DisplayRow"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Ready"
+horizontal_alignment = 2
+
+[node name="LogView" type="RichTextLabel" parent="Margin/Layout"]
+custom_minimum_size = Vector2(0, 150)
+layout_mode = 2
+bbcode_enabled = true
+scroll_following = true
+selection_enabled = true
+
+[node name="FileDialog" type="FileDialog" parent="."]
+title = "Open a microscopy image"
+size = Vector2i(900, 600)
+ok_button_text = "Open"
+file_mode = 0
+access = 2
+filters = PackedStringArray("*.tif, *.tiff ; TIFF images", "*.png ; PNG images")
+
+[node name="FolderDialog" type="FileDialog" parent="."]
+title = "Choose a training folder"
+size = Vector2i(900, 600)
+ok_button_text = "Select"
+file_mode = 2
+access = 2

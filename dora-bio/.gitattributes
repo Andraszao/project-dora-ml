@@ -1,0 +1,5 @@
+# Never let line-ending normalization touch model weights or images.
+*.bin binary
+*.tif binary
+*.tiff binary
+*.png binary
