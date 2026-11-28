@@ -39,6 +39,12 @@ public partial class DoraBioBridge : Node
     /// <summary>Step size for "Adapt to sample"; kept small so adaptation refines rather than overwrites the model.</summary>
     [Export] public float AdaptLearningRate { get; set; } = 1e-4f;
 
+    /// <summary>Where each denoise writes its result: the same float32 TIFF <c>dora-bio denoise</c> writes (brick 41).</summary>
+    [Export] public string DenoisedPath { get; set; } = "user://dora_bio_denoised.tif";
+
+    /// <summary>Where each denoise writes the bilateral baseline it is compared with.</summary>
+    [Export] public string BaselinePath { get; set; } = "user://dora_bio_baseline.tif";
+
     // ---- Signals (GDScript: bridge.<Name>.connect(handler)). All are emitted on the main thread. ----
 
     /// <summary>The loaded model changed (startup, training, adaptation, save). <c>description</c> = <see cref="DescribeModel"/>.</summary>
@@ -54,7 +60,7 @@ public partial class DoraBioBridge : Node
     /// <summary>
     /// Denoising finished. <c>denoised</c> and <c>baseline</c> (bilateral) are FORMAT_RF images on the same scale as the raw image.
     /// The three <c>noise*</c> values are Immerkær noise-σ estimates (raw, DORA, bilateral), and <c>seconds</c>
-    /// is DORA's inference time.
+    /// is the denoising run's wall-clock time (DORA and the baseline, files written).
     /// </summary>
     [Signal] public delegate void DenoiseFinishedEventHandler(Image denoised, Image baseline, float noiseRaw, float noiseDenoised, float noiseBaseline, float seconds);
 
@@ -86,12 +92,17 @@ public partial class DoraBioBridge : Node
 
     private DenoisingNet _net = DenoisingNet.Create(NetConfig.Default);
     private ModelInfo? _info;
+    private LoadedModel? _correlated;   // routed training's second network (correlated noise), or null
     private string _modelSource = "untrained";
+    private string? _modelFile;         // the weights file _net was loaded from, as an OS path (null: res:// or untrained)
     private OnlineAdapter? _adapter;    // created on first Adapt, discarded when the model changes
     private GrayImage? _image;          // normalized
+    private IntensityMap? _map;         // the loaded image's normalization, so outputs read back share its display scale
+    private string? _imageFile;         // the loaded image as an OS path the pipeline can open (res:// is copied to user://)
     private NoiseDiagnosis? _noise;     // the loaded image's noise check; null if it was too small to judge
     private string _imageName = "";
     private CancellationTokenSource? _cancellation;
+    private Task? _job;                 // the running job, so leaving the tree can wait for it
     private bool _busy;
     private bool _unsaved;
 
@@ -113,15 +124,39 @@ public partial class DoraBioBridge : Node
     /// <summary>Loads weights only. Datasets load lazily, when training is requested.</summary>
     public override void _Ready() => LoadBestAvailableModel();
 
-    /// <summary>Asks any running job to stop when the node leaves the tree (e.g. the window closes).</summary>
-    public override void _ExitTree() => _cancellation?.Cancel();
+    /// <summary>
+    /// Stops any running job when the node leaves the tree (e.g. the window closes) and waits for it, at most 10 s:
+    /// a job still running when the engine shuts down would call into a torn-down Godot and crash the process.
+    /// Jobs check the cancellation between tiles and steps, so the wait is short.
+    /// </summary>
+    public override void _ExitTree()
+    {
+        _cancellation?.Cancel();
+        _job?.Wait(TimeSpan.FromSeconds(10));
+    }
 
     /// <summary>One line about the current model, for the UI header.</summary>
     public string DescribeModel()
     {
         string provenance = _info?.Provenance ?? "untrained network: train or adapt before trusting the output";
-        return $"{_modelSource} · {_net.ParameterCount:N0} params · {provenance}{(_unsaved ? " · unsaved changes" : "")}";
+        string routed = _correlated is null ? "" : " · + correlated-noise network";
+        return $"{_modelSource} · {_net.ParameterCount:N0} params · {provenance}{routed}{(_unsaved ? " · unsaved changes" : "")}";
     }
+
+    /// <summary>
+    /// The content hash of the current main network (architecture and weights, not provenance or save time), as
+    /// <c>dora-bio info</c> prints it: equal hashes mean the app and the CLI hold the same model.
+    /// </summary>
+    public string ModelHash() => WeightsFile.ContentHash(_net);
+
+    /// <summary>The weights file the current model came from, as an OS path, or "" when it isn't a file on disk (inside an exported package, or untrained).</summary>
+    public string ModelFile() => _modelFile ?? "";
+
+    /// <summary>Where the last denoised image was written (float32 TIFF in the input's units), as an OS path.</summary>
+    public string DenoisedFile() => ProjectSettings.GlobalizePath(DenoisedPath);
+
+    /// <summary>Where the last bilateral baseline was written, as an OS path.</summary>
+    public string BaselineFile() => ProjectSettings.GlobalizePath(BaselinePath);
 
     /// <summary>
     /// Loads user:// weights if they exist, else the bundled res:// model, else a fresh network.
@@ -142,7 +177,12 @@ public partial class DoraBioBridge : Node
                     WriteLog($"⚠️ {path} takes {net.Config.InputFrames} frames (a time-lapse model); use the dora-bio CLI on stacks");
                     continue;
                 }
-                SetModel(net, info, path);
+                // Routed training (brick 41: the app trains what the CLI trains) leaves a second network beside the first.
+                string companion = CompanionPath(path);
+                LoadedModel? correlated = GodotFileAccess.FileExists(companion)
+                    ? LoadedModelFrom(companion)
+                    : null;
+                SetModel(net, info, path, correlated);
                 return;
             }
             catch (Exception e) when (e is InvalidDataException or ArgumentException)
@@ -164,6 +204,8 @@ public partial class DoraBioBridge : Node
             var raw = ImageLoader.Decode(bytes, path);
             var map = Normalization.FromPercentiles(raw.Pixels);
             _image = Normalization.Apply(raw, map);
+            _map = map;
+            _imageFile = OsFile(path, bytes);
             _imageName = path.GetFile();
 
             var sorted = (float[])_image.Pixels.Clone();
@@ -186,24 +228,44 @@ public partial class DoraBioBridge : Node
         }
     }
 
-    /// <summary>Runs DORA (tiled, all cores) and the bilateral baseline on the loaded image.</summary>
+    /// <summary>
+    /// Runs DORA and the bilateral baseline on the loaded image through <see cref="Pipeline.Denoise"/>, the path
+    /// <c>dora-bio denoise --baseline</c> takes: the same routing, the same float32 TIFFs (written to
+    /// <see cref="DenoisedPath"/> and <see cref="BaselinePath"/>), byte for byte (gate 8). The panels then show what was
+    /// written, on the raw image's display scale.
+    /// </summary>
     public void StartDenoise()
     {
-        if (_image is null) { EmitSignal(SignalName.JobFailed, "Load an image first."); return; }
-        var net = _net;
+        if (_image is null || _map is null || _imageFile is null) { EmitSignal(SignalName.JobFailed, "Load an image first."); return; }
+        var request = new DenoiseRequest
+        {
+            Input = _imageFile,
+            Output = DenoisedFile(),
+            Baseline = BaselineFile(),
+            Model = new LoadedModel(_net, CurrentInfo()),
+            CorrelatedModel = _correlated,
+            TileCore = TileCore,
+        };
         var image = _image;
+        var map = _map.Value;
         RunJob("Denoising", token =>
         {
-            var clock = System.Diagnostics.Stopwatch.StartNew();
-            var denoised = TiledInference.Denoise(net, image, TileCore, token);
-            float seconds = (float)clock.Elapsed.TotalSeconds;
-            var baseline = BilateralBaseline.FilterAuto(image);
+            var outcome = Pipeline.Denoise(request, line => Defer(() => WriteLog(line)), token);
+            var denoised = Normalization.Apply(ImageLoader.Load(request.Output), map);
+            var baseline = Normalization.Apply(ImageLoader.Load(request.Baseline!), map);
             float noiseRaw = (float)Metrics.EstimateNoiseSigma(image);
             float noiseDenoised = (float)Metrics.EstimateNoiseSigma(denoised);
             float noiseBaseline = (float)Metrics.EstimateNoiseSigma(baseline);
             return () => EmitSignal(SignalName.DenoiseFinished, ToGodotImage(denoised), ToGodotImage(baseline),
-                noiseRaw, noiseDenoised, noiseBaseline, seconds);
+                noiseRaw, noiseDenoised, noiseBaseline, (float)outcome.Seconds);
         });
+    }
+
+    /// <summary>The current model's info, with any unsaved adaptation noted in its provenance.</summary>
+    private ModelInfo CurrentInfo()
+    {
+        var info = _info ?? new ModelInfo(_net.Config, WeightsFile.ModelVersion, "untrained network", DateTime.UtcNow);
+        return _adapter is { OptimizerStep: > 0 } a ? info with { Provenance = $"{info.Provenance}; + {a.OptimizerStep} online N2V steps" } : info;
     }
 
     /// <summary>
@@ -236,20 +298,35 @@ public partial class DoraBioBridge : Node
         });
     }
 
-    /// <summary>Fine-tunes (or retrains) on a folder in any layout <see cref="DatasetLoader"/> understands.</summary>
+    /// <summary>
+    /// Fine-tunes (or, <paramref name="fromScratch"/>, trains anew) on a folder in any layout <see cref="DatasetLoader"/>
+    /// understands: <c>dora-bio train --data FOLDER --epochs N --steps 30 --batch 8</c>, plus <c>--lr 3e-4</c> and the
+    /// current weights as <c>--init</c> when fine-tuning (see <see cref="StartTraining"/>).
+    /// </summary>
     public void StartTrainingOnFolder(string folder, int epochs, bool fromScratch)
     {
         string path = ProjectSettings.GlobalizePath(folder);
-        StartTraining($"Training on {path.GetFile()}", () => DatasetLoader.LoadDirectory(path),
-            $"folder '{path.GetFile()}'", epochs, fromScratch);
+        StartTraining($"Training on {path.GetFile()}", () => new TrainRequest { Data = path, Out = "" }, epochs, fromScratch);
     }
 
-    /// <summary>Generates synthetic fluorescence data in memory and trains on it: a demo that needs no download.</summary>
+    /// <summary>
+    /// Generates synthetic fluorescence data in memory and trains on it: a demo that needs no download. The data's seed
+    /// is fixed, so two runs of the demo train the same model.
+    /// </summary>
     public void StartSyntheticTraining(int epochs, bool fromScratch)
     {
-        StartTraining("Training on synthetic data", () => SyntheticFluorescence.GenerateDataset(8, 192, seed: System.Environment.TickCount),
-            "8 synthetic 192px FOVs (generated in-app)", epochs, fromScratch);
+        StartTraining("Training on synthetic data",
+            () => new TrainRequest
+            {
+                Dataset = SyntheticFluorescence.GenerateDataset(8, 192, seed: SyntheticSeed),
+                DatasetName = "8 synthetic 192px FOVs (generated in-app)",
+                Out = "",
+            },
+            epochs, fromScratch);
     }
+
+    /// <summary>Seed of the synthetic demo data.</summary>
+    private const int SyntheticSeed = 41;
 
     /// <summary>Requests cancellation of the running job (if any). Training stops after its current step and keeps its best weights.</summary>
     public void Cancel() => _cancellation?.Cancel();
@@ -260,11 +337,11 @@ public partial class DoraBioBridge : Node
         if (_busy) return false;
         try
         {
-            string provenance = (_info?.Provenance ?? "untrained") + (_adapter is { OptimizerStep: > 0 } a ? $"; + {a.OptimizerStep} online N2V steps" : "");
             string path = ProjectSettings.GlobalizePath(UserWeightsPath);
-            WeightsFile.Save(path, _net, provenance);
+            WeightsFile.Save(path, _net, CurrentInfo().Provenance);
             _info = WeightsFile.Load(path).Info;
             _modelSource = UserWeightsPath;
+            _modelFile = path;
             _unsaved = false;
             WriteLog($"💾 saved weights to {path}");
             EmitSignal(SignalName.ModelChanged, DescribeModel());
@@ -278,66 +355,100 @@ public partial class DoraBioBridge : Node
     }
 
     /// <summary>
-    /// Shared body of both training entry points. Trains a <em>copy</em> of the current model, so the on-screen model
-    /// stays intact if training is cancelled or fails, and swaps it in only when an epoch produced weights.
-    /// Fine-tuning uses a lower learning rate (3e-4) than training from scratch (1e-3).
-    /// Small per-epoch settings (30 steps × batch 8) keep the UI's progress updates frequent.
+    /// Shared body of both training entry points: <see cref="Pipeline.Train"/>, the code behind <c>dora-bio train</c>, so
+    /// the app picks the mode, recipe and routing the CLI picks (gate 8 checks the trained weights match). The app only
+    /// sets what it needs: 30 steps × batch 8 per epoch (frequent progress updates), the user's epoch count, and when
+    /// fine-tuning a copy of the current model (<c>--init</c>) at a lower learning rate (3e-4 rather than 1e-3). Weights
+    /// are written to <see cref="UserWeightsPath"/> (and, when training is routed and finds both kinds of noise, its
+    /// <c>.correlated</c> companion); the on-screen model stays as it was until training wrote new weights.
     /// </summary>
-    private void StartTraining(string activity, Func<IReadOnlyList<ImagePair>> loadData, string description, int epochs, bool fromScratch)
+    private void StartTraining(string activity, Func<TrainRequest> data, int epochs, bool fromScratch)
     {
-        var net = fromScratch ? DenoisingNet.Create(_net.Config, seed: System.Environment.TickCount) : _net.Clone();
         string weightsPath = ProjectSettings.GlobalizePath(UserWeightsPath);
         string journalPath = ProjectSettings.GlobalizePath(JournalPath);
+        var init = fromScratch ? null : _net;   // Pipeline.Train trains a copy
 
         RunJob(activity, token =>
         {
-            var dataset = loadData();   // lazy: datasets are only read when training is requested
-            bool supervised = dataset.All(d => d.HasClean);
-            var config = new TrainerConfig
+            // Built here, not on the main thread: generating or reading the data can take a while.
+            var request = data() with
             {
-                Mode = supervised ? TrainingMode.Supervised : TrainingMode.Noise2Void,
-                MaxEpochs = Math.Max(1, epochs),
-                StepsPerEpoch = 30,
-                BatchSize = 8,
-                PatchSize = Math.Min(64, dataset.Min(d => Math.Min(d.Noisy.Width, d.Noisy.Height)) / 16 * 16),
-                LearningRate = fromScratch ? 1e-3f : 3e-4f,
+                Out = weightsPath,
+                Journey = journalPath,
+                Epochs = Math.Max(1, epochs),
+                Steps = 30,
+                Batch = 8,
+                LearningRate = fromScratch ? 1e-3 : 3e-4,
+                InitNet = init,
             };
-            Defer(() => WriteLog($"📚 {dataset.Count} images, {config.Mode}, up to {config.MaxEpochs} epochs"));
-
-            var result = TrainingJob.Run(net, dataset, config,
-                new TrainingJobOptions { DatasetDescription = description, WeightsPath = weightsPath, JournalPath = journalPath },
-                report => Defer(() => EmitSignal(SignalName.EpochCompleted, report.Epoch, (float)report.ValLoss,
+            var models = Pipeline.Train(request, line => Defer(() => WriteLog(line)),
+                (_, report) => Defer(() => EmitSignal(SignalName.EpochCompleted, report.Epoch, (float)report.ValLoss,
                     (float)(report.ValPsnr ?? double.NaN), (float)(report.ValPsnrGain ?? double.NaN),
                     report.LearningRate, string.Join("  ", report.Events))),
                 token);
 
+            var main = models[0];
+            if (main.Kept is null)
+                return () => EmitSignal(SignalName.TrainingFinished, $"stopped: {main.Result.StopReason} before any epoch finished; model unchanged");
+            var trained = LoadedModel.Load(main.WeightsPath);
+            var correlated = models.Count > 1 ? LoadedModel.Load(models[1].WeightsPath) : null;
+            // A single network replaces any routed pair saved earlier: don't pair it with a stale companion on the next launch.
+            string companion = RoutedNoise2Void.CorrelatedPath(weightsPath);
+            if (correlated is null && File.Exists(companion)) File.Delete(companion);
+            var kept = main.Kept;
             return () =>
             {
-                if (result.BestEpoch > 0)
-                {
-                    SetModel(net, WeightsFile.Load(weightsPath).Info, UserWeightsPath);
-                    EmitSignal(SignalName.TrainingFinished,
-                        $"stopped: {result.StopReason} after {result.History.Count} epochs; best epoch {result.BestEpoch}" +
-                        (result.Best?.ValPsnrGain is { } g ? $" (+{g:0.00} dB over noisy)" : "") +
-                        $"; weights saved to {UserWeightsPath}");
-                }
-                else
-                {
-                    EmitSignal(SignalName.TrainingFinished, $"stopped: {result.StopReason} before any epoch finished; model unchanged");
-                }
+                SetModel(trained.Net, trained.Info, UserWeightsPath, correlated, main.WeightsPath);
+                EmitSignal(SignalName.TrainingFinished,
+                    $"stopped: {main.Result.StopReason} after {main.Result.History.Count} epochs; kept {(main.KeptLast ? "last" : "best")} epoch {kept.Epoch}" +
+                    (kept.ValPsnrGain is { } g ? $" (+{g:0.00} dB over noisy)" : "") +
+                    (correlated is null ? "" : "; + a correlated-noise network") +
+                    $"; weights saved to {UserWeightsPath}");
             };
         });
     }
 
     /// <summary>Installs a model and announces it. Main thread only.</summary>
-    private void SetModel(DenoisingNet net, ModelInfo? info, string source)
+    private void SetModel(DenoisingNet net, ModelInfo? info, string source, LoadedModel? correlated = null, string? file = null)
     {
         _net = net;
         _info = info;
+        _correlated = correlated;
         _modelSource = source;
+        _modelFile = file ?? (source.StartsWith("res://", StringComparison.Ordinal) || source.StartsWith("user://", StringComparison.Ordinal)
+            ? ProjectSettings.GlobalizePath(source) : null);
+        if (_modelFile is not null && !File.Exists(_modelFile)) _modelFile = null;   // res:// inside an exported package
         _adapter = null;      // optimizer state belongs to the previous weights
         _unsaved = false;
         EmitSignal(SignalName.ModelChanged, DescribeModel());
+    }
+
+    /// <summary>The <c>.correlated</c> companion of a weights path (res://, user:// or an OS path).</summary>
+    private static string CompanionPath(string path)
+    {
+        string file = path.GetFile();
+        string stem = file.GetBaseName(), extension = file.GetExtension();
+        return path[..^file.Length] + stem + ".correlated" + (extension.Length > 0 ? "." + extension : "");
+    }
+
+    /// <summary>Loads a weights file through Godot's file access, so res:// paths inside an exported package work.</summary>
+    private static LoadedModel LoadedModelFrom(string path)
+    {
+        var (net, info) = WeightsFile.Load(GodotFileAccess.GetFileAsBytes(path));
+        return new LoadedModel(net, info);
+    }
+
+    /// <summary>
+    /// An OS path for an image the pipeline can open: user:// and OS paths as they are; a res:// file (inside the
+    /// package once exported, so not a file) is copied to user://inputs first.
+    /// </summary>
+    private static string OsFile(string path, byte[] bytes)
+    {
+        if (!path.StartsWith("res://", StringComparison.Ordinal)) return ProjectSettings.GlobalizePath(path);
+        string target = ProjectSettings.GlobalizePath("user://inputs/" + path.GetFile());
+        Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+        File.WriteAllBytes(target, bytes);
+        return target;
     }
 
     /// <summary>Runs <paramref name="work"/> on the thread pool, then its returned continuation on the main thread.</summary>
@@ -349,7 +460,7 @@ public partial class DoraBioBridge : Node
         var token = _cancellation.Token;
         EmitSignal(SignalName.BusyChanged, true, activity);
 
-        Task.Run(() =>
+        _job = Task.Run(() =>
         {
             Action onMainThread;
             try

@@ -32,6 +32,9 @@ src/DoraBio.Core/              ALL ML/IO code. net8.0. No Godot, no NuGet depend
   Training/  Trainer (+BatchStepper), ValidationSet, ProgressiveTargets, TrainingJob, JourneyLog,
              OnlineAdapter, TrainerConfig, StructuredMasking, RoutedNoise2Void (the default Noise2Void recipe since Q20)
   Metrics.cs, TiledInference.cs, BilateralBaseline.cs, FmdBenchmark.cs (held-out FMD scores, noise correlation),
+  Pipeline.cs (brick 41: THE orchestration entry point, Pipeline.Denoise / Pipeline.Train, used by the CLI and the app),
+  PipelineRequests.cs (DenoiseRequest, TrainRequest, LoadedModel, TrainedModel), Recipes.cs (training defaults the
+  quality passes chose; `info --default-…` prints them),
   BatchDenoising.cs (FrameDenoiser: the one per-frame pipeline; stacks and folders streamed frame by frame),
   NoiseDiagnostics.cs (is the noise pixel-independent? from the noisy image alone),
   NoiseResidual.cs (the real noise correlation per axis and region, from high-SNR references; post-hoc, after brick 38),
@@ -62,12 +65,12 @@ tools/experiments/timelapse.sh   brick 40: the four time-lapse arms on DeepCAD-R
 docs/RESULTS.md                measured results on real microscope data (FMD), with reproducible blocks
 godot/                         Godot 4.5 .NET project (open THIS folder in Godot)
   DoraBio.Godot.csproj         Godot.NET.Sdk/4.5.1, ProjectReference → src/DoraBio.Core
-  scripts/DoraBioBridge.cs     the ONLY Godot↔core boundary ([GlobalClass] Node)
+  scripts/DoraBioBridge.cs     the ONLY Godot↔core boundary ([GlobalClass] Node); denoises and trains through Pipeline
   scripts/MicroscopyViewport.gd  UI wiring only
   scenes/Main.tscn, shaders/contrast_stretch.gdshader
   samples/synthetic_cells.tif  SYNTHETIC demo frame (uint16)
   models/dora_bio_weights.bin  bundled weights, trained on SYNTHETIC data only
-  tests/smoke_test.tscn        headless end-to-end check
+  tests/smoke_test.tscn        headless end-to-end check (gate 8 also compares its outputs with the CLI's)
 ```
 
 ## Development pathway
@@ -150,7 +153,7 @@ before anything is built on top.** `./bricks.sh` runs the gates in order and sto
 | 38 | scoreboard (SOTA stage 1, a measurement) | `Data/ExtDerived.cs`, `ExtDataset.Source`/`ExtDatasets.Derived`/`GroupOf`, `Data/FmdExport.cs`, `FmdBenchmark.EvaluatePredictions`, CLI `stack-export`, `fmd-export`, `fmd-eval --predictions`, `ext-eval --precise`, `tools/experiments/scoreboard.sh`, `scoreboard_reading.awk`, `ext_careamics.py --n2v2`; after it, `NoiseResidual.cs` and CLI `noise-residual` (the Tribolium diagnostic; `--stack/--reference/--offset` for time-lapses), `tools/experiments/align_sweep.py`, manifest entry `deepcad-neutrophils-02` | `Brick=38-scoreboard`: derived sets follow the pre-registered splits and keep a patch or cell in one validation group, planes keep their raw values, FMD export = DORA's training plan (never FOV 19), outside outputs scored and clipped like DORA's; the recorded reading follows the pre-registered rule, RESULTS.md and PATHWAY.md name the next brick it gives; the residual measure finds one-axis noise correlation and tells it from misalignment; with data + runs/scoreboard every score reproduces (`scoreboard.sh --rescore`), and with runs/tribolium_diag the diagnostic's blocks |
 | 39 | temporal (SOTA stage 2) | `NetConfig.InputFrames` (1 or 3; residual from the centre frame), weights format 4, `ImagePair.Context`, `TrainingMode.Noise2Noise`, `Data/Sequences.cs`, multi-frame `PatchSampler`/`ValidationSet`/`TiledInference`/`FrameDenoiser`, windowed `BatchDenoising`, `SyntheticFluorescence.GenerateSequence`, CLI `train --frames 3 / --mode n2n / --frame-block`, `synth --sequence --drift` | `Brick=39-temporal`: finite differences for a 3-frame first layer (both architectures, unaligned too); single-frame networks unchanged (format 2); the residual comes from the centre frame; endpoints reflected, never clamped, and no neighbour channel ever holds the target frame (5 frames refused for that reason); tiled = whole frame across frame channels; blind spots in the centre frame only; Noise2Noise never sees its target; stacks stream with a 3-frame window (T = 2 included, T = 1 refused); on synthetic still scenes both modes beat single-frame Noise2Void and Noise2Noise's lead turns into a loss with drift; CLI trains and denoises both, and refuses `--mode n2n --frames 3` and 1-frame stacks |
 | 40 | timelapse-modes (quality pass, SOTA stage 2, Track A; + its skip-centre build) | `NetConfig.ResidualBase`/`SkipCentre`/`WindowFrames` (skip-centre: input t−1, t+1, output their mean minus a correction), weights format 5, `TrainingMode.SkipCentre`, `Sequences.SkipCentre`/`NeighbourIndices`/`ValidationFrames`/`FrameRange`, `Trainer.Train(train, validation)`, `TrainingJobOptions.Validation`, `SequenceBenchmark.cs`, `SequenceDiagnostics.cs` (post hoc), CLI `train --mode skip-centre --frame-range --validation-range`, `seq-eval`, `seq-diagnose`, `info --default-timelapse`, `tools/experiments/timelapse.sh`, `timelapse_reading.awk` | `Brick=40-timelapse-modes`: no input index, sampler plane, validation patch or inference input ever holds frame t (a shuffled frame t leaves the output bit for bit unchanged); the residual base is the neighbours' mean; finite differences (both architectures, unaligned too); tiled = whole frame; format 5 round-trips and a centre-frame base byte is refused; streaming with a 3-frame window (T = 2 included, T = 1 refused); per-frame validation blocks give every arm the same frames and positions; the masks follow their formulas and a block never reads outside itself; the post-hoc readouts see synthetic flashes, smears and flicker; the recorded reading follows the pre-registered rule, and `train --data STACK`'s default follows it or a recorded veto (it is a veto: none); with data + runs/timelapse the spot check and the readouts reproduce |
-| 41 | pilot-core (pilot readiness 41a, part 1) | `Data/TimeAxis.cs` (time axis, neighbours along T with every other axis fixed, series), `ImageStack.FromTiff`, axes-aware `BatchDenoising.DenoiseStack(ImageStack)` / `DenoiseFile(axes)` (page order kept, neighbours re-read), `Sequences.Load/ReadSeries(axes)` (one sequence per channel and slice), `DatasetLoader.Planes` (every page), `RoutedNoise2Void.Coherent` (minimum images), one routing decision per stack, `TiffStackWriter`/`EncodeStack` ImageDescription, CLI `--axes`, `diagnose` on stacks, unknown options refused (`Options.Known`) | `Brick=41-pilot-core`: on an independent ImageJ hyperstack every neighbour is the same channel and slice one frame away and the output keeps the page order; a stack labelled as slices is refused for time-lapse modes (and accepted with `--axes TYX`), unlabelled planes are frames with a notice, a contradictory declaration is an error; every page is read and an ImageJ stack over 4 GB is refused everywhere; a kind with too few images joins the other, and a stack is routed by its majority; the writer keeps a description and is otherwise byte for byte unchanged; from the CLI: folder training sees every plane, a typo'd option exits 2 |
+| 41 | pilot-core (pilot readiness 41a) | `Data/TimeAxis.cs` (time axis, neighbours along T with every other axis fixed, series), `ImageStack.FromTiff`, axes-aware `BatchDenoising.DenoiseStack(ImageStack)` / `DenoiseFile(axes)` (page order kept, neighbours re-read), `Sequences.Load/ReadSeries(axes)` (one sequence per channel and slice), `DatasetLoader.Planes` (every page), `RoutedNoise2Void.Coherent` (minimum images), one routing decision per stack, `TiffStackWriter`/`EncodeStack` ImageDescription, CLI `--axes`, `diagnose` on stacks, unknown options refused (`Options.Known`); `Pipeline` (`DenoiseRequest`, `TrainRequest`, `Recipes`), `WeightsFile.ContentHash`, training records in provenance, the bridge on `Pipeline` | `Brick=41-pilot-core`: on an independent ImageJ hyperstack every neighbour is the same channel and slice one frame away and the output keeps the page order; a stack labelled as slices is refused for time-lapse modes (and accepted with `--axes TYX`), unlabelled planes are frames with a notice, a contradictory declaration is an error; every page is read and an ImageJ stack over 4 GB is refused everywhere; a kind with too few images joins the other, and a stack is routed by its majority; the writer keeps a description and is otherwise byte for byte unchanged; from the CLI: folder training sees every plane, a typo'd option exits 2; fine-tuning the app's model trains a copy as one network, not the routed pair, and its provenance names the build, settings, seed and data; one seed gives one content hash (gate 8: the app's outputs and trained model equal the CLI's) |
 
 Gates 11–15 and 21 need the dataset (the reproductions in gates 15 and 21 also need the weights from `tools/experiments/`) (`tools/fetch_fmd.sh`, about 9 GB into the gitignored `data/fmd/`). Without it, their
 data-dependent part reports SKIPPED (exit code 77) while the pins, unit tests and RESULTS.md checks still run. CI has
@@ -287,6 +290,11 @@ cd godot && dotnet build && godot --headless --path . --import \
     per-tile value would differ between tiles and break exact tiling (the same goes for anything global: percentile
     normalization, or channel attention that pools over the image). FiLM is folded into the convolution weights
     (`DenoisingNet.Film.cs`), so the kernels and their bit-identical blocked versions are untouched.
+16. **One entry point.** `dora-bio denoise` and `dora-bio train` only map options to a `DenoiseRequest` or
+    `TrainRequest`, and the app builds the same records: `Pipeline` decides mode, recipe, routing, axes and what is
+    written. A decision made in `Program.cs` or `DoraBioBridge.cs` instead drifts the app away from the CLI. Gate 8
+    checks the app's denoised and baseline TIFFs are byte-identical to the CLI's and that a model it trains has the
+    CLI's content hash (`WeightsFile.ContentHash`: architecture and weights, not provenance or save time).
 
 ## Godot ⇄ C# gotchas
 
@@ -297,7 +305,9 @@ cd godot && dotnet build && godot --headless --path . --import \
 - Children are `_Ready` before parents. The UI calls `bridge.DescribeModel()` after connecting signals,
   because `ModelChanged` was already emitted during the bridge's `_Ready`.
 - C# Godot projects **cannot export to the web** (Godot 4.5). Desktop and mobile only.
-- Save paths: user weights `user://dora_bio_weights.bin`, journey `user://dora_bio_journey.json`. The bundled
+- Save paths: user weights `user://dora_bio_weights.bin` (and its `.correlated` companion after routed training),
+  journey `user://dora_bio_journey.json`, each denoise's outputs `user://dora_bio_denoised.tif` and
+  `user://dora_bio_baseline.tif`; a res:// image is copied to `user://inputs/` first, so the pipeline opens a real file. The bundled
   model at `res://models/` is a read-only fallback.
 
 ## File formats

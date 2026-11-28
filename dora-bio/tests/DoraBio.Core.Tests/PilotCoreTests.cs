@@ -199,4 +199,62 @@ public class PilotCoreTests
             Assert.Contains(notices, n => n.StartsWith("noise check on 5 of 5 planes", StringComparison.Ordinal));
         }
     }
+
+    [Fact]
+    public void TheContentHashIsTheModelNotItsProvenanceOrSaveTime()
+    {
+        // Gate 8 compares the app's trained model with the CLI's by this hash; the files differ in their save time.
+        var net = DenoisingNet.Create(new NetConfig(4, [1, 2, 1]), seed: 3);
+        string hash = WeightsFile.ContentHash(net);
+        Assert.Matches("^sha256:[0-9a-f]{64}$", hash);
+        var reloaded = WeightsFile.Load(WeightsFile.Serialize(net, "another description", new DateTime(2020, 1, 2, 0, 0, 0, DateTimeKind.Utc))).Net;
+        Assert.Equal(hash, WeightsFile.ContentHash(reloaded));
+        var changed = net.Clone();
+        changed.Parameters[^1] = BitConverter.Int32BitsToSingle(BitConverter.SingleToInt32Bits(changed.Parameters[^1]) + 1);   // one ulp
+        Assert.NotEqual(hash, WeightsFile.ContentHash(changed));
+        Assert.NotEqual(hash, WeightsFile.ContentHash(DenoisingNet.Create(new NetConfig(4, [1, 3, 1]), seed: 3)));
+    }
+
+    [Fact]
+    public void FineTuningTheAppsModelTrainsThatNetworkNotTheRoutedPair()
+    {
+        // The app fine-tunes the model on screen (TrainRequest.InitNet), which, like --init, is a recipe choice: one
+        // network of that architecture, never the routed default, and the caller's network is left as it was.
+        var noisyOnly = SyntheticFluorescence.GenerateDataset(4, 64, seed: 5).Select(p => p with { Clean = null }).ToList();
+        var current = DenoisingNet.Create(new NetConfig(4, [1, 2, 1]), seed: 9);
+        var before = (float[])current.Parameters.Clone();
+        string dir = TestUtil.TempDirectory();
+        try
+        {
+            var lines = new List<string>();
+            var models = Pipeline.Train(new TrainRequest
+            {
+                Dataset = noisyOnly, DatasetName = "test", Out = Path.Combine(dir, "w.bin"), InitNet = current,
+                Epochs = 1, Steps = 2, Batch = 2, Patch = 32,
+            }, lines.Add);
+            var model = Assert.Single(models);
+            Assert.Null(model.Kind);
+            var info = WeightsFile.Load(model.WeightsPath).Info;
+            Assert.Equal(current.Config.ToString(), info.Config.ToString());
+            // Provenance records how it was trained: DORA's build, the settings with the seed, and the data's fingerprint.
+            Assert.Contains($"trained by DORA {Pipeline.Version}: Noise2Void, route off, up to 1 epochs × 2 steps × batch 2 @ 32px", info.Provenance);
+            Assert.Contains("seed 1234", info.Provenance);
+            Assert.Contains($"data {Pipeline.DataFingerprint(noisyOnly)} (4 images)", info.Provenance);
+            Assert.NotEqual(Pipeline.DataFingerprint(noisyOnly), Pipeline.DataFingerprint(noisyOnly.Take(3).ToList()));
+            Assert.Equal(before, current.Parameters);
+            Assert.DoesNotContain(lines, l => l.Contains("routed", StringComparison.Ordinal));
+            Assert.Contains(lines, l => l.StartsWith("📚 4 images from 'test' (no clean images)", StringComparison.Ordinal));
+
+            // Without a recipe choice the same images take the routed default, exactly as `dora-bio train` does.
+            var routed = Pipeline.Train(new TrainRequest
+            {
+                Dataset = noisyOnly, DatasetName = "test", Out = Path.Combine(dir, "r.bin"), Epochs = 1, Steps = 2, Batch = 2, Patch = 32,
+            });
+            Assert.Equal(NoiseKind.Independent, Assert.Single(routed).Kind);
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
 }

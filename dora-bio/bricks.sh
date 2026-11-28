@@ -113,7 +113,7 @@ gate_6() (   # subshell body: `set -e` aborts only this gate, never the runner
   local code=0; $cli train --data "$t/data" --out "$t/x.bin" --epoch 1 >/dev/null 2>&1 || code=$?
   [[ $code -eq 2 ]] || { echo ">> an unknown option (--epoch) must be refused with exit 2, got $code"; return 1; }
   local read known
-  read="$(sed '/IReadOnlySet<string> Known = /,/^        };/d' tools/DoraBio.Cli/Program.cs | grep -oE 'o\.(Int|String|StringOrNull|Has|Required|Double)\("[a-z0-9-]+"' | sed -E 's/.*\("([a-z0-9-]+)"/\1/' | sort -u)"
+  read="$(sed '/IReadOnlySet<string> Known = /,/^        };/d' tools/DoraBio.Cli/Program.cs | grep -oE 'o\.(Int|IntOrNull|String|StringOrNull|Has|Required|Double|DoubleOrNull)\("[a-z0-9-]+"' | sed -E 's/.*\("([a-z0-9-]+)"/\1/' | sort -u)"
   known="$(sed -n '/IReadOnlySet<string> Known = /,/^        };/p' tools/DoraBio.Cli/Program.cs | grep -oE '"[a-z0-9-]+"' | tr -d '"' | sort -u)"
   [[ "$read" == "$known" ]] || { echo ">> Options.Known differs from the options the CLI reads:"; diff <(echo "$known") <(echo "$read"); return 1; }
   # The committed artifacts must still load and run.
@@ -139,11 +139,31 @@ gate_8() {
     return 77
   fi
   gate_7 >/dev/null || return 1
+  dotnet build tools/DoraBio.Cli -c Release >/dev/null || return 1
+  local t="$LOG_DIR/godot"
+  mkdir -p "$t"
+  # A small supervised folder for the app to train on (brick 41), and then the CLI with the same settings.
+  dotnet "$CLI_DLL" synth --out "$t/synth" --count 4 --size 96 --seed 8 >/dev/null || return 1
   (cd godot && timeout 300 "$godot" --headless --path . --import >/dev/null 2>&1)
   local out
-  out="$(cd godot && timeout 300 "$godot" --headless --path . res://tests/smoke_test.tscn 2>&1)"; local code=$?
+  out="$(cd godot && DORA_SMOKE_TRAIN="$t/synth" timeout 300 "$godot" --headless --path . res://tests/smoke_test.tscn 2>&1)"; local code=$?
   echo "$out"
-  [[ $code -eq 0 ]] && echo "$out" | grep -q "SMOKE TEST PASSED"
+  [[ $code -eq 0 ]] && echo "$out" | grep -q "SMOKE TEST PASSED" || return 1
+  # Brick 41: the app and the CLI are one pipeline. Its first denoise (before adapting) must equal `dora-bio denoise
+  # --baseline` with the model the app loaded, byte for byte; the model it trained must equal `dora-bio train`'s.
+  local model denoised baseline hash cli_hash
+  model="$(sed -n 's/^APP MODEL: //p' <<< "$out")"
+  denoised="$(sed -n 's/^APP DENOISED: //p' <<< "$out")"
+  baseline="$(sed -n 's/^APP BASELINE: //p' <<< "$out")"
+  hash="$(sed -n 's/^APP TRAINED HASH: //p' <<< "$out")"
+  [[ -n "$model" && -f "$model" ]] || { echo ">> the app's model isn't a file on disk ('$model'), so the CLI can't be run on it"; return 1; }
+  dotnet "$CLI_DLL" denoise --weights "$model" --in godot/samples/synthetic_cells.tif --out "$t/cli.tif" --baseline "$t/cli_baseline.tif" >/dev/null || return 1
+  cmp -s "$t/cli.tif" "$denoised" || { echo ">> the app's denoised TIFF differs from dora-bio denoise's"; return 1; }
+  cmp -s "$t/cli_baseline.tif" "$baseline" || { echo ">> the app's baseline TIFF differs from dora-bio denoise --baseline's"; return 1; }
+  dotnet "$CLI_DLL" train --data "$t/synth" --out "$t/cli_trained.bin" --epochs 1 --steps 30 --batch 8 --lr 0.001 >/dev/null || return 1
+  cli_hash="$(dotnet "$CLI_DLL" info --weights "$t/cli_trained.bin" | sed -n 's/^content hash *: //p')"
+  [[ -n "$hash" && "$hash" == "$cli_hash" ]] || { echo ">> the app trained a different model ($hash) than dora-bio train ($cli_hash)"; return 1; }
+  echo ">> app = CLI: denoised and baseline TIFFs byte-identical; trained weights $cli_hash"
 }
 
 WORKFLOW=../.github/workflows/dora-bio.yml
@@ -983,7 +1003,12 @@ gate_41() {   # pilot-core (brick 41a: pilot readiness, core and CLI)
   [[ $code -eq 2 ]] || { echo ">> --axes ZYX on a TZC hyperstack must be refused: exit 2, got $code"; return 1; }
   code=0; dotnet "$CLI_DLL" denoise --weights "$t/st.bin" --in "$hyper" --out "$t/x.tif" --axis TYX >/dev/null 2>&1 || code=$?
   [[ $code -eq 2 ]] || { echo ">> a misspelt option (--axis) must be refused: exit 2, got $code"; return 1; }
-  echo ">> stacks by their axes, every plane read, and the refusals work from the CLI"
+  dotnet "$CLI_DLL" train --data "$t/seq/noisy" --mode n2v --route off --out "$t/w2.bin" --epochs 1 --steps 1 --batch 2 --patch 32 >/dev/null || return 1
+  local h1 h2
+  h1="$(dotnet "$CLI_DLL" info --weights "$t/w.bin" | sed -n 's/^content hash *: //p')"
+  h2="$(dotnet "$CLI_DLL" info --weights "$t/w2.bin" | sed -n 's/^content hash *: //p')"
+  [[ "$h1" =~ ^sha256:[0-9a-f]{64}$ && "$h1" == "$h2" ]] || { echo ">> one seed, one model: content hashes '$h1' and '$h2'"; return 1; }
+  echo ">> stacks by their axes, every plane read, the refusals work from the CLI, and a model's hash is its content"
 }
 
 # recorded_block <marker>: the contents of the ```text block between <!-- marker --> and <!-- /marker --> in RESULTS.md.
@@ -1087,6 +1112,9 @@ MUTATIONS=(
         int n = layout.Shape[a], t = page / stride % n;|        int n = layout.Shape[a], t = page / stride % n;'
   '41|src/DoraBio.Core/Data/DatasetLoader.cs|        if (!stackFormat) return [ImageLoader.Load(file)];|        return [ImageLoader.Load(file)];'
   '41|src/DoraBio.Core/BatchDenoising.cs|        bool correlated = 2 * flagged > samples;|        bool correlated = flagged > 0;'
+  '41|src/DoraBio.Core/PipelineRequests.cs|Subset, Init, InitNet, Condition|Subset, Init, Condition'
+  '41|src/DoraBio.Core/Pipeline.cs|if (r.InitNet is { } given) net = given.Clone();|if (r.InitNet is { } given) net = given;'
+  '41|src/DoraBio.Core/IO/WeightsFile.cs|SHA256.HashData(Serialize(net, "", DateTime.UnixEpoch))|SHA256.HashData(Serialize(net, "", DateTime.UtcNow))'
 )
 
 self_test() {

@@ -1,8 +1,9 @@
 extends Node
 ## Headless end-to-end check of the Godot shell. Build the C# assembly, then run:
 ##   cd godot && dotnet build && godot --headless --path . res://tests/smoke_test.tscn
-## Loads Main.tscn, loads the bundled sample, checks its noise, denoises it, runs a short adaptation, and exits
-## with code 0 on success or 1 on failure. A watchdog fails the run if any step hangs.
+## Loads Main.tscn, loads the bundled sample, checks its noise, denoises it, runs a short adaptation, optionally trains
+## (DORA_SMOKE_TRAIN=folder), and exits with code 0 on success or 1 on failure. A watchdog fails the run if any step hangs.
+## Lines starting "APP " name the files and hash gate 8 compares with the CLI's (brick 41: one pipeline for both).
 
 const TIMEOUT_SECONDS := 180.0
 
@@ -42,6 +43,15 @@ func _ready() -> void:
 	var noise_dora: float = result[3]
 	print("estimated noise sigma: raw %.4f -> DORA %.4f (baseline %.4f), %.2fs" % [noise_raw, noise_dora, result[4], result[5]])
 	if not _check(noise_dora < noise_raw * 0.7, "DORA reduces the estimated noise by more than 30%"): return
+	# Brick 41: the app denoises through the same pipeline as `dora-bio denoise --baseline` and writes the same files.
+	# Keep this run's (the model as loaded, before adapting) for gate 8 to compare byte for byte with the CLI's.
+	if not _check(FileAccess.file_exists(bridge.DenoisedFile()) and FileAccess.file_exists(bridge.BaselineFile()), "denoise wrote its float32 TIFFs"): return
+	var kept_denoised := ProjectSettings.globalize_path("user://smoke_app_denoised.tif")
+	var kept_baseline := ProjectSettings.globalize_path("user://smoke_app_baseline.tif")
+	if not _check(DirAccess.copy_absolute(bridge.DenoisedFile(), kept_denoised) == OK and DirAccess.copy_absolute(bridge.BaselineFile(), kept_baseline) == OK, "kept this run's outputs for gate 8"): return
+	print("APP MODEL: ", bridge.ModelFile())
+	print("APP DENOISED: ", kept_denoised)
+	print("APP BASELINE: ", kept_baseline)
 
 	bridge.StartAdapt(3)
 	var adapt: Array = await bridge.AdaptFinished
@@ -50,6 +60,23 @@ func _ready() -> void:
 	await bridge.DenoiseFinished   # the UI re-denoises after adapting
 	await get_tree().process_frame
 	if not _check(not bridge.IsBusy(), "bridge is idle again"): return
+
+	# Brick 41: training from the app is `dora-bio train` (the same request). Gate 8 sets DORA_SMOKE_TRAIN to a folder it
+	# made with `dora-bio synth`, trains on it with the CLI too, and compares the two models' content hashes.
+	var train_dir := OS.get_environment("DORA_SMOKE_TRAIN")
+	if train_dir != "":
+		bridge.UserWeightsPath = "user://smoke_weights.bin"   # never the user's own saved model
+		bridge.JournalPath = "user://smoke_journey.json"
+		bridge.StartTrainingOnFolder(train_dir, 1, true)
+		if not _check(bridge.IsBusy(), "training runs as a background job"): return
+		var summary: String = await bridge.TrainingFinished
+		await get_tree().process_frame
+		print("training: ", summary)
+		if not _check(summary.contains("weights saved"), "training from the app wrote weights"): return
+		print("APP TRAINED HASH: ", bridge.ModelHash())
+		await bridge.DenoiseFinished   # the UI re-denoises with the new model
+		await get_tree().process_frame
+		if not _check(not bridge.IsBusy(), "bridge is idle after training"): return
 
 	print("SMOKE TEST PASSED")
 	get_tree().quit(0)

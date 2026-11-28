@@ -238,246 +238,48 @@ public static class Program
     /// </summary>
     private static int Train(Options o)
     {
-        bool vst = o.Has("vst");
-        string? modeOption = o.StringOrNull("mode");
-        int? defaultFrames = null;
-        if (modeOption is null && !o.Has("frames") && !o.Has("ext") && o.StringOrNull("data") is { } dataPath && File.Exists(dataPath))
+        // The recipe, routing and mode decisions live in Pipeline.Train (brick 41), which the Godot app calls too; an
+        // option left out is null here, which takes the same default as before.
+        Pipeline.Train(new TrainRequest
         {
-            // A stack file with no mode: brick 40's verdict decides (DefaultTimeLapse).
-            if (DefaultTimeLapse == "none")
-                throw new ArgumentException($"{dataPath} is a stack file: train a time-lapse with --mode n2n, --mode skip-centre or " +
-                                            "--frames 3 (brick 40 made none of them the default), or give a folder of images.");
-            (modeOption, defaultFrames) = DefaultTimeLapse switch
-            {
-                "n2n" => ("n2n", (int?)null),
-                "skip-centre" => ("skip-centre", null),
-                "frames-3" => ("n2v", 3),
-                var d => throw new InvalidOperationException($"Unknown DefaultTimeLapse '{d}'."),
-            };
-            Console.WriteLine($"🎞 {Path.GetFileName(dataPath)} is a stack: brick 40's default time-lapse mode, {DefaultTimeLapse}");
-        }
-        bool neighbourPairs = modeOption is "n2n" or "noise2noise";
-        bool skipCentre = modeOption is "skip-centre";
-        int frames = defaultFrames ?? o.Int("frames", skipCentre ? 2 : 1);
-        if (neighbourPairs && frames != 1)
-            throw new ArgumentException("Noise2Noise takes one input frame (--frames 1): with several, its target would be part of the input.");
-        if (skipCentre && frames != 2)
-            throw new ArgumentException("Skip-centre Noise2Noise takes two input frames (t − 1, t + 1); leave --frames out.");
-        var frameRange = o.StringOrNull("frame-range") is { } fr ? FrameRange.Parse(fr) : (FrameRange?)null;
-        var validationRange = o.StringOrNull("validation-range") is { } vr ? FrameRange.Parse(vr) : (FrameRange?)null;
-        bool timeLapse = frames > 1 || neighbourPairs || skipCentre || frameRange is not null;
-        if (validationRange is { } v0 && frameRange is { } f0 && v0.First <= f0.Last && f0.First <= v0.Last)
-            throw new ArgumentException($"--validation-range {v0} overlaps --frame-range {f0}: validation frames must never be trained on.");
-        if (validationRange is not null && frameRange is null)
-            throw new ArgumentException("--validation-range needs --frame-range, so the training frames are named too.");
-        List<ImagePair>? validation = null;
-        List<ImagePair> dataset;
-        if (timeLapse)
-        {
-            // Time-lapses (brick 39): a stack file or a folder of stacks; every plane is a frame.
-            if (o.Has("ext") || o.Has("vst") || o.Has("fmd-frames") || o.Has("fmd-levels") || o.Has("fmd-categories"))
-                throw new ArgumentException("--frames and --mode n2n train on time-lapse stacks (--data FILE.tif or a folder of stacks).");
-            if (!neighbourPairs && !skipCentre && modeOption is not (null or "n2v" or "noise2void"))
-                throw new ArgumentException("--frames 3 is the spatiotemporal blind spot, a Noise2Void mode (--mode n2v).");
-            var sequenceMode = neighbourPairs ? TrainingMode.Noise2Noise : skipCentre ? TrainingMode.SkipCentre : TrainingMode.Noise2Void;
-            string? axes = o.StringOrNull("axes");
-            dataset = Sequences.Load(o.Required("data"), sequenceMode, frames, o.Int("frame-block", Sequences.DefaultBlockSize), frameRange,
-                axes, notice => Console.WriteLine($"🧭 {notice}"));
-            if (validationRange is { } range)
-            {
-                string stack = o.Required("data");
-                validation = [];
-                foreach (var (label, planes, _) in Sequences.ReadSeries(stack, null, axes, range, null))
-                {
-                    string name = Path.GetFileNameWithoutExtension(stack);
-                    validation.AddRange(Sequences.ValidationFrames(planes, sequenceMode, frames, label.Length == 0 ? name : $"{name}[{label}]", range.First));
-                }
-                Console.WriteLine($"🧪 validation: frames {range} of {Path.GetFileName(stack)}, {validation.Count} interior frames as patch sources");
-            }
-        }
-        else if (o.StringOrNull("ext") is { } extName)
-        {
-            // An external dataset's training split (field validation, Q18): supervised on its pairs, or Noise2Void on its
-            // noisy images alone. Its test split is never loaded here.
-            var ext = ExtDatasets.Get(extName);
-            bool supervised = o.String("mode", ext.HasGroundTruth ? "supervised" : "n2v") == "supervised";
-            if (supervised && !ext.HasGroundTruth) throw new ArgumentException($"{ext.Name} has no ground truth for supervised training.");
-            if (vst) throw new ArgumentException("--vst isn't supported with --ext.");
-            dataset = ExtDatasets.LoadTraining(o.String("data", "data/ext"), ext, supervised);
-        }
-        else dataset = DatasetLoader.LoadDirectory(o.Required("data"), FmdOptionsFrom(o), vst ? VarianceStabilization.Stabilize : null);
-        var mode = timeLapse ? (neighbourPairs ? TrainingMode.Noise2Noise : skipCentre ? TrainingMode.SkipCentre : TrainingMode.Noise2Void)
-            : o.String("mode", dataset.All(d => d.HasClean) ? "supervised" : "n2v") switch
-            {
-                "n2v" or "noise2void" => TrainingMode.Noise2Void,
-                "supervised" => TrainingMode.Supervised,
-                var m => throw new ArgumentException($"Unknown mode '{m}' (use n2v, supervised, n2n or skip-centre)."),
-            };
-
-        var config = new TrainerConfig
-        {
-            Mode = mode,
-            MaxEpochs = o.Int("epochs", 30),
-            StepsPerEpoch = o.Int("steps", 50),
-            BatchSize = o.Int("batch", 16),
-            Augmentation = o.String("augment", "dihedral") switch
-            {
-                "dihedral" => AugmentationMode.Dihedral,
-                "v1" => AugmentationMode.V1RotateScale,
-                var a => throw new ArgumentException($"Unknown --augment '{a}' (use dihedral or v1)."),
-            },
-            PatchSize = o.Int("patch", 64),
-            MaskRatio = (float)o.Double("mask-ratio", 0.02),
-            LearningRate = (float)o.Double("lr", 1e-3),
-            Seed = o.Int("seed", 1234),
-        };
-        bool n2vMode = mode == TrainingMode.Noise2Void;
-        int patience = o.Int("patience", n2vMode ? DefaultN2v.Patience : 6);
-        if (patience < 0) throw new ArgumentException("--patience must be 0 (never stop early) or more.");
-        config = config with
-        {
-            EarlyStopPatience = patience == 0 ? int.MaxValue : patience,
-            Selection = o.String("select", n2vMode ? DefaultN2v.Select : "auto") switch
-            {
-                "auto" => ValidationSignal.Auto,
-                "loss" => ValidationSignal.Loss,
-                var v => throw new ArgumentException($"Unknown --select '{v}' (use auto or loss)."),
-            },
-            KeepLastEpoch = o.String("keep", n2vMode ? DefaultN2v.Keep : "best") switch
-            {
-                "best" => false,
-                "last" => true,
-                var k => throw new ArgumentException($"Unknown --keep '{k}' (use best or last)."),
-            },
-        };
-
-        // Q20: with no recipe option, Noise2Void routes each training image by the noise check (RoutedNoise2Void).
-        string[] recipeOptions = ["arch", "features", "depth", "select", "patience", "keep", "struct", "footprint", "subset",
-                                  "init", "condition", "save-last", "vst"];
-        string route = o.String("route", n2vMode && !recipeOptions.Any(o.Has) ? DefaultN2vRoute : "off");
-        if (route == "auto")
-        {
-            if (!n2vMode) throw new ArgumentException("--route auto is for Noise2Void training.");
-            if (validation is not null) throw new ArgumentException("--validation-range trains one network: add --route off (and the recipe you want).");
-            var verdicts = StructuredMasking.Diagnose(dataset);
-            ReportNoiseCheck(verdicts);
-            string routedDescription = o.StringOrNull("describe")
-                ?? $"{dataset.Count} images from '{o.StringOrNull("ext") ?? Path.GetFileName(Path.GetFullPath(o.Required("data")))}'";
-            Console.WriteLine($"🔀 routed Noise2Void (Q20): independent noise → U-Net under rule C, correlated noise → dilated network with " +
-                              $"structured blind spots; {config.MaxEpochs} epochs × {config.StepsPerEpoch} steps × batch {config.BatchSize} @ {config.PatchSize}px");
-            var routedClock = Stopwatch.StartNew();
-            var trained = RoutedNoise2Void.Train(dataset, config, o.Required("out"), routedDescription, o.StringOrNull("journey"),
-                (kind, report) => Console.WriteLine($"[{kind.ToString().ToLowerInvariant()}] {FormatEpoch(report)}"),
-                o.StringOrNull("out-correlated"), verdicts, onNotice: notice => Console.WriteLine($"🔀 {notice}"));
-            foreach (var t in trained)
-            {
-                var keptReport = t.Kind == NoiseKind.Independent ? t.Result.Last : t.Result.Best;
-                Console.WriteLine($"💾 {t.Kind.ToString().ToLowerInvariant()} noise: {t.Images} images, " +
-                                  $"{(t.Kind == NoiseKind.Independent ? "last" : "best")} epoch {keptReport?.Epoch} saved to {t.WeightsPath}");
-            }
-            if (trained.Count == 2)
-                Console.WriteLine($"   denoise with: --weights {trained[0].WeightsPath} --weights-correlated {trained[1].WeightsPath}");
-            Console.WriteLine($"✅ routed training done in {(int)routedClock.Elapsed.TotalMinutes:00}:{routedClock.Elapsed.Seconds:00}");
-            return 0;
-        }
-        if (route != "off") throw new ArgumentException($"Unknown --route '{route}' (use auto or off).");
-
-        DenoisingNet net;
-        if (o.Has("init"))
-        {
-            if (o.Has("condition")) throw new ArgumentException("--condition comes from the --init weights; leave it out when fine-tuning.");
-            net = WeightsFile.Load(o.Required("init")).Net;
-            Console.WriteLine($"🔁 fine-tuning {o.Required("init")}");
-        }
-        else
-        {
-            var defaults = NetConfig.Default;
-            string arch = o.String("arch", n2vMode ? DefaultN2v.Arch : defaults.Architecture == NetArchitecture.UNet ? "unet" : "dilated");
-            var architecture = arch switch
-            {
-                "dilated" => new NetConfig(o.Int("features", 24), [1, 2, 4, 8, 4, 2, 1]),
-                "unet" => NetConfig.UNet(o.Int("features", 16), o.Int("depth", 2)),
-                _ => throw new ArgumentException($"Unknown --arch '{arch}' (use dilated or unet)."),
-            };
-            architecture = o.String("condition", mode == TrainingMode.Supervised ? DefaultCondition : "none") switch
-            {
-                "none" => architecture,
-                "noise" => architecture with { Conditioning = NetConditioning.NoiseLevel },
-                var c => throw new ArgumentException($"Unknown --condition '{c}' (use none or noise)."),
-            };
-            architecture = skipCentre ? NetConfig.SkipCentre(architecture) : architecture with { InputFrames = frames };
-            architecture.Validate();
-            net = DenoisingNet.Create(architecture, config.Seed);
-        }
-
-        if (vst && mode != TrainingMode.Noise2Void)
-            throw new ArgumentException("--vst is for Noise2Void: supervised targets are clean, so their noise needs no stabilizing.");
-        string structure = vst ? "; variance-stabilized (generalized Anscombe, each image calibrated on its own)" : "";
-        // --subset: train only on the images the noise check calls correlated (or independent), for P3's routed design.
-        if (o.StringOrNull("subset") is { } subset)
-        {
-            bool wantCorrelated = subset switch
-            {
-                "correlated" => true,
-                "independent" => false,
-                _ => throw new ArgumentException($"Unknown --subset '{subset}' (use correlated or independent)."),
-            };
-            var all = StructuredMasking.Diagnose(dataset);
-            dataset = dataset.Where((_, i) => all[i] == wantCorrelated).ToList();
-            if (dataset.Count == 0) throw new ArgumentException($"No training image's noise check says {subset}.");
-            structure += $"; only the {dataset.Count} images whose noise check says {subset}";
-            Console.WriteLine($"🔎 --subset {subset}: training on {dataset.Count} of {all.Length} images");
-        }
-        if (mode == TrainingMode.Noise2Void)
-        {
-            var verdicts = StructuredMasking.Diagnose(dataset);
-            ReportNoiseCheck(verdicts);
-            var structMode = o.String("struct", "off") switch
-            {
-                "off" => StructuredMaskMode.Off,
-                "auto" => StructuredMaskMode.Auto,
-                "always" => StructuredMaskMode.Always,
-                var s => throw new ArgumentException($"Unknown --struct '{s}' (use off, auto or always)."),
-            };
-            var footprint = o.StringOrNull("footprint") is { } f ? MaskFootprint.Parse(f) : StructuredMasking.DefaultFootprint;
-            dataset = StructuredMasking.Assign(dataset, structMode, footprint, verdicts);
-            int structured = dataset.Count(d => d.Footprint is not null);
-            if (structured > 0)
-            {
-                structure += $"; structured blind spots ({footprint}) on {structured} of {dataset.Count} images";
-                Console.WriteLine($"🧩 structured blind spots ({footprint}) on {structured} of {dataset.Count} training images");
-            }
-        }
-
-        int withClean = dataset.Count(d => d.HasClean);
-        string cleanUse = withClean == 0 ? "no clean images"
-            : mode == TrainingMode.Noise2Void ? $"{withClean} clean images used only to score validation"
-            : mode == TrainingMode.Noise2Noise ? $"{withClean} neighbouring-frame pairs, no ground truth"
-            : mode == TrainingMode.SkipCentre ? $"{withClean} clean images used only to score validation"
-            : $"{withClean} clean targets";
-        string description = (o.StringOrNull("describe")
-            ?? $"{dataset.Count} images from '{o.StringOrNull("ext") ?? Path.GetFileName(Path.GetFullPath(o.Required("data")))}' ({cleanUse})") + structure;
-        Console.WriteLine($"🧬 {net.Config}, {net.ParameterCount:N0} parameters");
-        Console.WriteLine($"📚 {description}; mode {mode}; {config.MaxEpochs} epochs × {config.StepsPerEpoch} steps × batch {config.BatchSize} @ {config.PatchSize}px");
-
-        var clock = Stopwatch.StartNew();
-        var result = TrainingJob.Run(net, dataset, config,
-            new TrainingJobOptions
-            {
-                DatasetDescription = description, WeightsPath = o.Required("out"), JournalPath = o.StringOrNull("journey"),
-                LastWeightsPath = o.StringOrNull("save-last"), Validation = validation,
-            },
-            report => Console.WriteLine(FormatEpoch(report)));
-
-        // Total minutes, so a run past an hour doesn't wrap (mm:ss alone would print 05:00 for 1 h 5 min).
-        Console.WriteLine($"✅ stopped: {result.StopReason} after {result.History.Count} epochs in {(int)clock.Elapsed.TotalMinutes:00}:{clock.Elapsed.Seconds:00}");
-        if ((config.KeepLastEpoch ? result.Last : result.Best) is { } kept)
-        {
-            string psnr = kept.ValPsnr is { } p ? $", val PSNR {p:0.00} dB vs noisy {result.NoisyBaselinePsnr:0.00} dB" : "";
-            Console.WriteLine($"💾 {(config.KeepLastEpoch ? "last" : "best")} epoch {kept.Epoch} (val loss {kept.ValLoss:G4}{psnr}) saved to {o.Required("out")}");
-        }
-        if (o.StringOrNull("save-last") is { } lastPath && result.Last is { } last)
-            Console.WriteLine($"💾 last epoch {last.Epoch} (val loss {last.ValLoss:G4}) saved to {lastPath}");
+            Data = o.StringOrNull("data"),
+            Ext = o.StringOrNull("ext"),
+            Out = o.Required("out"),
+            OutCorrelated = o.StringOrNull("out-correlated"),
+            Journey = o.StringOrNull("journey"),
+            Describe = o.StringOrNull("describe"),
+            SaveLast = o.StringOrNull("save-last"),
+            Mode = o.StringOrNull("mode"),
+            Frames = o.IntOrNull("frames"),
+            FrameRange = o.StringOrNull("frame-range") is { } fr ? FrameRange.Parse(fr) : null,
+            ValidationRange = o.StringOrNull("validation-range") is { } vr ? FrameRange.Parse(vr) : null,
+            FrameBlock = o.IntOrNull("frame-block"),
+            Axes = o.StringOrNull("axes"),
+            Vst = o.Has("vst"),
+            FmdFrames = o.IntOrNull("fmd-frames"),
+            FmdLevels = o.StringOrNull("fmd-levels"),
+            FmdCategories = o.StringOrNull("fmd-categories"),
+            Epochs = o.IntOrNull("epochs"),
+            Steps = o.IntOrNull("steps"),
+            Batch = o.IntOrNull("batch"),
+            Augment = o.StringOrNull("augment"),
+            Patch = o.IntOrNull("patch"),
+            MaskRatio = o.DoubleOrNull("mask-ratio"),
+            LearningRate = o.DoubleOrNull("lr"),
+            Seed = o.IntOrNull("seed"),
+            Patience = o.IntOrNull("patience"),
+            Select = o.StringOrNull("select"),
+            Keep = o.StringOrNull("keep"),
+            Route = o.StringOrNull("route"),
+            Init = o.StringOrNull("init"),
+            Arch = o.StringOrNull("arch"),
+            Features = o.IntOrNull("features"),
+            Depth = o.IntOrNull("depth"),
+            Condition = o.StringOrNull("condition"),
+            Struct = o.StringOrNull("struct"),
+            Footprint = o.StringOrNull("footprint"),
+            Subset = o.StringOrNull("subset"),
+        }, Console.WriteLine);
         return 0;
     }
 
@@ -494,75 +296,18 @@ public static class Program
     /// </summary>
     private static int Denoise(Options o)
     {
-        var (net, info) = WeightsFile.Load(o.Required("weights"));
-        DenoisingNet? correlatedNet = null;
-        if (o.StringOrNull("weights-correlated") is { } correlatedPath)
+        Pipeline.Denoise(new DenoiseRequest
         {
-            (correlatedNet, var correlatedInfo) = WeightsFile.Load(correlatedPath);
-            Console.WriteLine($"🧬 correlated-noise model: {correlatedInfo.Provenance}");
-        }
-        var denoiser = new FrameDenoiser(net, correlatedNet, o.Has("vst"), o.Int("tile", TiledInference.DefaultTileCore));
-        Console.WriteLine($"🧬 model: {info.Provenance}");
-        string input = o.Required("in"), output = o.Required("out");
-        string? baseline = o.StringOrNull("baseline"), axes = o.StringOrNull("axes");
-        void Notice(string notice) => Console.WriteLine($"🧭 {notice}");
-
-        var clock = Stopwatch.StartNew();
-        if (Directory.Exists(input))
-        {
-            var plan = BatchDenoising.PlanFolder(input, output);
-            Directory.CreateDirectory(output);
-            if (baseline is not null) Directory.CreateDirectory(baseline);
-            int pages = 0;
-            foreach (var (file, target) in plan)
-            {
-                string? baselineTarget = baseline is null ? null : Path.Combine(baseline, Path.GetFileName(target));
-                int correlated = 0;
-                int n = BatchDenoising.DenoiseFile(denoiser, file, target, baselineTarget, (_, _, r) => correlated += r.UsedCorrelatedModel ? 1 : 0,
-                    axes: axes, onNotice: Notice);
-                pages += n;
-                string routed = correlatedNet is null ? "" : $", {correlated} by the correlated-noise model";
-                Console.WriteLine($"   {Path.GetFileName(file)} → {target} ({n} page{(n == 1 ? "" : "s")}{routed})");
-            }
-            Console.WriteLine($"✨ denoised {plan.Count} files, {pages} pages in {clock.Elapsed.TotalSeconds:0.00}s → {output}");
-            ReportPeakMemory();
-            return 0;
-        }
-
-        int total = BatchDenoising.CountPages(input);
-        int routedPages = 0;
-        BatchDenoising.PageDone report = total == 1
-            ? (_, raw, r) =>
-            {
-                if (r.UsedCorrelatedModel) Console.WriteLine("🔎 noise check: correlated, so the --weights-correlated model is used");
-                Console.WriteLine($"✨ denoised {raw.Width}×{raw.Height} in {clock.Elapsed.TotalSeconds:0.00}s → {output}");
-                Console.WriteLine($"   estimated noise σ (normalized): {r.SigmaBefore:0.0000} → {r.SigmaAfter:0.0000}");
-                if (r.NoiseModel is { } m) Console.WriteLine($"📐 noise model: variance = {m.Gain:G4} · intensity {m.Intercept:+0.###;-0.###}");
-                if (r.BaselineSigma is { } b) Console.WriteLine($"   bilateral baseline σ: {b:0.0000} → {baseline}");
-            }
-            : (page, raw, r) =>
-            {
-                routedPages += r.UsedCorrelatedModel ? 1 : 0;
-                string model = r.UsedCorrelatedModel ? " (correlated-noise model)" : "";
-                Console.WriteLine($"   page {page + 1}/{total}: {raw.Width}×{raw.Height}, noise σ {r.SigmaBefore:0.0000} → {r.SigmaAfter:0.0000}{model}");
-            };
-        BatchDenoising.DenoiseFile(denoiser, input, output, baseline, report, axes: axes, onNotice: Notice);
-        if (total > 1)
-        {
-            double seconds = clock.Elapsed.TotalSeconds;
-            Console.WriteLine($"✨ denoised {total} pages in {seconds:0.00}s ({seconds / total:0.00}s per page) → {output}" +
-                              (baseline is null ? "" : $", baseline → {baseline}"));
-            if (correlatedNet is not null) Console.WriteLine($"   {routedPages} of {total} pages used the correlated-noise model");
-            ReportPeakMemory();
-        }
+            Input = o.Required("in"),
+            Output = o.Required("out"),
+            Weights = o.Required("weights"),
+            CorrelatedWeights = o.StringOrNull("weights-correlated"),
+            Baseline = o.StringOrNull("baseline"),
+            Axes = o.StringOrNull("axes"),
+            Vst = o.Has("vst"),
+            TileCore = o.Int("tile", TiledInference.DefaultTileCore),
+        }, Console.WriteLine);
         return 0;
-    }
-
-    /// <summary>The process's peak resident memory so far (the OS high-water mark), for stack and folder runs.</summary>
-    private static void ReportPeakMemory()
-    {
-        using var self = Process.GetCurrentProcess();
-        Console.WriteLine($"   peak memory: {self.PeakWorkingSet64 / (1024.0 * 1024.0):0} MB");
     }
 
     /// <summary>
@@ -831,22 +576,6 @@ public static class Program
         if (problems.Count > 0) return 1;
         Console.WriteLine($"✓ {summary}");
         return 0;
-    }
-
-    /// <summary>
-    /// Before Noise2Void training: how many training images have noise that is correlated between pixels, which
-    /// Noise2Void can't remove (see <see cref="NoiseDiagnostics"/>). A warning, never an error.
-    /// </summary>
-    private static void ReportNoiseCheck(bool?[] verdicts)
-    {
-        int judged = verdicts.Count(v => v is not null), correlated = verdicts.Count(v => v == true);
-        Console.WriteLine($"🔎 noise check: {correlated} of {judged} training images have noise correlated between pixels");
-        if (correlated == 0) return;
-        Console.WriteLine("⚠️ Noise2Void assumes independent noise and will keep part of the correlated noise in those images.");
-        Console.WriteLine(correlated == judged
-            ? "   Use --struct auto (structured blind spots: +3.8 dB on FMD widefield), or --mode supervised if you have clean targets."
-            : "   Mixed data: one network does worse on the independent images. Train two, with --subset independent and with " +
-              "--subset correlated --struct auto, then route with --weights-correlated (see docs/RESULTS.md, P3).");
     }
 
     /// <summary>
@@ -1203,33 +932,6 @@ public static class Program
     }
 
     /// <summary>
-    /// Supervised training's default <c>--condition</c>. Quality pass Q13 decides it (gate 29 checks that it follows the
-    /// recorded verdict): "noise" only if the conditioned U-Net met its pre-registered bar.
-    /// </summary>
-    private const string DefaultCondition = "none";
-
-    /// <summary>
-    /// <c>train --mode n2v</c>'s defaults: network, what picks the epoch, early-stop patience and which weights are kept.
-    /// Quality pass Q2 decides them (gate 35 checks that they follow the recorded verdict).
-    /// </summary>
-    private static readonly (string Arch, string Select, int Patience, string Keep) DefaultN2v = ("dilated", "auto", 6, "best");
-
-    /// <summary>
-    /// <c>train --mode n2v</c>'s default <c>--route</c> when no recipe option is given: "auto" (route each training image by
-    /// the noise check, <see cref="RoutedNoise2Void"/>) since Q20 adopted Q19's routed design; "off" trains one network with
-    /// <see cref="DefaultN2v"/>. Gate 37 checks that it follows the recorded Q20 verdict.
-    /// </summary>
-    private const string DefaultN2vRoute = "auto";
-
-    /// <summary>
-    /// What <c>train --data STACK.tif</c> does with neither <c>--mode</c> nor <c>--frames</c> (brick 40's adoption rule,
-    /// pre-registered in PATHWAY.md; gate 40 checks it against the recorded verdict): "none" refuses and asks for a mode,
-    /// "n2n" is one-sided Noise2Noise (A2), "frames-3" the 3-frame spatiotemporal blind spot (A3), "skip-centre"
-    /// skip-centre Noise2Noise (A4).
-    /// </summary>
-    private static readonly string DefaultTimeLapse = "none";   // readonly, not const: a const would make the other branches unreachable
-
-    /// <summary>
     /// <c>ext-check</c>: for every external dataset that <c>tools/fetch_ext.sh</c> has downloaded, checks that the train
     /// and test splits hold the published numbers of images, that every noisy image has a clean partner of the same size,
     /// and that every file decodes. Also reports each set's brightness ratio, clean over noisy: the high-SNR images were
@@ -1417,24 +1119,23 @@ public static class Program
     {
         if (o.Has("default-condition"))
         {
-            Console.WriteLine(DefaultCondition);
+            Console.WriteLine(Recipes.DefaultCondition);
             return 0;
         }
         if (o.Has("default-n2v-route"))
         {
-            Console.WriteLine(DefaultN2vRoute == "auto"
-                ? "auto: independent → unet16 select=loss patience=0 keep=last; correlated → dilated24 struct=diamond-2 select=auto patience=6 keep=best"
-                : "off");
+            Console.WriteLine(Recipes.DescribeN2vRoute());
             return 0;
         }
         if (o.Has("default-timelapse"))
         {
-            Console.WriteLine(DefaultTimeLapse);
+            Console.WriteLine(Recipes.DefaultTimeLapse);
             return 0;
         }
         if (o.Has("default-n2v"))
         {
-            Console.WriteLine($"{DefaultN2v.Arch} select={DefaultN2v.Select} patience={DefaultN2v.Patience} keep={DefaultN2v.Keep}");
+            var n2v = Recipes.DefaultN2v;
+            Console.WriteLine($"{n2v.Arch} select={n2v.Select} patience={n2v.Patience} keep={n2v.Keep}");
             return 0;
         }
         if (o.Has("default-arch"))
@@ -1448,23 +1149,16 @@ public static class Program
         Console.WriteLine($"parameters    : {net.ParameterCount:N0}");
         Console.WriteLine($"saved (UTC)   : {info.SavedUtc:yyyy-MM-dd HH:mm:ss}");
         Console.WriteLine($"provenance    : {info.Provenance}");
+        Console.WriteLine($"content hash  : {WeightsFile.ContentHash(net)}");
         return 0;
-    }
-
-    /// <summary>One console line per epoch: losses, PSNR/SSIM (if clean data exists), learning rate, time and milestone events.</summary>
-    private static string FormatEpoch(EpochReport r)
-    {
-        string psnr = r.ValPsnr is { } p ? $" | val PSNR {p:0.00} dB (+{r.ValPsnrGain:0.00}) SSIM {r.ValSsim:0.000}" : "";
-        string events = r.Events.Count > 0 ? "  " + string.Join("  ", r.Events) : "";
-        return $"📊 epoch {r.Epoch,3} | train {r.TrainLoss:0.00000} | val {r.ValLoss:0.00000}{psnr} | lr {r.LearningRate:G3} | {r.Elapsed:mm\\:ss}{events}";
     }
 
     /// <summary>Shortens <paramref name="s"/> to <paramref name="n"/> characters, keeping the end (file names differ at the end).</summary>
     private static string Truncate(string s, int n) => s.Length <= n ? s : "…" + s[^(n - 1)..];
 
     /// <summary>
-    /// Minimal "--key value" parser with no dependencies. Every option takes exactly one value; there are no flags.
-    /// Unknown keys are accepted and ignored, so typos surface as "required" errors or as defaults.
+    /// Minimal "--key value" parser with no dependencies. Every option takes one value, or none when it is a flag
+    /// (the next token is another option, or there is none). Unknown keys are refused (<see cref="RejectUnknown"/>).
     /// </summary>
     private sealed class Options
     {
@@ -1537,5 +1231,12 @@ public static class Program
 
         public double Double(string key, double fallback) =>
             _values.TryGetValue(key, out var v) ? double.Parse(v, CultureInfo.InvariantCulture) : fallback;
+
+        /// <summary>The option's integer value, or null when it wasn't given (so the pipeline's default applies).</summary>
+        public int? IntOrNull(string key) => _values.TryGetValue(key, out var v) ? int.Parse(v, CultureInfo.InvariantCulture) : null;
+
+        /// <summary>The option's numeric value, or null when it wasn't given.</summary>
+        public double? DoubleOrNull(string key) =>
+            _values.TryGetValue(key, out var v) ? double.Parse(v, CultureInfo.InvariantCulture) : null;
     }
 }

@@ -110,10 +110,11 @@ public static class RoutedNoise2Void
     /// <param name="verdicts">Noise-check verdicts if already computed.</param>
     /// <param name="minimumImages">Fewest images a kind needs for its own network (<see cref="Coherent"/>).</param>
     /// <param name="onNotice">Optional: called when a kind is folded into the other.</param>
+    /// <param name="cancellation">Stops the network in training after its current step (it keeps what it had); the other isn't started.</param>
     /// <exception cref="ArgumentException">No images.</exception>
     public static List<RoutedNetwork> Train(IReadOnlyList<ImagePair> images, TrainerConfig baseConfig, string outPath, string description,
         string? journalPath = null, Action<NoiseKind, EpochReport>? onEpoch = null, string? correlatedPath = null, IReadOnlyList<bool?>? verdicts = null,
-        int minimumImages = MinimumImages, Action<string>? onNotice = null)
+        int minimumImages = MinimumImages, Action<string>? onNotice = null, CancellationToken cancellation = default)
     {
         if (images.Count == 0) throw new ArgumentException("No training images.", nameof(images));
         int frames = images[0].FrameCount;   // 3 for a time-lapse trained with the spatiotemporal blind spot
@@ -126,6 +127,7 @@ public static class RoutedNoise2Void
         foreach (var (recipe, part) in new[] { (Independent(baseConfig, frames), independent), (Correlated(baseConfig, frames), correlated) })
         {
             if (part.Count == 0) continue;
+            if (cancellation.IsCancellationRequested && trained.Count > 0) break;   // the first network kept what it had; don't start the second
             string path = recipe.Kind == NoiseKind.Correlated && mixed ? correlatedPath ?? CorrelatedPath(outPath) : outPath;
             var data = recipe.Footprint is null ? part : StructuredMasking.Assign(part, StructuredMaskMode.Always, recipe.Footprint);
             string kind = recipe.Kind == NoiseKind.Independent
@@ -134,7 +136,7 @@ public static class RoutedNoise2Void
             var net = DenoisingNet.Create(recipe.Network, recipe.Trainer.Seed);
             var result = TrainingJob.Run(net, data, recipe.Trainer,
                 new TrainingJobOptions { DatasetDescription = $"{description}; {part.Count} of {images.Count} images, {kind}", WeightsPath = path, JournalPath = journalPath },
-                report => onEpoch?.Invoke(recipe.Kind, report));
+                report => onEpoch?.Invoke(recipe.Kind, report), cancellation);
             trained.Add(new RoutedNetwork(recipe.Kind, path, part.Count, result));
         }
         return trained;

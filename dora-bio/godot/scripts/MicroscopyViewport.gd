@@ -81,7 +81,8 @@ func _ready() -> void:
 	bridge.ModelChanged.connect(_on_model_changed)
 	bridge.ImageLoaded.connect(_on_image_loaded)
 	bridge.DenoiseFinished.connect(_on_denoise_finished)
-	bridge.EpochCompleted.connect(_on_epoch_completed)
+	# Each epoch's log line comes through bridge.Log, in the CLI's words (brick 41); EpochCompleted carries the same
+	# numbers for a progress display.
 	bridge.TrainingFinished.connect(_on_training_finished)
 	bridge.AdaptFinished.connect(_on_adapt_finished)
 	bridge.BusyChanged.connect(_on_busy_changed)
@@ -146,12 +147,6 @@ func _on_denoise_finished(denoised: Image, baseline: Image, noise_raw: float, no
 	baseline_caption.text = "Bilateral baseline · est. σ %.4f" % noise_baseline
 	dora_caption.text = "DORA · est. σ %.4f (%.2fs)" % [noise_dora, seconds]
 	log_line("✨ denoised in %.2fs · estimated noise σ: raw %.4f → bilateral %.4f, DORA %.4f" % [seconds, noise_raw, noise_baseline, noise_dora])
-
-
-## One log line per training epoch. PSNR is NaN when the data has no clean images, so it's omitted then.
-func _on_epoch_completed(epoch: int, val_loss: float, val_psnr: float, gain: float, lr: float, events: String) -> void:
-	var psnr_text := "" if is_nan(val_psnr) else " · val PSNR %.2f dB (+%.2f)" % [val_psnr, gain]
-	log_line("📊 epoch %d · val loss %.5f%s · lr %.2g  %s" % [epoch, val_loss, psnr_text, lr, events])
 
 
 ## Logs the outcome (the bridge's summary says whether weights were saved) and re-denoises with the new model.

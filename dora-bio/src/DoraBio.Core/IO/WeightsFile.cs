@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Buffers.Binary;
 using System.Text;
 using DoraBio.Core.Nn;
@@ -151,6 +152,14 @@ public static class WeightsFile
 
         return (DenoisingNet.FromParameters(config, parameters), new ModelInfo(config, modelVersion, provenance, saved));
     }
+
+    /// <summary>
+    /// A network's content hash (brick 41): SHA-256 over its architecture and parameters as a weights file stores them,
+    /// with the provenance and save time left out, so two files of the same model hash alike however and whenever they
+    /// were saved. "sha256:" and 64 hex digits; <c>dora-bio info</c> prints it, and gate 8 compares the app's with the CLI's.
+    /// </summary>
+    public static string ContentHash(DenoisingNet net) =>
+        "sha256:" + Convert.ToHexString(SHA256.HashData(Serialize(net, "", DateTime.UnixEpoch))).ToLowerInvariant();
 
     /// <summary>Builds the complete file contents, CRC included. Internal so tests can pin the timestamp.</summary>
     internal static byte[] Serialize(DenoisingNet net, string provenance, DateTime savedUtc)
