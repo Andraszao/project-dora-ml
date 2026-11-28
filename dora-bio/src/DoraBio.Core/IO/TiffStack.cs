@@ -53,6 +53,21 @@ public sealed class TiffStackReader : IDisposable
     /// </summary>
     public string? Description => _pages.Count == 0 ? null : TiffCodec.Description(_stream, _littleEndian, _big, _pages[0]);
 
+    /// <summary>The first page's pixel size (XResolution, YResolution, ResolutionUnit), or null if it has none.</summary>
+    public TiffResolution? Resolution => _pages.Count == 0 ? null : PageResolution(0);
+
+    /// <summary>A page's pixel size, or null if it has none.</summary>
+    /// <exception cref="ArgumentOutOfRangeException">No such page.</exception>
+    public TiffResolution? PageResolution(int page)
+    {
+        if ((uint)page >= (uint)_pages.Count)
+            throw new ArgumentOutOfRangeException(nameof(page), $"TIFF has only {_pages.Count} page(s).");
+        return TiffCodec.Resolution(_stream, _littleEndian, _big, _pages[page]);
+    }
+
+    /// <summary>The first page's Software tag (305), or null: for a DORA output, the version, model and mode that made it.</summary>
+    public string? Software => _pages.Count == 0 ? null : TiffCodec.Software(_stream, _littleEndian, _big, _pages[0]);
+
     /// <summary>A page's width and height, from its tags (nothing is decoded).</summary>
     /// <exception cref="ArgumentOutOfRangeException">No such page.</exception>
     public (int Width, int Height) PageSize(int page)
@@ -93,7 +108,7 @@ public sealed class TiffStackWriter : IDisposable
     private readonly Stream _stream;
     private readonly TiffSampleType _sampleType;
     private readonly bool _deflate, _leaveOpen;
-    private readonly byte[]? _description;   // the first page's ImageDescription, NUL-terminated, or null
+    private readonly TiffPageTags? _tags;   // description and software for the first page, resolution for every page
     private long _pointerAt = 4;   // where the offset of the next IFD goes: the header for page 0, then each IFD's tail
 
     /// <summary>Starts a TIFF on an empty stream: writes the 8-byte little-endian header.</summary>
@@ -101,15 +116,16 @@ public sealed class TiffStackWriter : IDisposable
     /// <param name="sampleType">Storage format for every page.</param>
     /// <param name="deflate">Compress each page's strip with zlib/Deflate.</param>
     /// <param name="leaveOpen">Leave the stream open when the writer is disposed.</param>
-    /// <param name="description">
-    /// Optional ImageDescription for the first page, where ImageJ and tifffile record a stack's shape (brick 41: a denoised
-    /// hyperstack keeps its input's header, so it reopens with the same channels, slices and frames). Written as Latin-1.
+    /// <param name="tags">
+    /// Optional tags (brick 41): the ImageDescription and Software go on the first page (where ImageJ and tifffile read a
+    /// stack's shape, so a denoised hyperstack reopens with its input's channels, slices and frames), the resolution on
+    /// every page.
     /// </param>
     /// <exception cref="ArgumentException">The stream can't write or seek, or isn't empty.</exception>
     public TiffStackWriter(Stream stream, TiffSampleType sampleType = TiffSampleType.UInt16, bool deflate = false, bool leaveOpen = false,
-        string? description = null)
+        TiffPageTags? tags = null)
     {
-        _description = description is null ? null : [.. System.Text.Encoding.Latin1.GetBytes(description), 0];
+        _tags = tags;
         if (!stream.CanWrite || !stream.CanSeek) throw new ArgumentException("A TIFF stream must be writable and seekable.", nameof(stream));
         if (stream.Length != 0) throw new ArgumentException("A TIFF must be written to an empty stream (its offsets are absolute).", nameof(stream));
         (_stream, _sampleType, _deflate, _leaveOpen) = (stream, sampleType, deflate, leaveOpen);
@@ -121,9 +137,9 @@ public sealed class TiffStackWriter : IDisposable
 
     /// <summary>Creates (or overwrites) a TIFF file to write pages into.</summary>
     public static TiffStackWriter Create(string path, TiffSampleType sampleType = TiffSampleType.UInt16, bool deflate = false,
-        string? description = null) =>
+        TiffPageTags? tags = null) =>
         new(new FileStream(path, FileMode.Create, FileAccess.ReadWrite, FileShare.None, bufferSize: 1 << 16), sampleType, deflate,
-            description: description);
+            tags: tags);
 
     /// <summary>Pages written so far. A writer disposed before its first page leaves a header-only file, which no reader accepts.</summary>
     public int PageCount { get; private set; }
@@ -134,16 +150,15 @@ public sealed class TiffStackWriter : IDisposable
     {
         long stripAt = _stream.Length;
         if (stripAt > uint.MaxValue) throw new ArgumentException("Stack is too large for a TIFF (4 GB).", nameof(page));
-        byte[]? description = PageCount == 0 ? _description : null;
-        var (strip, ifd, descriptionAt) = TiffCodec.EncodePage(page, _sampleType, _deflate, (uint)stripAt, (uint)(description?.Length ?? 0));
+        var tags = PageCount == 0 ? _tags : _tags?.Resolution is { } resolution ? new TiffPageTags { Resolution = resolution } : null;
+        var (strip, extra, extraAt, ifd) = TiffCodec.EncodePage(page, _sampleType, _deflate, (uint)stripAt, tags);
         _stream.Position = stripAt;
         _stream.Write(strip);
-        if (_stream.Length % 2 == 1) _stream.WriteByte(0);   // IFDs (and the description) start on a word boundary
-        if (description is not null)
+        if (_stream.Length % 2 == 1) _stream.WriteByte(0);   // tag values and IFDs start on a word boundary
+        if (extra.Length > 0)
         {
-            if (_stream.Length != descriptionAt) throw new InvalidOperationException("TIFF description offset mismatch.");
-            _stream.Write(description);
-            if (_stream.Length % 2 == 1) _stream.WriteByte(0);
+            if (_stream.Length != extraAt) throw new InvalidOperationException("TIFF tag values offset mismatch.");
+            _stream.Write(extra);   // already an even number of bytes
         }
         long ifdOffset = _stream.Length;
         if (ifdOffset + ifd.Length > uint.MaxValue) throw new ArgumentException("Stack is too large for a TIFF (4 GB).", nameof(page));

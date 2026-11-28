@@ -70,7 +70,7 @@ Image.fromarray(gray8, "L").save(out("gray8.tif"))
 Image.fromarray(gray16).save(out("gray16.tif"))
 Image.fromarray(gray16).save(out("gray16_deflate.tif"), compression="tiff_adobe_deflate")
 Image.fromarray(gray16).save(out("gray16_packbits.tif"), compression="packbits")
-Image.fromarray(gray16).save(out("gray16_lzw.tif"), compression="tiff_lzw")    # must be rejected clearly
+Image.fromarray(gray16).save(out("gray16_lzw.tif"), compression="tiff_lzw")    # libtiff's LZW (decoded since brick 41)
 Image.fromarray(float32, "F").save(out("float32.tif"))
 Image.fromarray(rgb8, "RGB").save(out("rgb8.tif"))
 

@@ -84,7 +84,7 @@ public static class ExtStacks
             [new("*_lowSNR.tif", "_lowSNR", "_highSNR", "TYX", 1, 6955)]),
         // Unpaired "wild" data for the check before brick 41: no ground truth, eval-only.
         new("aydin-egg-chamber", "Drosophila egg chamber, point-scanning confocal: one 164 × 128 × 128 volume, zstd-compressed (DORA refuses it)",
-            [new("C2-DrosophilaEggChamber-small.tif", null, null, "ZYX", 1, 164)], RefusedWith: "compression 50000"),
+            [new("C2-DrosophilaEggChamber-small.tif", null, null, "ZYX", 1, 164)], RefusedWith: "compression 50000 (Zstandard)"),
         new("zerocost-n2v-3d", "ZeroCostDL4Mic Noise2Void (3D): spinning-disk confocal stacks of 13 × 512 × 512, actin and fibronectin (no ground truth)",
             [new("Noise2Void (3D)/Test images_ Actin dataset/*.tif", null, null, "ZYX", 48, 48 * 13),
              new("Noise2Void (3D)/Test Images _ Fibronectin dataset/*.tif", null, null, "ZYX", 48, 48 * 13),

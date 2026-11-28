@@ -1118,6 +1118,11 @@ bbbc_denoise: exit 0, 76 s, peak RSS 1459 MB
   reproduced in 10 reruns, 4 of them under load); its output wasn't kept. Brick 41 runs the suite in a loop with saved
   logs to find it.
 
+*Note added 2026-11-28 (brick 41, after this check; the predictions and outcomes above are unchanged):* the egg chamber is
+still refused, now with "TIFF compression 50000 (Zstandard) is not supported", the plain tifffile conversion and the
+`--axes` its copy needs (`ExtStacks` pins that text, so `stack-check` fails if the refusal changes). LZW is decoded. A
+denoised copy keeps an ImageJ header and the pixel size, and says in its Software tag which DORA build and model made it.
+
 ## Systems S1 + S2 (brick 36): where the time goes, and 512-bit kernels
 
 Measured with `dora-bio bench --roofline` (and `dora-bio bench` for whole-model timings) on the 4-vCPU cloud container

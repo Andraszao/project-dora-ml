@@ -67,7 +67,7 @@ CHECKS=(
   "scoreboard: derived 2D sets keep a patch or cell in one validation group, FMD export + outside outputs scored with FMD's protocol; the recorded reading follows the pre-registered rule and PATHWAY.md's next brick follows it; noise-residual separates one-axis noise correlation from misalignment; with data + runs every score and the Tribolium diagnostic reproduce"
   "Noise2Noise from neighbouring frames and the 3-frame spatiotemporal blind spot: gradients, centre-frame residual, reflected (never clamped) endpoints, exact tiling, blind spots in the centre frame only, streaming window; both modes train and denoise from the CLI, and the leaks are refused"
   "Track A: skip-centre Noise2Noise never sees frame t (indices, sampler, validation, inference), neighbours'-mean residual, gradients, exact tiling, format 5, streaming; per-frame CARE scoring with dynamic/steady masks inside a standalone block; the post-hoc readouts see flashes, smears and flicker; the recorded reading follows the pre-registered rule, the shipped default follows it or a recorded veto; with data + runs/timelapse the spot check and readouts reproduce"
-  "pilot readiness (41a): stacks follow their axes (neighbours along T with C and Z fixed, Z-stacks refused for time-lapse modes, unlabelled planes taken as T with a notice), every page read and an ImageJ stack over 4 GB refused, routing decided once per stack and never for a handful of images, unknown options refused"
+  "pilot readiness (41a): stacks follow their axes (neighbours along T with C and Z fixed, Z-stacks refused for time-lapse modes, unlabelled planes taken as T with a notice), every page read and an ImageJ stack over 4 GB refused, routing decided once per stack and never for a handful of images, unknown options refused; one entry point (app = CLI); LZW read, other codecs and unlabelled OME-XML stacks refused by name; outputs keep their ImageJ header and pixel size and name their DORA in Software"
 )
 LAST=$((${#NAMES[@]} - 1))
 LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dora-bricks.XXXXXX")"
@@ -1008,7 +1008,22 @@ gate_41() {   # pilot-core (brick 41a: pilot readiness, core and CLI)
   h1="$(dotnet "$CLI_DLL" info --weights "$t/w.bin" | sed -n 's/^content hash *: //p')"
   h2="$(dotnet "$CLI_DLL" info --weights "$t/w2.bin" | sed -n 's/^content hash *: //p')"
   [[ "$h1" =~ ^sha256:[0-9a-f]{64}$ && "$h1" == "$h2" ]] || { echo ">> one seed, one model: content hashes '$h1' and '$h2'"; return 1; }
-  echo ">> stacks by their axes, every plane read, the refusals work from the CLI, and a model's hash is its content"
+  # Formats and metadata: an LZW input reads; an OME-XML stack is refused (exit 2) until --axes names its planes; a
+  # denoised copy keeps the input's description and pixel size, checked by an independent reader.
+  local fx=tests/DoraBio.Core.Tests/Fixtures
+  dotnet "$CLI_DLL" denoise --weights "$t/w.bin" --in "$fx/lzw_noise_u16_pred2.tif" --out "$t/lzw.tif" >/dev/null || return 1
+  code=0; dotnet "$CLI_DLL" denoise --weights "$t/w.bin" --in "$fx/ome_z4.tif" --out "$t/x.tif" >/dev/null 2>&1 || code=$?
+  [[ $code -eq 2 ]] || { echo ">> an OME-XML stack without --axes must be refused: exit 2, got $code"; return 1; }
+  dotnet "$CLI_DLL" denoise --weights "$t/w.bin" --in "$fx/ome_z4.tif" --out "$t/ome.tif" --axes ZYX >/dev/null || return 1
+  dotnet "$CLI_DLL" stack-info --in "$t/ome.tif" | grep -q "ZYX" || { echo ">> the OME stack's copy should reopen as ZYX"; return 1; }
+  dotnet "$CLI_DLL" denoise --weights "$t/w.bin" --in "$fx/imagej_calibrated_t3.tif" --out "$t/cal.tif" --baseline "$t/cal_base.tif" >/dev/null || return 1
+  if python3 -I -c "import PIL" 2>/dev/null; then
+    python3 -I tools/ci/check_tiff_tags.py "$fx/imagej_calibrated_t3.tif" "$t/cal.tif" || return 1
+    python3 -I tools/ci/check_tiff_tags.py "$fx/ome_z4.tif" "$t/ome.tif" '{"shape":[4,4,5],"axes":"ZYX"}' || return 1
+  else
+    echo "independent-reader metadata check skipped (Pillow not installed; CI installs it); unit tests cover the tags"
+  fi
+  echo ">> stacks by their axes, every plane read, the refusals work from the CLI, a model's hash is its content, and outputs keep their metadata"
 }
 
 # recorded_block <marker>: the contents of the ```text block between <!-- marker --> and <!-- /marker --> in RESULTS.md.
@@ -1115,6 +1130,12 @@ MUTATIONS=(
   '41|src/DoraBio.Core/PipelineRequests.cs|Subset, Init, InitNet, Condition|Subset, Init, Condition'
   '41|src/DoraBio.Core/Pipeline.cs|if (r.InitNet is { } given) net = given.Clone();|if (r.InitNet is { } given) net = given;'
   '41|src/DoraBio.Core/IO/WeightsFile.cs|SHA256.HashData(Serialize(net, "", DateTime.UnixEpoch))|SHA256.HashData(Serialize(net, "", DateTime.UtcNow))'
+  '41|src/DoraBio.Core/IO/ImageStack.cs|layout.Source == StackMetadata.OmeXml && layout.PlaneCount > 1 && axes is null|layout.Source == StackMetadata.OmeXml && layout.PlaneCount > 99 && axes is null'
+  '41|src/DoraBio.Core/IO/Lzw.cs|if (next >= (1 << width) - 1 && width < MaxWidth)|if (next >= (1 << width) && width < MaxWidth)'
+  '41|src/DoraBio.Core/IO/ImageStack.cs|            StackMetadata.ImageJ => _tiff?.Description,|            StackMetadata.ImageJ => software,'
+  '41|src/DoraBio.Core/IO/ImageStack.cs|            if (root.EnumerateObject().All(p => p.Name is "shape" or "axes")) return description;|            return description;'
+  '41|src/DoraBio.Core/IO/TiffStack.cs|_tags?.Resolution is { } resolution ? new TiffPageTags { Resolution = resolution } : null;|null;'
+  '41|src/DoraBio.Core/IO/ImageStack.cs|axes = layout.Axes + "YX" });|axes = "I" + "YX" });'
 )
 
 self_test() {

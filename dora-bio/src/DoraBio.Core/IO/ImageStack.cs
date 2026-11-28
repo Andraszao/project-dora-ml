@@ -18,6 +18,13 @@ public enum StackMetadata
 
     /// <summary>An MRC header (NZ sections).</summary>
     Mrc,
+
+    /// <summary>
+    /// OME-XML in the ImageDescription (brick 41). DORA doesn't read it, so the planes are unlabelled; a stack of more
+    /// than one plane is refused until <c>--axes</c> names its axis (<see cref="StackLayout.OmeXmlMessage"/>), so an
+    /// OME Z-stack can't pass for an unlabelled time-lapse.
+    /// </summary>
+    OmeXml,
 }
 
 /// <summary>
@@ -33,6 +40,12 @@ public sealed record StackLayout(string Axes, int[] Shape, StackMetadata Source)
 {
     /// <summary>The axis letters a layout may use.</summary>
     public const string Letters = "TZCSPI";
+
+    /// <summary>The refusal for a multi-plane TIFF whose planes are described in OME-XML and no axes were declared.</summary>
+    public const string OmeXmlMessage =
+        "this TIFF describes its planes in OME-XML, which DORA doesn't read, so it can't tell frames from slices or channels. " +
+        "Pass --axes TYX if the planes are one time-lapse (ZYX for a volume, CYX for channels), or, for a hyperstack, open it " +
+        "in Fiji (Bio-Formats) and save it as TIFF, which writes the ImageJ header DORA reads";
 
     /// <summary>Number of planes (the product of the shape; 1 for a single plane).</summary>
     public long PlaneCount => Shape.Aggregate(1L, (a, b) => a * b);
@@ -60,12 +73,16 @@ public sealed record StackLayout(string Axes, int[] Shape, StackMetadata Source)
     /// <exception cref="InvalidDataException">The metadata contradicts itself or the page count.</exception>
     /// <exception cref="NotSupportedException">An ImageJ stack stored with a single page directory (ImageJ does this
     /// for files over 4 GB); re-save it as a BigTIFF.</exception>
+    /// <remarks>OME-XML is recognized (<see cref="StackMetadata.OmeXml"/>) but not read: its planes come back unlabelled.</remarks>
     public static StackLayout FromTiff(string? description, int pageCount)
     {
         if (pageCount < 1) throw new InvalidDataException("A TIFF stack needs at least one page.");
         var trimmed = description?.TrimStart();
         if (trimmed is not null && trimmed.StartsWith("ImageJ=", StringComparison.Ordinal))
             return FromImageJ(trimmed, pageCount);
+        // Checked before the unlabelled fallback: OME-XML labels its planes, just not in a form DORA reads.
+        if (trimmed is not null && (trimmed.StartsWith("<?xml", StringComparison.Ordinal) || trimmed.Contains("<OME", StringComparison.Ordinal)))
+            return Unlabelled(pageCount, StackMetadata.OmeXml);
         if (trimmed is not null && trimmed.StartsWith('{') && trimmed.Contains("\"shape\"", StringComparison.Ordinal))
             return FromTifffile(trimmed, pageCount);
         return Unlabelled(pageCount, StackMetadata.None);
@@ -205,10 +222,7 @@ public sealed class ImageStack : IDisposable
             var tiff = TiffStackReader.Open(path);
             try
             {
-                var layout = StackLayout.FromTiff(tiff.Description, tiff.PageCount);
-                if (axes is not null) layout = layout.Declare(axes);
-                var (w, h) = tiff.PageSize(0);
-                return new ImageStack(tiff, null, layout, w, h, tiff.IsBigTiff ? "BigTIFF" : "TIFF");
+                return FromTiff(tiff, axes, Path.GetFileName(path));
             }
             catch
             {
@@ -239,10 +253,15 @@ public sealed class ImageStack : IDisposable
     /// <see cref="Open"/>, or declared by <paramref name="axes"/>.
     /// </summary>
     /// <exception cref="InvalidDataException">The metadata contradicts itself, the page count or the declaration.</exception>
-    /// <exception cref="NotSupportedException">An ImageJ stack over 4 GB that stores one page directory.</exception>
-    public static ImageStack FromTiff(TiffStackReader tiff, string? axes = null)
+    /// <exception cref="NotSupportedException">An ImageJ stack over 4 GB that stores one page directory, or a multi-plane
+    /// OME-XML TIFF without <paramref name="axes"/>.</exception>
+    public static ImageStack FromTiff(TiffStackReader tiff, string? axes = null) => FromTiff(tiff, axes, null);
+
+    private static ImageStack FromTiff(TiffStackReader tiff, string? axes, string? name)
     {
         var layout = StackLayout.FromTiff(tiff.Description, tiff.PageCount);
+        if (layout.Source == StackMetadata.OmeXml && layout.PlaneCount > 1 && axes is null)
+            throw new NotSupportedException($"{(name is null ? "" : name + ": ")}{StackLayout.OmeXmlMessage}.");
         if (axes is not null) layout = layout.Declare(axes);
         var (w, h) = tiff.PageSize(0);
         return new ImageStack(tiff, null, layout, w, h, tiff.IsBigTiff ? "BigTIFF" : "TIFF");
@@ -250,6 +269,60 @@ public sealed class ImageStack : IDisposable
 
     /// <summary>The planes' axes and shape.</summary>
     public StackLayout Layout { get; }
+
+    /// <summary>
+    /// The tags a denoised copy of this stack keeps (brick 41), never ones that would contradict a single-sample float32
+    /// copy: an ImageJ header verbatim (it names no pixel type; its frames, unit and display range still hold); a tifffile
+    /// header when its shape is this stack's (see <see cref="TifffileHeaderFor"/>); never OME-XML, which records the
+    /// input's pixel type and files. A file without either header (an OME-XML stack, or plain pages) whose axes were
+    /// declared gets a tifffile header with them (see <see cref="DeclaredHeader"/>), so the copy reopens with the axes the
+    /// user named. Also the first page's pixel size. <paramref name="software"/> says which DORA made it.
+    /// </summary>
+    public TiffPageTags OutputTags(string? software) => new()
+    {
+        Description = Layout.Source switch
+        {
+            StackMetadata.ImageJ => _tiff?.Description,
+            StackMetadata.Tifffile => TifffileHeaderFor(_tiff?.Description, Width, Height),
+            _ => DeclaredHeader(Layout, Width, Height),
+        },
+        Software = software,
+        Resolution = _tiff?.Resolution,
+    };
+
+    /// <summary>
+    /// tifffile's JSON header for planes whose axes were declared (any letter but I, the unlabelled axis), e.g.
+    /// {"shape": [4, 64, 96], "axes": "ZYX"}; null when nothing was declared, so an unlabelled input stays unlabelled
+    /// rather than gaining labels nobody gave it.
+    /// </summary>
+    internal static string? DeclaredHeader(StackLayout layout, int width, int height) =>
+        layout.Axes.All(c => c == 'I') ? null
+            : JsonSerializer.Serialize(new { shape = layout.Shape.Append(height).Append(width).ToArray(), axes = layout.Axes + "YX" });
+
+    /// <summary>
+    /// tifffile's JSON header for a copy: verbatim when it holds only "shape" and "axes" and its shape ends in this
+    /// stack's height and width (no samples axis: an RGB input's copy is gray); rewritten with just those two keys when it
+    /// holds others (some tools add a dtype or their own fields, which the copy needn't match); null when its shape
+    /// doesn't describe the copy's pages.
+    /// </summary>
+    internal static string? TifffileHeaderFor(string? description, int width, int height)
+    {
+        if (description is null) return null;
+        try
+        {
+            using var doc = JsonDocument.Parse(description);
+            var root = doc.RootElement;
+            int[] shape = root.GetProperty("shape").EnumerateArray().Select(e => e.GetInt32()).ToArray();
+            string? axes = root.TryGetProperty("axes", out var a) && a.ValueKind == JsonValueKind.String ? a.GetString() : null;
+            if (shape.Length < 2 || shape[^2] != height || shape[^1] != width || axes?.EndsWith('S') == true) return null;
+            if (root.EnumerateObject().All(p => p.Name is "shape" or "axes")) return description;
+            return axes is null ? JsonSerializer.Serialize(new { shape }) : JsonSerializer.Serialize(new { shape, axes });
+        }
+        catch (Exception e) when (e is JsonException or InvalidOperationException or FormatException or KeyNotFoundException)
+        {
+            return null;
+        }
+    }
 
     /// <summary>"TIFF", "BigTIFF" or "MRC".</summary>
     public string Format { get; }

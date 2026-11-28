@@ -191,10 +191,38 @@ public static class BatchDenoising
     /// <returns>The number of planes denoised.</returns>
     /// <exception cref="ArgumentException">A multi-frame model on a stack with no time axis (a Z-stack, a single plane, …).</exception>
     public static int DenoiseStack(FrameDenoiser denoiser, ImageStack input, TiffStackWriter output, TiffStackWriter? baseline = null,
-        PageDone? onPage = null, Action<string>? onNotice = null, CancellationToken cancellation = default)
+        PageDone? onPage = null, Action<string>? onNotice = null, CancellationToken cancellation = default) =>
+        DenoisePlanned(denoiser, input, output, baseline, onPage, Plan(denoiser, input, onNotice), cancellation);
+
+    /// <summary>
+    /// What a stack's run decided before its first plane (brick 41): the routing decision and the time axis. Made once,
+    /// so its notices are raised once and the output's Software tag (written with page 0) can state it.
+    /// </summary>
+    /// <param name="Correlated">The routing decision (null without a second model).</param>
+    /// <param name="Flagged">Sampled planes whose noise check said correlated.</param>
+    /// <param name="Sampled">Planes the noise check sampled (0 without a second model).</param>
+    /// <param name="Time">The time axis, for a multi-frame model; null for a single-frame one.</param>
+    internal sealed record StackPlan(bool? Correlated, int Flagged, int Sampled, TimeAxisChoice? Time);
+
+    /// <summary>Makes <paramref name="input"/>'s <see cref="StackPlan"/>, raising its notices.</summary>
+    /// <exception cref="ArgumentException">A multi-frame model on a stack without a time axis.</exception>
+    internal static StackPlan Plan(FrameDenoiser denoiser, ImageStack input, Action<string>? onNotice)
     {
-        bool? correlated = StackVerdict(denoiser, input, onNotice);
-        if (denoiser.Net.Config.WindowFrames > 1) return DenoiseWindowed(denoiser, input, output, baseline, onPage, onNotice, cancellation, correlated);
+        TimeAxisChoice? time = null;
+        if (denoiser.Net.Config.WindowFrames > 1)
+        {
+            time = TimeAxis.Resolve(input.Layout);
+            if (time.Notice is { } notice) onNotice?.Invoke(notice);
+        }
+        var (correlated, flagged, sampled) = StackVerdict(denoiser, input, onNotice);
+        return new StackPlan(correlated, flagged, sampled, time);
+    }
+
+    private static int DenoisePlanned(FrameDenoiser denoiser, ImageStack input, TiffStackWriter output, TiffStackWriter? baseline,
+        PageDone? onPage, StackPlan plan, CancellationToken cancellation)
+    {
+        bool? correlated = plan.Correlated;
+        if (plan.Time is { } time) return DenoiseWindowed(denoiser, input, output, baseline, onPage, time, cancellation, correlated);
         long allocatedAtLastCollection = GC.GetTotalAllocatedBytes();
         for (int p = 0; p < input.PlaneCount; p++)
         {
@@ -218,9 +246,9 @@ public static class BatchDenoising
     /// then goes to the same model, so a time-lapse can't switch networks, and with them its intensity response, from one
     /// frame to the next. A single image is still decided on its own (the same check on its one plane). Null without a second model.
     /// </summary>
-    private static bool? StackVerdict(FrameDenoiser denoiser, ImageStack input, Action<string>? onNotice)
+    private static (bool? Correlated, int Flagged, int Sampled) StackVerdict(FrameDenoiser denoiser, ImageStack input, Action<string>? onNotice)
     {
-        if (denoiser.CorrelatedNet is null) return null;
+        if (denoiser.CorrelatedNet is null) return (null, 0, 0);
         int n = input.PlaneCount, samples = Math.Min(RoutingSamples, n);
         int flagged = 0;
         for (int k = 0; k < samples; k++)
@@ -229,7 +257,7 @@ public static class BatchDenoising
         if (n > 1)
             onNotice?.Invoke($"noise check on {samples} of {n} planes: {flagged} look correlated, so every plane uses the " +
                              (correlated ? "correlated-noise model" : "main model"));
-        return correlated;
+        return (correlated, flagged, samples);
     }
 
     /// <summary>Page garbage allowed to build up between the full collections <c>DenoiseStack</c> requests.</summary>
@@ -257,10 +285,8 @@ public static class BatchDenoising
     /// its input leaves the plane itself out.
     /// </summary>
     private static int DenoiseWindowed(FrameDenoiser denoiser, ImageStack input, TiffStackWriter output, TiffStackWriter? baseline,
-        PageDone? onPage, Action<string>? onNotice, CancellationToken cancellation, bool? correlated = null)
+        PageDone? onPage, TimeAxisChoice time, CancellationToken cancellation, bool? correlated)
     {
-        var time = TimeAxis.Resolve(input.Layout);
-        if (time.Notice is { } notice) onNotice?.Invoke(notice);
         long allocatedAtLastCollection = GC.GetTotalAllocatedBytes();
         for (int p = 0; p < input.PlaneCount; p++)
         {
@@ -300,18 +326,44 @@ public static class BatchDenoising
                 throw new ArgumentException($"{target}: the output would overwrite the input.");
 
         using var stack = OpenAsStack(inputPath, axes);
-        using var output = TiffStackWriter.Create(outputPath, TiffSampleType.Float32);
-        using var baseline = baselinePath is null ? null : TiffStackWriter.Create(baselinePath, TiffSampleType.Float32);
-        return DenoiseStack(denoiser, stack, output, baseline, onPage, onNotice, cancellation);
+        var plan = Plan(denoiser, stack, onNotice);
+        using var output = TiffStackWriter.Create(outputPath, TiffSampleType.Float32, tags: stack.OutputTags(Software(denoiser, plan)));
+        using var baseline = baselinePath is null ? null
+            : TiffStackWriter.Create(baselinePath, TiffSampleType.Float32, tags: stack.OutputTags(BaselineSoftware));
+        return DenoisePlanned(denoiser, stack, output, baseline, onPage, plan, cancellation);
     }
+
+    /// <summary>
+    /// The Software tag (305) of a denoised file (brick 41): DORA's build, how it denoised (single-frame, or the window
+    /// along which axis), each model's content hash and, with a second model, the routing decision and the noise check
+    /// behind it. ASCII; provenance goes here so the ImageDescription can stay the input's.
+    /// </summary>
+    internal static string Software(FrameDenoiser denoiser, StackPlan plan)
+    {
+        var config = denoiser.Net.Config;
+        string mode = plan.Time is not { } time ? "single-frame"
+            : config.SkipsCentre ? $"skip-centre Noise2Noise, neighbours along {time.Axis}"
+            : $"{config.WindowFrames}-frame window along {time.Axis}";
+        var parts = new List<string> { $"DORA {Pipeline.Version}", $"denoised {mode}", $"model {WeightsFile.ContentHash(denoiser.Net)}" };
+        if (denoiser.CorrelatedNet is { } second)
+            parts.Add($"correlated-noise model {WeightsFile.ContentHash(second)} {(plan.Correlated == true ? "used" : "not used")} " +
+                      $"(noise check correlated on {plan.Flagged} of {plan.Sampled} sampled planes)");
+        if (denoiser.Stabilize) parts.Add("variance-stabilized");
+        return string.Join("; ", parts);
+    }
+
+    /// <summary>The Software tag of a bilateral baseline file: what made it, and that it isn't DORA's output.</summary>
+    internal static string BaselineSoftware => $"DORA {Pipeline.Version}; bilateral baseline for comparison (not DORA's output)";
 
     /// <summary>
     /// Number of planes in an image file: every plane of a TIFF or MRC stack (checked against its metadata, so an ImageJ
     /// stack over 4 GB that stores one page directory is refused rather than counted as one), 1 for a PNG.
     /// </summary>
-    public static int CountPages(string path)
+    /// <param name="path">The image file.</param>
+    /// <param name="axes">Declared axes ending in YX, or null (an OME-XML stack needs them; see <see cref="StackLayout.OmeXmlMessage"/>).</param>
+    public static int CountPages(string path, string? axes = null)
     {
-        using var stack = OpenAsStack(path, null);
+        using var stack = OpenAsStack(path, axes);
         return stack.PlaneCount;
     }
 

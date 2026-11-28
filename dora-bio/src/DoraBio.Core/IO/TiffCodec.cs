@@ -21,14 +21,16 @@ public enum TiffSampleType
 /// Dependency-free baseline TIFF codec for grayscale scientific images.
 ///
 /// Reads: classic TIFF and BigTIFF (files over 4 GB), little- or big-endian; strips (not tiles); 8/16/32-bit
-/// unsigned or signed integers and 32-bit floats; uncompressed, Deflate (8 / 32946) or PackBits compression;
-/// horizontal predictor (2) for integers; BlackIsZero, WhiteIsZero and RGB (averaged to gray); any page of a
-/// multi-page stack, and its ImageDescription text (where ImageJ and tifffile record a stack's shape).
-/// Not supported (a clear <see cref="NotSupportedException"/> is thrown): LZW, zstd, JPEG, tiles, palettes,
-/// planar RGB. Most microscope software can save uncompressed or Deflate TIFF.
+/// unsigned or signed integers and 32-bit floats; uncompressed, LZW (5, brick 41), Deflate (8 / 32946) or PackBits
+/// compression; horizontal predictor (2) for integers; BlackIsZero, WhiteIsZero and RGB (averaged to gray); any page
+/// of a multi-page stack, its ImageDescription text (where ImageJ and tifffile record a stack's shape), pixel size and
+/// Software tag. Not supported (a clear <see cref="NotSupportedException"/> naming the codec and a plain conversion is
+/// thrown): Zstandard, JPEG, JPEG 2000 and the other compressions, old-style (pre-6.0) LZW, tiles, palettes, planar
+/// RGB. Most microscope software can save uncompressed, LZW or Deflate TIFF.
 ///
 /// Writes: little-endian, one strip per page, uncompressed or Deflate, UInt8/UInt16/Float32; single pages or
-/// multi-page stacks (<see cref="EncodeStack"/>).
+/// multi-page stacks (<see cref="EncodeStack"/>), with an optional ImageDescription, Software tag and pixel size
+/// (<see cref="TiffPageTags"/>).
 ///
 /// <para><b>TIFF in one paragraph.</b> An 8-byte header gives the byte order ("II" = little-endian,
 /// "MM" = big-endian), the magic number 42, and the offset of the first IFD (image file directory). An IFD
@@ -43,7 +45,7 @@ public static class TiffCodec
     private const ushort TagImageWidth = 256, TagImageLength = 257, TagBitsPerSample = 258, TagCompression = 259,
         TagPhotometric = 262, TagStripOffsets = 273, TagSamplesPerPixel = 277, TagRowsPerStrip = 278,
         TagStripByteCounts = 279, TagPlanarConfig = 284, TagPredictor = 317, TagTileWidth = 322, TagSampleFormat = 339,
-        TagImageDescription = 270;
+        TagImageDescription = 270, TagXResolution = 282, TagYResolution = 283, TagResolutionUnit = 296, TagSoftware = 305;
 
     // Compression codes. 32946 is the older "Adobe Deflate" code, still written by some tools; the data is identical.
     private const ushort CompressionNone = 1, CompressionLzw = 5, CompressionDeflate = 8,
@@ -109,26 +111,27 @@ public static class TiffCodec
     /// <param name="pages">The images, first page first (at least one).</param>
     /// <param name="sampleType">Storage format for every page.</param>
     /// <param name="deflate">Compress each page's strip with zlib/Deflate.</param>
-    /// <param name="description">Optional ImageDescription for the first page (e.g. an ImageJ header), or null for none.</param>
+    /// <param name="tags">Optional description, software and resolution tags (see <see cref="TiffPageTags"/>), or null for none.</param>
     /// <returns>The complete file contents.</returns>
     /// <exception cref="ArgumentException">No pages, or the file would exceed TIFF's 4 GB offset limit.</exception>
     public static byte[] EncodeStack(IReadOnlyList<GrayImage> pages, TiffSampleType sampleType = TiffSampleType.UInt16, bool deflate = false,
-        string? description = null)
+        TiffPageTags? tags = null)
     {
         if (pages.Count == 0) throw new ArgumentException("A TIFF needs at least one page.", nameof(pages));
         using var file = new MemoryStream();
-        using (var writer = new TiffStackWriter(file, sampleType, deflate, leaveOpen: true, description: description))
+        using (var writer = new TiffStackWriter(file, sampleType, deflate, leaveOpen: true, tags: tags))
             foreach (var page in pages) writer.Append(page);
         return file.ToArray();
     }
 
     /// <summary>
-    /// One page's pixel strip and its IFD (next-IFD offset 0), with the strip to be written at <paramref name="stripOffset"/>.
-    /// With a <paramref name="descriptionLength"/> (bytes, NUL included), the IFD also points at an ImageDescription (tag 270,
-    /// ASCII) placed right after the strip and its word-alignment pad: <c>DescriptionOffset</c> says where to write it.
+    /// One page's pixel strip, its tag values that don't fit an IFD entry, and its IFD (next-IFD offset 0), with the strip
+    /// to be written at <paramref name="stripOffset"/> and the values block right after it and its word-alignment pad, at
+    /// <c>ExtraOffset</c>. The block holds, in tag order, the ImageDescription and Software text (ASCII, NUL-terminated)
+    /// and the two resolution rationals; a value of 4 bytes or fewer sits inline in its entry, as TIFF requires.
     /// </summary>
-    internal static (byte[] Strip, byte[] Ifd, uint DescriptionOffset) EncodePage(GrayImage image, TiffSampleType sampleType, bool deflate,
-        uint stripOffset, uint descriptionLength = 0)
+    internal static (byte[] Strip, byte[] Extra, uint ExtraOffset, byte[] Ifd) EncodePage(GrayImage image, TiffSampleType sampleType, bool deflate,
+        uint stripOffset, TiffPageTags? tags = null)
     {
         int bytesPerSample = sampleType switch { TiffSampleType.UInt8 => 1, TiffSampleType.UInt16 => 2, _ => 4 };
         var pixelBytes = new byte[image.Length * bytesPerSample];
@@ -150,7 +153,33 @@ public static class TiffCodec
         }
 
         byte[] strip = deflate ? Deflate(pixelBytes) : pixelBytes;
-        uint descriptionOffset = descriptionLength == 0 ? 0 : (uint)((stripOffset + (long)strip.Length + 1) / 2 * 2);
+        uint extraOffset = (uint)((stripOffset + (long)strip.Length + 1) / 2 * 2);
+        using var extra = new MemoryStream();
+        // An entry's value field: the bytes themselves when they fit (4 bytes, little-endian order), else their offset.
+        uint Place(byte[] bytes)
+        {
+            if (bytes.Length <= 4)
+            {
+                Span<byte> inline = stackalloc byte[4];
+                bytes.CopyTo(inline);
+                return BinaryPrimitives.ReadUInt32LittleEndian(inline);
+            }
+            long at = extraOffset + extra.Length;
+            if (at + bytes.Length > uint.MaxValue) throw new ArgumentException("Stack is too large for a TIFF (4 GB).");
+            extra.Write(bytes);
+            if (extra.Length % 2 == 1) extra.WriteByte(0);   // the next value (and the IFD) starts on a word boundary
+            return (uint)at;
+        }
+        static byte[] Text(string text, System.Text.Encoding encoding) => [.. encoding.GetBytes(text), 0];
+        static byte[] Rational(uint numerator, uint denominator)
+        {
+            var bytes = new byte[8];
+            BinaryPrimitives.WriteUInt32LittleEndian(bytes, numerator);
+            BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(4), denominator);
+            return bytes;
+        }
+
+        // Tags stay in ascending order, as TIFF requires.
         var list = new List<(ushort Tag, ushort Type, uint Count, uint Value)>
         {
             (TagImageWidth, 4, 1, (uint)image.Width),
@@ -159,15 +188,30 @@ public static class TiffCodec
             (TagCompression, 3, 1, deflate ? CompressionDeflate : CompressionNone),
             (TagPhotometric, 3, 1, 1),               // BlackIsZero
         };
-        if (descriptionLength > 0) list.Add((TagImageDescription, 2, descriptionLength, descriptionOffset));   // tags stay in ascending order
+        if (tags?.Description is { } description)
+        {
+            var bytes = Text(description, System.Text.Encoding.Latin1);
+            list.Add((TagImageDescription, 2, (uint)bytes.Length, Place(bytes)));
+        }
         list.AddRange(
         [
             (TagStripOffsets, 4, 1, stripOffset),
             (TagSamplesPerPixel, 3, 1, 1),
             (TagRowsPerStrip, 4, 1, (uint)image.Height),
             (TagStripByteCounts, 4, 1, (uint)strip.Length),
-            (TagSampleFormat, 3, 1, sampleType == TiffSampleType.Float32 ? 3u : 1u),
         ]);
+        if (tags?.Resolution is { } resolution)
+        {
+            list.Add((TagXResolution, 5, 1, Place(Rational(resolution.XNumerator, resolution.XDenominator))));
+            list.Add((TagYResolution, 5, 1, Place(Rational(resolution.YNumerator, resolution.YDenominator))));
+            list.Add((TagResolutionUnit, 3, 1, resolution.Unit));
+        }
+        if (tags?.Software is { } software)
+        {
+            var bytes = Text(software, System.Text.Encoding.ASCII);
+            list.Add((TagSoftware, 2, (uint)bytes.Length, Place(bytes)));
+        }
+        list.Add((TagSampleFormat, 3, 1, sampleType == TiffSampleType.Float32 ? 3u : 1u));
         var entries = list.ToArray();
 
         var ifd = new byte[2 + entries.Length * 12 + 4];
@@ -181,7 +225,7 @@ public static class TiffCodec
             if (entries[e].Type == 3) BinaryPrimitives.WriteUInt16LittleEndian(span[8..], (ushort)entries[e].Value);
             else BinaryPrimitives.WriteUInt32LittleEndian(span[8..], entries[e].Value);
         }
-        return (strip, ifd, descriptionOffset);   // next-IFD offset: 0 until EncodeStack patches it
+        return (strip, extra.ToArray(), extraOffset, ifd);   // next-IFD offset: 0 until the writer patches it
     }
 
     /// <summary>Validates the header and returns a reader for its byte order and variant, plus the first IFD's offset.</summary>
@@ -217,6 +261,19 @@ public static class TiffCodec
         var reader = new TiffReader(stream, littleEndian, big);
         return PageDirectories(reader, reader.FirstIfd());
     }
+
+    /// <summary>The pixel size of the page whose IFD is at <paramref name="ifd"/> (tags 282, 283, 296), or null without both resolutions.</summary>
+    internal static TiffResolution? Resolution(Stream stream, bool littleEndian, bool big, long ifd)
+    {
+        var r = new TiffReader(stream, littleEndian, big);
+        if (r.Rational(ifd, TagXResolution) is not { } x || r.Rational(ifd, TagYResolution) is not { } y) return null;
+        uint unit = r.Tag(ifd, TagResolutionUnit).FirstOrDefault(2u);   // TIFF's default: inch
+        return new TiffResolution(x.Numerator, x.Denominator, y.Numerator, y.Denominator, (ushort)Math.Min(unit, ushort.MaxValue));
+    }
+
+    /// <summary>The Software tag (305) of the page whose IFD is at <paramref name="ifd"/>, or null.</summary>
+    internal static string? Software(Stream stream, bool littleEndian, bool big, long ifd) =>
+        new TiffReader(stream, littleEndian, big).Text(ifd, TagSoftware);
 
     /// <summary>The ImageDescription tag (270) of the page whose IFD is at <paramref name="ifd"/>, or null.</summary>
     internal static string? Description(Stream stream, bool littleEndian, bool big, long ifd) =>
@@ -263,9 +320,8 @@ public static class TiffCodec
         if (samplesPerPixel > 1 && planar != 1) throw new NotSupportedException("Planar-separated multichannel TIFF is not supported.");
         if (predictor is not (1 or 2)) throw new NotSupportedException($"TIFF predictor {predictor} is not supported.");
         if (predictor == 2 && sampleFormat == 3) throw new NotSupportedException("Horizontal predictor on float TIFF is not supported.");
-        if (compression == CompressionLzw) throw new NotSupportedException("LZW-compressed TIFF is not supported; re-save uncompressed or with Deflate/ZIP.");
-        if (compression is not (CompressionNone or CompressionDeflate or CompressionAdobeDeflate or CompressionPackBits))
-            throw new NotSupportedException($"TIFF compression {compression} is not supported.");
+        if (compression is not (CompressionNone or CompressionLzw or CompressionDeflate or CompressionAdobeDeflate or CompressionPackBits))
+            throw new NotSupportedException(UnsupportedCompression(compression));
 
         // 3. Strips: each holds RowsPerStrip whole rows (the last may hold fewer), stored or compressed on its own.
         //    Decode them in order into one contiguous buffer of height × rowBytes.
@@ -287,6 +343,7 @@ public static class TiffCodec
             byte[] decoded = compression switch
             {
                 CompressionNone => stored.ToArray(),
+                CompressionLzw => Lzw.Decode(stored, expected),
                 CompressionPackBits => UnpackBits(stored, expected),
                 _ => Inflate(stored),
             };
@@ -329,6 +386,43 @@ public static class TiffCodec
             (32, 2) => little ? BinaryPrimitives.ReadInt32LittleEndian(s) : BinaryPrimitives.ReadInt32BigEndian(s),
             _ => little ? BinaryPrimitives.ReadUInt32LittleEndian(s) : BinaryPrimitives.ReadUInt32BigEndian(s),
         };
+    }
+
+    /// <summary>
+    /// The refusal for a compression DORA doesn't decode: its code, its name when it's a known one (e.g. 50000,
+    /// Zstandard), and the plain conversion that fixes it. The copy tifffile writes that way has no axis labels, hence the
+    /// <c>--axes</c> advice.
+    /// </summary>
+    internal static string UnsupportedCompression(uint compression)
+    {
+        string? name = compression switch
+        {
+            2 or 3 or 4 => "CCITT fax",
+            6 or 7 => "JPEG",
+            33003 or 33005 or 34712 => "JPEG 2000",
+            34887 => "LERC",
+            34925 => "LZMA",
+            34933 => "PNG",
+            50000 => "Zstandard",
+            50001 => "WebP",
+            50002 => "JPEG XL",
+            _ => null,
+        };
+        return $"TIFF compression {compression}{(name is null ? "" : $" ({name})")} is not supported. Save an uncompressed copy, e.g. in " +
+               "Python: tifffile.imwrite(dst, tifffile.imread(src)), and denoise that; for a stack, add --axes TYX (a time-lapse) or " +
+               "--axes ZYX (a volume), since the copy has no axis labels.";
+    }
+
+    /// <summary>The stored (still compressed) bytes of each strip of a page, in order: for tests of the decompressors.</summary>
+    internal static List<byte[]> StoredStrips(byte[] file, int page)
+    {
+        var r = OpenHeader(file, out long ifd);
+        for (int p = 0; p < page; p++) ifd = r.NextIfd(ifd);
+        long[] offsets = r.Offsets(ifd, TagStripOffsets, required: true);
+        long[] counts = r.Offsets(ifd, TagStripByteCounts, required: true);
+        var strips = new List<byte[]>(offsets.Length);
+        for (int s = 0; s < offsets.Length; s++) strips.Add(r.Slice(offsets[s], counts[s]).ToArray());
+        return strips;
     }
 
     /// <summary>Predictor 2 stores each sample as the difference from the previous sample of the same channel.</summary>
@@ -504,7 +598,7 @@ public static class TiffCodec
             1 or 2 or 6 or 7 => 1,
             3 or 8 => 2,
             4 or 9 or 13 => 4,
-            16 or 17 or 18 => 8,
+            5 or 10 or 16 or 17 or 18 => 8,   // RATIONAL and SRATIONAL are two 32-bit integers
             _ => 0,
         };
 
@@ -544,7 +638,7 @@ public static class TiffCodec
                 if (required) throw new InvalidDataException($"TIFF is missing required tag {tag}.");
                 return [];
             }
-            if (type == 2) throw new InvalidDataException($"TIFF tag {tag} has unexpected type {type}.");
+            if (type is 2 or 5 or 10) throw new InvalidDataException($"TIFF tag {tag} has unexpected type {type}.");
             int size = TypeSize(type);
             var block = Slice(valuesAt, count * size);
             var values = new ulong[count];
@@ -571,6 +665,14 @@ public static class TiffCodec
             var result = new long[values.Length];
             for (int k = 0; k < values.Length; k++) result[k] = Position(values[k]);
             return result;
+        }
+
+        /// <summary>A RATIONAL tag's first value (numerator, denominator), or null if it's absent or of another type.</summary>
+        public (uint Numerator, uint Denominator)? Rational(long ifd, ushort tag)
+        {
+            if (!Find(ifd, tag, out ushort type, out long count, out long valuesAt) || type != 5 || count < 1) return null;
+            var block = Slice(valuesAt, 8);
+            return (Read32(block), Read32(block[4..]));
         }
 
         /// <summary>An ASCII tag's text up to its first NUL (null if absent or not ASCII). Read as UTF-8, which ASCII is.</summary>

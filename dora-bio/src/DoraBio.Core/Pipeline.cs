@@ -74,7 +74,7 @@ public static class Pipeline
             return new DenoiseOutcome(plan.Count, pages, routedTotal, clock.Elapsed.TotalSeconds, notices);
         }
 
-        int total = BatchDenoising.CountPages(input);
+        int total = BatchDenoising.CountPages(input, request.Axes);
         int routedPages = 0;
         BatchDenoising.PageDone report = total == 1
             ? (_, raw, r) =>

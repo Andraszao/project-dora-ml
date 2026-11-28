@@ -27,7 +27,7 @@ public class PilotCoreTests
     {
         string path = Path.Combine(TestUtil.TempDirectory(), "zstack.tif");
         var planes = Enumerable.Range(0, 5).Select(k => TestUtil.RandomImage(16, 12, 40 + k)).ToList();
-        File.WriteAllBytes(path, TiffCodec.EncodeStack(planes, TiffSampleType.Float32, description: "ImageJ=1.54f\nimages=5\nslices=5\n"));
+        File.WriteAllBytes(path, TiffCodec.EncodeStack(planes, TiffSampleType.Float32, tags: new TiffPageTags { Description = "ImageJ=1.54f\nimages=5\nslices=5\n" }));
         return path;
     }
 
@@ -145,7 +145,7 @@ public class PilotCoreTests
         // reading that as one page would silently drop the rest, so every path refuses it.
         string big = Path.Combine(dir, "big", "imagej_big.tif");
         Directory.CreateDirectory(Path.GetDirectoryName(big)!);
-        File.WriteAllBytes(big, TiffCodec.EncodeStack([TestUtil.RandomImage(8, 8, 2)], description: "ImageJ=1.54f\nimages=3\nslices=3\n"));
+        File.WriteAllBytes(big, TiffCodec.EncodeStack([TestUtil.RandomImage(8, 8, 2)], tags: new TiffPageTags { Description = "ImageJ=1.54f\nimages=3\nslices=3\n" }));
         Assert.Throws<NotSupportedException>(() => BatchDenoising.CountPages(big));
         Assert.Throws<NotSupportedException>(() => DatasetLoader.Planes(big));
         var denoiser = new FrameDenoiser(DenoisingNet.Create(new NetConfig(4, [1, 1]), 3), tileCore: 16);
@@ -158,7 +158,7 @@ public class PilotCoreTests
     {
         var pages = new[] { TestUtil.RandomImage(6, 5, 1), TestUtil.RandomImage(6, 5, 2) };
         const string header = "ImageJ=1.54f\nimages=2\nframes=2\n";
-        var bytes = TiffCodec.EncodeStack(pages, TiffSampleType.Float32, description: header);
+        var bytes = TiffCodec.EncodeStack(pages, TiffSampleType.Float32, tags: new TiffPageTags { Description = header });
         using var reader = new TiffStackReader(new MemoryStream(bytes));
         Assert.Equal(header, reader.Description);
         Assert.Equal(pages[1].Pixels, reader.ReadPage(1).Pixels);
@@ -256,5 +256,149 @@ public class PilotCoreTests
         {
             Directory.Delete(dir, recursive: true);
         }
+    }
+
+    /// <summary>Pixel (x, y) of lzw_noise_u16_pred2.tif: a hash, so the strip doesn't compress (make_pilot_fixtures.py).</summary>
+    private static float NoiseHash(int x, int y)
+    {
+        uint h = ((uint)x * 73856093u) ^ ((uint)y * 19349663u);
+        h *= 2654435761u;
+        return h >> 16;
+    }
+
+    [Fact]
+    public void LzwFromAnIndependentEncoderDecodesExactlyThroughEveryCodeWidthAndTableReset()
+    {
+        // imagecodecs' encoder (via tifffile), horizontal predictor, one 18 KB strip of incompressible pixels: its codes
+        // grow from 9 to 12 bits and the table is cleared and rebuilt along the way.
+        var bytes = File.ReadAllBytes(TestUtil.Fixture("lzw_noise_u16_pred2.tif"));
+        var image = TiffCodec.Decode(bytes);
+        Assert.Equal((96, 96), (image.Width, image.Height));
+        for (int y = 0; y < 96; y++)
+            for (int x = 0; x < 96; x++)
+                Assert.Equal(NoiseHash(x, y), image.Pixels[y * 96 + x]);
+        var strip = Assert.Single(TiffCodec.StoredStrips(bytes, 0));
+        Lzw.Decode(strip, 96 * 96 * 2, out var stats);
+        Assert.Equal(12, stats.MaxCodeWidth);
+        Assert.True(stats.TableResets >= 1, $"the table should be reset at least once, was {stats.TableResets}");
+
+        // Long runs: strings that repeat themselves (the code being defined is the one read, "KwKwK").
+        var runs = TiffCodec.Decode(File.ReadAllBytes(TestUtil.Fixture("lzw_runs_u8.tif")));
+        for (int y = 0; y < 64; y++)
+            for (int x = 0; x < 64; x++)
+                Assert.Equal(y < 32 ? 7 : (x * 3 + y) % 256, runs.Pixels[y * 64 + x]);
+
+        // Refusals: old-style (pre-TIFF 6.0, least-significant bit first) LZW, and a strip that stops short.
+        var old = Assert.Throws<NotSupportedException>(() => Lzw.Decode([0x00, 0x01, 0x02, 0x03], 4));
+        Assert.Contains("old-style LZW", old.Message);
+        Assert.Throws<InvalidDataException>(() => Lzw.Decode(strip.AsSpan(0, strip.Length / 2), 96 * 96 * 2));
+    }
+
+    [Fact]
+    public void OtherCompressionsAreRefusedByNameWithAPlainConversion()
+    {
+        string message = TiffCodec.UnsupportedCompression(50000);
+        Assert.Contains("TIFF compression 50000 (Zstandard)", message);
+        Assert.Contains("tifffile.imwrite(dst, tifffile.imread(src))", message);
+        Assert.Contains("--axes ZYX", message);
+        Assert.Contains("(JPEG 2000)", TiffCodec.UnsupportedCompression(34712));
+        Assert.StartsWith("TIFF compression 12345 is not supported.", TiffCodec.UnsupportedCompression(12345));
+    }
+
+    [Fact]
+    public void OmeXmlStacksAreRefusedUntilTheirAxisIsDeclared()
+    {
+        // tifffile's OME-TIFF writer: 4 planes that OME-XML labels Z. DORA doesn't read OME-XML, and must not let the
+        // planes fall through to "unlabelled, so frames" (brick 41).
+        string ome = TestUtil.Fixture("ome_z4.tif");
+        var error = Assert.Throws<NotSupportedException>(() => ImageStack.Open(ome));
+        Assert.Contains("OME-XML", error.Message);
+        Assert.Contains("--axes", error.Message);
+        Assert.Throws<NotSupportedException>(() => BatchDenoising.CountPages(ome));
+        Assert.Throws<NotSupportedException>(() => DatasetLoader.Planes(ome));
+        using (var volume = ImageStack.Open(ome, "ZYX"))
+        {
+            Assert.Equal(("Z", StackMetadata.OmeXml), (volume.Layout.Axes, volume.Layout.Source));
+            Assert.Throws<ArgumentException>(() => TimeAxis.Resolve(volume.Layout));
+            // A float32 copy must not claim the input's OME pixel type; it records the declared axes instead.
+            Assert.Equal("""{"shape":[4,4,5],"axes":"ZYX"}""", volume.OutputTags(null).Description);
+        }
+        using (var movie = ImageStack.Open(ome, "TYX")) Assert.Equal('T', TimeAxis.Resolve(movie.Layout).Axis);
+        Assert.Equal(4, BatchDenoising.CountPages(ome, "ZYX"));
+
+        // Denoised with --axes ZYX, the copy reopens as a volume with no declaration (and without OME-XML).
+        string dir = TestUtil.TempDirectory();
+        try
+        {
+            var denoiser = new FrameDenoiser(DenoisingNet.Create(new NetConfig(4, [1, 1]), 3), tileCore: 16);
+            string copy = Path.Combine(dir, "ome_denoised.tif");
+            Assert.Equal(4, BatchDenoising.DenoiseFile(denoiser, ome, copy, axes: "ZYX"));
+            using var reopened = ImageStack.Open(copy);
+            Assert.Equal(("Z", StackMetadata.Tifffile), (reopened.Layout.Axes, reopened.Layout.Source));
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+        // Planes nobody labelled stay unlabelled in the copy.
+        using var plain = ImageStack.Open(TestUtil.Fixture("stack2.tif"));
+        Assert.Equal(StackMetadata.None, plain.Layout.Source);
+        Assert.Null(plain.OutputTags(null).Description);
+    }
+
+    [Fact]
+    public void ADenoisedCopyKeepsTheImageJHeaderAndPixelSizeAndSaysWhichDoraMadeIt()
+    {
+        // tifffile's ImageJ writer: 3 frames, 0.65 µm pixels (resolution 20/13 per unit, unit=um in the header), 2 s apart.
+        string input = TestUtil.Fixture("imagej_calibrated_t3.tif");
+        string dir = TestUtil.TempDirectory();
+        try
+        {
+            var net = DenoisingNet.Create(new NetConfig(4, [1, 2, 1]), seed: 1);
+            string output = Path.Combine(dir, "out.tif"), baseline = Path.Combine(dir, "baseline.tif");
+            BatchDenoising.DenoiseFile(new FrameDenoiser(net, tileCore: 16), input, output, baseline);
+            using var source = TiffStackReader.Open(input);
+            foreach (string written in new[] { output, baseline })
+            {
+                using var copy = TiffStackReader.Open(written);
+                Assert.Equal(source.Description, copy.Description);   // verbatim: frames, unit and interval as ImageJ wrote them
+                Assert.Equal(new TiffResolution(20, 13, 20, 13, 1), copy.Resolution);
+                Assert.Equal(3, copy.PageCount);
+                for (int p = 1; p < 3; p++) Assert.Equal(copy.Resolution, copy.PageResolution(p));
+                Assert.StartsWith($"DORA {Pipeline.Version}; ", copy.Software);
+                Assert.DoesNotContain("tifffile", copy.Software);
+            }
+            using (var denoised = TiffStackReader.Open(output))
+            {
+                Assert.Contains($"model {WeightsFile.ContentHash(net)}", denoised.Software);
+                Assert.Contains("single-frame", denoised.Software);
+            }
+            using (var filtered = TiffStackReader.Open(baseline)) Assert.Contains("bilateral baseline", filtered.Software);
+
+            // The description goes on page 0 only, the Software on page 0 only; the pixels are what they were without tags.
+            var plain = TiffCodec.EncodeStack([TestUtil.RandomImage(6, 5, 3)], TiffSampleType.Float32);
+            var tagged = TiffCodec.EncodeStack([TestUtil.RandomImage(6, 5, 3)], TiffSampleType.Float32,
+                tags: new TiffPageTags { Description = "ImageJ=1.54f\n", Software = "x", Resolution = new TiffResolution(3, 1, 3, 1, 3) });
+            Assert.Equal(TiffCodec.Decode(plain).Pixels, TiffCodec.Decode(tagged).Pixels);
+            using var short_ = new TiffStackReader(new MemoryStream(tagged));
+            Assert.Equal("x", short_.Software);   // 2 bytes with its NUL: stored inline in the entry, as TIFF requires
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void ATifffileHeaderIsKeptOnlyWhereItCantContradictTheFloatCopy()
+    {
+        // Shape and axes only: verbatim. Other keys (a dtype the float32 copy no longer has): just shape and axes.
+        // A shape that isn't the pages' (an RGB input, whose copy is gray): dropped.
+        Assert.Equal("{\"shape\": [2, 4, 5], \"axes\": \"TYX\"}", ImageStack.TifffileHeaderFor("{\"shape\": [2, 4, 5], \"axes\": \"TYX\"}", 5, 4));
+        Assert.Equal("{\"shape\":[2,4,5],\"axes\":\"TYX\"}",
+            ImageStack.TifffileHeaderFor("{\"shape\": [2, 4, 5], \"axes\": \"TYX\", \"dtype\": \"uint16\"}", 5, 4));
+        Assert.Equal("{\"shape\":[2,4,5]}", ImageStack.TifffileHeaderFor("{\"shape\": [2, 4, 5], \"exposure\": 0.1}", 5, 4));
+        Assert.Null(ImageStack.TifffileHeaderFor("{\"shape\": [4, 5, 3], \"axes\": \"YXS\"}", 5, 4));
+        Assert.Null(ImageStack.TifffileHeaderFor("{\"shape\": [2, 8, 8]}", 5, 4));
     }
 }

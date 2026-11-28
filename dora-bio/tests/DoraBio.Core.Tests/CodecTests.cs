@@ -68,10 +68,11 @@ public class CodecTests
     }
 
     [Fact]
-    public void LzwIsRejectedWithAnActionableMessage()
+    public void LzwFromLibtiffDecodesExactly()
     {
-        var error = Assert.Throws<NotSupportedException>(() => LoadFixture("gray16_lzw.tif"));
-        Assert.Contains("Deflate", error.Message);
+        // Brick 41: LZW is read (it was refused before). libtiff's encoder, via Pillow; PilotCoreTests covers tifffile's
+        // (imagecodecs) with the predictor, 12-bit codes and table resets.
+        AssertImage(LoadFixture("gray16_lzw.tif"), Gray16);
     }
 
     [Fact]
